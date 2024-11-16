@@ -6,7 +6,7 @@
  */
 
 #include "hermes.h"
-
+#include "hermes_api.h"
 #include "llvh/Support/Compiler.h"
 
 #include "hermes/ADT/ManagedChunkedList.h"
@@ -63,6 +63,7 @@ int __llvm_profile_dump(void);
 }
 #endif
 
+
 // Android OSS has a bug where exception data can get mangled when going via
 // fbjni. This macro can be used to expose the root cause in adb log. It serves
 // no purpose other than as a backup.
@@ -77,6 +78,13 @@ int __llvm_profile_dump(void);
 namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
+
+napi_status hermes_create_napi_env(
+    ::hermes::vm::Runtime &runtime,
+    bool isInspectable,
+    std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
+    const ::hermes::vm::RuntimeConfig &runtimeConfig,
+    napi_env *env);
 
 namespace facebook {
 namespace hermes {

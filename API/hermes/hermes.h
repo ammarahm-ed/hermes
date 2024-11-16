@@ -20,6 +20,8 @@
 #include <jsi/jsi.h>
 #include <unordered_map>
 
+#include "js_native_api.h"
+
 struct HermesTestHelper;
 
 namespace hermes {
@@ -48,7 +50,7 @@ class HermesRuntimeImpl;
 class HERMES_EXPORT HermesRuntime : public jsi::Runtime {
  public:
 
-  napi_status HermesRuntime::createNapiEnv(napi_env *env);
+  napi_status createNapiEnv(napi_env *env);
 
   static bool isHermesBytecode(const uint8_t *data, size_t len);
   // Returns the supported bytecode version.
