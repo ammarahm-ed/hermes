@@ -3576,6 +3576,7 @@ napi_status NapiEnvironment::throwJSError(
 
   vm::Handle<vm::JSError> errorHandle = makeHandle(
       vm::JSError::create(runtime_, makeHandle<vm::JSObject>(&prototype)));
+      
   CHECK_NAPI(
       checkJSErrorStatus(vm::JSError::recordStackTrace(errorHandle, runtime_)));
   CHECK_NAPI(
