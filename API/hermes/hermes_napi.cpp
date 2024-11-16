@@ -229,7 +229,10 @@ union HermesBuildVersionInfo {
 #define HERMES_FILE_VERSION_BIN 0,0,0,0
 #endif
 
-constexpr HermesBuildVersionInfo HermesBuildVersion = {{HERMES_FILE_VERSION_BIN}};
+
+constexpr HermesBuildVersionInfo HermesBuildVersion = {{0,0,0,0}};
+
+
 
 //=============================================================================
 // Forward declaration of all classes.
