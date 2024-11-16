@@ -1070,6 +1070,11 @@ inline const HermesRuntimeImpl *impl(const HermesRuntime *rt) {
 
 } // namespace
 
+napi_status HermesRuntime::createNapiEnv(napi_env *env) {
+  auto imp = impl(this);
+  return hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
+}
+
 bool HermesRuntime::isHermesBytecode(const uint8_t *data, size_t len) {
   return hbc::BCProviderFromBuffer::isBytecodeStream(
       llvh::ArrayRef<uint8_t>(data, len));

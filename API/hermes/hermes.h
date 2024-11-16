@@ -47,6 +47,9 @@ class HermesRuntimeImpl;
 /// Represents a Hermes JS runtime.
 class HERMES_EXPORT HermesRuntime : public jsi::Runtime {
  public:
+
+  napi_status HermesRuntime::createNapiEnv(napi_env *env);
+
   static bool isHermesBytecode(const uint8_t *data, size_t len);
   // Returns the supported bytecode version.
   static uint32_t getBytecodeVersion();
