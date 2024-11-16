@@ -7,6 +7,8 @@
 
 #include "hermes.h"
 #include "hermes_api.h"
+#include "ScriptStore.h"
+
 #include "llvh/Support/Compiler.h"
 
 #include "hermes/ADT/ManagedChunkedList.h"
@@ -78,6 +80,7 @@ int __llvm_profile_dump(void);
 namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
+
 
 napi_status hermes_create_napi_env(
     ::hermes::vm::Runtime &runtime,
