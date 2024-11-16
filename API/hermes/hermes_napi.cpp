@@ -71,7 +71,6 @@
 #include "MurmurHash.h"
 #include "ScriptStore.h"
 #include "hermes_api.h"
-#include <iostream>
 
 #include "hermes/BCGen/HBC/BytecodeProviderFromSrc.h"
 #include "hermes/DebuggerAPI.h"
@@ -107,29 +106,15 @@
     }                                           \
   } while (false)
 
-#ifdef __APPLE__
-
-// Crash if the condition is false.
-#define CRASH_IF_FALSE(condition) \
-  do {                             \
-    if (!(condition)) {            \
-      std::terminate();            \
-    }                              \
-  } while (false)
-
-#else
-
 // Crash if the condition is false.
 #define CRASH_IF_FALSE(condition)  \
   do {                             \
     if (!(condition)) {            \
       assert(false && #condition); \
-      *((int *)nullptr) = 1;       \
+      __builtin_trap();            \
       std::terminate();            \
     }                              \
   } while (false)
-
-#endif
 
 // Return error status with message.
 #define ERROR_STATUS(status, ...) \
@@ -224,15 +209,12 @@ union HermesBuildVersionInfo {
   uint64_t version;
 };
 
-#ifdef __APPLE__
-#undef HERMES_FILE_VERSION_BIN
-#define HERMES_FILE_VERSION_BIN 0,0,0,0
+#ifndef HERMESVM_LEAN
+// TODO: [vmoroz] Fix it
+// constexpr HermesBuildVersionInfo HermesBuildVersion =
+// {HERMES_FILE_VERSION_BIN};
+constexpr HermesBuildVersionInfo HermesBuildVersion = {{0, 0, 0, 1}};
 #endif
-
-
-constexpr HermesBuildVersionInfo HermesBuildVersion = {{0,0,0,0}};
-
-
 
 //=============================================================================
 // Forward declaration of all classes.
@@ -247,6 +229,9 @@ class NapiHandleScope;
 class NapiHostFunctionContext;
 template <class T>
 class NapiOrderedSet;
+class NapiPendingFinalizers;
+template <class T>
+class NapiRefCountedPtr;
 class NapiScriptModel;
 template <class T>
 class NapiStableAddressStack;
@@ -376,6 +361,69 @@ size_t convertUTF16ToUTF8WithReplacements(
 // Definitions of classes and structs.
 //=============================================================================
 
+struct NapiAttachTag {
+} attachTag;
+
+// A smart pointer for types that implement intrusive ref count using
+// methods incRefCount and decRefCount.
+template <typename T>
+class NapiRefCountedPtr final {
+ public:
+  NapiRefCountedPtr() noexcept = default;
+
+  explicit NapiRefCountedPtr(T *ptr, NapiAttachTag) noexcept : ptr_(ptr) {}
+
+  NapiRefCountedPtr(const NapiRefCountedPtr &other) noexcept
+      : ptr_(other.ptr_) {
+    if (ptr_ != nullptr) {
+      ptr_->incRefCount();
+    }
+  }
+
+  NapiRefCountedPtr(NapiRefCountedPtr &&other)
+      : ptr_(std::exchange(other.ptr_, nullptr)) {}
+
+  ~NapiRefCountedPtr() noexcept {
+    if (ptr_ != nullptr) {
+      ptr_->decRefCount();
+    }
+  }
+
+  NapiRefCountedPtr &operator=(std::nullptr_t) noexcept {
+    if (ptr_ != nullptr) {
+      ptr_->decRefCount();
+    }
+    ptr_ = nullptr;
+    return *this;
+  }
+
+  NapiRefCountedPtr &operator=(const NapiRefCountedPtr &other) noexcept {
+    if (this != &other) {
+      NapiRefCountedPtr temp(std::move(*this));
+      ptr_ = other.ptr_;
+      if (ptr_ != nullptr) {
+        ptr_->incRefCount();
+      }
+    }
+    return *this;
+  }
+
+  NapiRefCountedPtr &operator=(NapiRefCountedPtr &&other) noexcept {
+    if (this != &other) {
+      NapiRefCountedPtr temp(std::move(*this));
+      ptr_ = std::exchange(other.ptr_, nullptr);
+    }
+    return *this;
+  }
+
+  T *operator->() noexcept {
+    return ptr_;
+  }
+
+ private:
+  T *ptr_{};
+};
+
 // Stack of elements where the address of items is not changed as we add new
 // values. It is achieved by keeping a SmallVector of the ChunkSize arrays
 // called chunks. We use it to keep addresses of GC roots associated with the
@@ -467,7 +515,7 @@ class NapiStableAddressStack final {
  private:
   // The size of 64 entries per chunk is arbitrary at this point.
   // It can be adjusted depending on perf data.
-  static const constexpr size_t ChunkSize = 64;
+  static const size_t ChunkSize = 64;
 
   llvh::SmallVector<std::unique_ptr<T[]>, ChunkSize> storage_;
   size_t size_{0};
@@ -1336,6 +1384,12 @@ class NapiEnvironment final {
   // Internal function to create weak root.
   vm::WeakRoot<vm::JSObject> createWeakRoot(vm::JSObject *object) noexcept;
 
+  void createWeakRoot(
+      vm::WeakRoot<vm::JSObject> *weakRoot,
+      vm::JSObject *object) noexcept;
+
+  void clearWeakRoot(vm::WeakRoot<vm::JSObject> *weakRoot) noexcept;
+
   // Internal function to lock a weak root.
   const vm::PinnedHermesValue &lockWeakRoot(
       vm::WeakRoot<vm::JSObject> &weakRoot) noexcept;
@@ -1681,6 +1735,9 @@ class NapiEnvironment final {
   // Controls the lifetime of this class instances.
   std::atomic<int> refCount_{1};
 
+  // Used for safe update of finalizer queue.
+  NapiRefCountedPtr<NapiPendingFinalizers> pendingFinalizers_;
+
   // Reference to the wrapped Hermes runtime.
   vm::Runtime &runtime_;
 
@@ -1769,6 +1826,73 @@ class NapiEnvironment final {
   static constexpr int32_t kExternalTagSlotIndex = 0;
 };
 
+// NapiPendingFinalizers is used to update the pending finalizer list in a
+// thread safe way when a NapiExternalValue is destroyed from a GC background
+// thread.
+class NapiPendingFinalizers {
+ public:
+  // Create new instance of NapiPendingFinalizers.
+  static NapiRefCountedPtr<NapiPendingFinalizers> create() noexcept {
+    return NapiRefCountedPtr<NapiPendingFinalizers>(
+        new NapiPendingFinalizers(), attachTag);
+  }
+
+  // Add pending finalizers from a NapiExternalValue destructor.
+  // It can be called from JS or GC background threads.
+  void addPendingFinalizers(
+      std::unique_ptr<NapiLinkedList<NapiFinalizer>> &&finalizers) noexcept {
+    std::scoped_lock lock{mutex_};
+    finalizers_.push_back(std::move(finalizers));
+  }
+
+  // Apply pending finalizers to the finalizer queue.
+  // It must be called from a JS thread.
+  void applyPendingFinalizers(NapiEnvironment *env) noexcept {
+    std::vector<std::unique_ptr<NapiLinkedList<NapiFinalizer>>> finalizers;
+    {
+      std::scoped_lock lock{mutex_};
+      if (finalizers_.empty()) {
+        return;
+      }
+      // Move to a local variable to unlock the mutex earlier.
+      finalizers = std::move(finalizers_);
+    }
+
+    for (auto &finalizerList : finalizers) {
+      finalizerList->forEach([env](NapiFinalizer *finalizer) {
+        env->addToFinalizerQueue(finalizer);
+      });
+    }
+  }
+
+ private:
+  friend class NapiRefCountedPtr<NapiPendingFinalizers>;
+
+  NapiPendingFinalizers() noexcept = default;
+
+  void incRefCount() noexcept {
+    int refCount = refCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+    CRASH_IF_FALSE(refCount > 1 && "The ref count cannot bounce from zero.");
+    CRASH_IF_FALSE(
+        refCount < std::numeric_limits<int>::max() &&
+        "The ref count is too big.");
+  }
+
+  void decRefCount() noexcept {
+    int refCount = refCount_.fetch_sub(1, std::memory_order_release) - 1;
+    CRASH_IF_FALSE(refCount >= 0 && "The ref count must not be negative.");
+    if (refCount == 0) {
+      std::atomic_thread_fence(std::memory_order_acquire);
+      delete this;
+    }
+  }
+
+ private:
+  std::atomic<int> refCount_{1};
+  std::recursive_mutex mutex_;
+  std::vector<std::unique_ptr<NapiLinkedList<NapiFinalizer>>> finalizers_;
+};
+
 // RAII class to control scope of napi_value variables and return values.
 class NapiHandleScope final {
  public:
@@ -1818,16 +1942,22 @@ class NapiHandleScope final {
 // Keep external data with an object.
 class NapiExternalValue final : public vm::DecoratedObject::Decoration {
  public:
-  NapiExternalValue(NapiEnvironment &env) noexcept : env_(env) {}
-  NapiExternalValue(NapiEnvironment &env, void *nativeData) noexcept
-      : env_(env), nativeData_(nativeData) {}
+  NapiExternalValue(const NapiRefCountedPtr<NapiPendingFinalizers>
+                        &pendingFinalizers) noexcept
+      : pendingFinalizers_(pendingFinalizers) {}
+  NapiExternalValue(
+      const NapiRefCountedPtr<NapiPendingFinalizers> &pendingFinalizers,
+      void *nativeData) noexcept
+      : pendingFinalizers_(pendingFinalizers), nativeData_(nativeData) {}
 
   NapiExternalValue(const NapiExternalValue &other) = delete;
   NapiExternalValue &operator=(const NapiExternalValue &other) = delete;
 
+  // The destructor is called by GC. It can be called either from JS or GC
+  // threads. We move the finalizers to NapiPendingFinalizers to be accessed
+  // only from JS thread.
   ~NapiExternalValue() override {
-    finalizers_.forEach(
-        [&](NapiFinalizer *finalizer) { env_.addToFinalizerQueue(finalizer); });
+    pendingFinalizers_->addPendingFinalizers(std::move(finalizers_));
   }
 
   size_t getMallocSize() const override {
@@ -1835,7 +1965,7 @@ class NapiExternalValue final : public vm::DecoratedObject::Decoration {
   }
 
   void addFinalizer(NapiFinalizer *finalizer) noexcept {
-    finalizers_.pushBack(finalizer);
+    finalizers_->pushBack(finalizer);
   }
 
   void *nativeData() noexcept {
@@ -1847,9 +1977,10 @@ class NapiExternalValue final : public vm::DecoratedObject::Decoration {
   }
 
  private:
-  NapiEnvironment &env_;
+  NapiRefCountedPtr<NapiPendingFinalizers> pendingFinalizers_;
   void *nativeData_{};
-  NapiLinkedList<NapiFinalizer> finalizers_;
+  std::unique_ptr<NapiLinkedList<NapiFinalizer>> finalizers_{
+      std::make_unique<NapiLinkedList<NapiFinalizer>>()};
 };
 
 // Keep native data associated with a function.
@@ -1865,6 +1996,10 @@ class NapiHostFunctionContext final {
 
   static vm::CallResult<vm::HermesValue>
   func(void *context, vm::Runtime &runtime, vm::NativeArgs hvArgs);
+
+  static void finalizeState(vm::GC & /*gc*/, vm::NativeState *ns) {
+    delete reinterpret_cast<class NapiHostFunctionContext *>(ns->context());
+  }
 
   static void finalize(void *context) {
     delete reinterpret_cast<class NapiHostFunctionContext *>(context);
@@ -2227,7 +2362,7 @@ class NapiComplexReference : public NapiReference {
     if (refCount_ == 0) {
       value_ = env.lockWeakRoot(weakRoot_);
     }
-    CRASH_IF_FALSE(++refCount_ < MaxRefCount && "The ref count is too big.");
+    CRASH_IF_FALSE(++refCount_ < maxRefCount_ && "The ref count is too big.");
     result = refCount_;
     return env.clearLastNativeError();
   }
@@ -2241,9 +2376,9 @@ class NapiComplexReference : public NapiReference {
     }
     if (--refCount_ == 0) {
       if (value_.isObject()) {
-        weakRoot_ = std::move(env.createWeakRoot(getObjectUnsafe(value_)));
+        env.createWeakRoot(&weakRoot_, getObjectUnsafe(value_));
       } else {
-        weakRoot_ = vm::WeakRoot<vm::JSObject>{};
+        env.clearWeakRoot(&weakRoot_);
       }
     }
     result = refCount_;
@@ -2284,7 +2419,7 @@ class NapiComplexReference : public NapiReference {
   vm::PinnedHermesValue value_;
   vm::WeakRoot<vm::JSObject> weakRoot_;
 
-  static constexpr uint32_t MaxRefCount =
+  static constexpr uint32_t maxRefCount_ =
       std::numeric_limits<uint32_t>::max() / 2;
 };
 
@@ -2308,6 +2443,8 @@ class NapiFinalizeHintHolder : public TBaseReference {
 // Store and call finalizeCallback if it is not null.
 template <class TBaseReference>
 class NapiFinalizeCallbackHolder : public TBaseReference {
+  using Super = TBaseReference;
+
  public:
   template <class... TArgs>
   NapiFinalizeCallbackHolder(
@@ -2320,7 +2457,8 @@ class NapiFinalizeCallbackHolder : public TBaseReference {
     if (finalizeCallback_) {
       napi_finalize finalizeCallback =
           std::exchange(finalizeCallback_, nullptr);
-      env.callFinalizer(finalizeCallback, this->nativeData(), this->finalizeHint());
+      env.callFinalizer(
+          finalizeCallback, Super::nativeData(), Super::finalizeHint());
     }
     return napi_ok;
   }
@@ -2348,13 +2486,15 @@ class NapiNativeDataHolder : public TBaseReference {
 // Common code for references inherited from NapiFinalizer.
 template <class TBaseReference>
 class NapiFinalizingReference final : public TBaseReference {
+  using Super = TBaseReference;
+
  public:
   template <class... TArgs>
   NapiFinalizingReference(TArgs &&...args) noexcept
       : TBaseReference(std::forward<TArgs>(args)...) {}
 
   void finalize(NapiEnvironment &env) noexcept override {
-    this->callFinalizeCallback(env);
+    Super::callFinalizeCallback(env);
     NapiReference::deleteReference(
         env, this, NapiReference::ReasonToDelete::FinalizerCall);
   }
@@ -2971,9 +3111,9 @@ class NapiDoubleConversion final {
 // native thread stack in Android (1MiB) and on MacOS's thread stack (512 KiB)
 // Calculated by: (thread stack size - size of runtime -
 // 8 memory pages for other stuff in the thread)
-constexpr unsigned kMaxNumRegisters =
-    (512 * 1024 - sizeof(vm::Runtime) - 4096 * 8) /
-    sizeof(vm::PinnedHermesValue);
+// constexpr unsigned kMaxNumRegisters =
+//     (512 * 1024 - sizeof(vm::Runtime) - 4096 * 8) /
+//     sizeof(vm::PinnedHermesValue);
 
 template <class T, std::size_t N>
 constexpr std::size_t size(const T (&array)[N]) noexcept {
@@ -3098,7 +3238,7 @@ size_t convertUTF16ToUTF8WithReplacements(
         c32 = UNICODE_REPLACEMENT_CHARACTER;
       } else {
         // Decode surrogate pair and increment, because we consumed two chars.
-        c32 = decodeSurrogatePair(c, *cur++);
+        c32 = utf16SurrogatePairToCodePoint(c, *cur++);
       }
     } else {
       // Not a surrogate.
@@ -3129,7 +3269,8 @@ NapiEnvironment::NapiEnvironment(
     bool isInspectable,
     std::shared_ptr<facebook::jsi::PreparedScriptStore> scriptCache,
     const vm::RuntimeConfig &runtimeConfig) noexcept
-    : runtime_(runtime),
+    : pendingFinalizers_(NapiPendingFinalizers::create()),
+      runtime_(runtime),
       scriptCache_(std::move(scriptCache)),
       isInspectable_(isInspectable) {
   switch (runtimeConfig.getCompilationMode()) {
@@ -3240,6 +3381,9 @@ NapiEnvironment::NapiEnvironment(
 }
 
 NapiEnvironment::~NapiEnvironment() {
+  pendingFinalizers_->applyPendingFinalizers(this);
+  pendingFinalizers_ = nullptr;
+
   isShuttingDown_ = true;
   if (instanceData_) {
     instanceData_->finalize(*this);
@@ -3277,8 +3421,8 @@ vm::Runtime &NapiEnvironment::runtime() noexcept {
   return runtime_;
 }
 
-NapiStableAddressStack<vm::PinnedHermesValue> &
-NapiEnvironment::napiValueStack() noexcept {
+NapiStableAddressStack<vm::PinnedHermesValue>
+    &NapiEnvironment::napiValueStack() noexcept {
   return napiValueStack_;
 }
 
@@ -3614,7 +3758,8 @@ napi_status NapiEnvironment::createNumber(
     T value,
     napi_value *result) noexcept {
   return setResult(
-      vm::HermesValue::encodeNumberValue(static_cast<double>(value)), result);
+      vm::HermesValue::encodeUntrustedNumberValue(static_cast<double>(value)),
+      result);
 }
 
 napi_status NapiEnvironment::getNumberValue(
@@ -4739,10 +4884,6 @@ napi_status NapiEnvironment::callFunction(
     RETURN_FAILURE_IF_FALSE(!callRes->get().isEmpty());
     return scope.setResult(callRes->get());
   }
-
-  bool unusedResult;
-  drainMicrotasks(0, &unusedResult);
-
   return clearLastNativeError();
 }
 
@@ -4782,7 +4923,7 @@ napi_status NapiEnvironment::createNewInstance(
   //
   // Note that 13.2.2.1-4 are also handled by the call to newObject.
   vm::CallResult<vm::PseudoHandle<vm::JSObject>> thisRes =
-      vm::Callable::createThisForConstruct(ctorHandle, runtime_);
+      vm::Callable::createThisForConstruct_RJS(ctorHandle, runtime_);
   CHECK_NAPI(checkJSErrorStatus(thisRes));
   // We need to capture this in case the ctor doesn't return an object,
   // we need to return this object.
@@ -4805,7 +4946,7 @@ napi_status NapiEnvironment::createNewInstance(
     CHECK_NAPI(checkJSErrorStatus(runtime_.raiseStackOverflow(
         vm::Runtime::StackOverflowKind::NativeStack)));
   }
-  for (size_t i = 0; i != argCount; ++i) {
+  for (size_t i = 0; i < argCount; ++i) {
     newFrame->getArgRef(static_cast<int32_t>(i)) = *phv(args[i]);
   }
   // The last parameter indicates that this call should construct an object.
@@ -4818,10 +4959,6 @@ napi_status NapiEnvironment::createNewInstance(
   // 13.2.2.10:
   //    Return obj
   vm::HermesValue resultValue = callRes->get();
-
-  bool unusedResult;
-  drainMicrotasks(0, &unusedResult);
-
   return scope.setResult(
       resultValue.isObject() ? std::move(resultValue)
                              : thisHandle.getHermesValue());
@@ -4924,16 +5061,9 @@ napi_status NapiEnvironment::getPredefinedProperty(
     TObject object,
     NapiPredefined key,
     napi_value *result) noexcept {
-  auto jsObjectInit = makeHandle<vm::JSObject>(object);
-  auto jsObject = jsObjectInit->isProxyObject()
-                    ? makeHandle<vm::JSObject>(
-                        vm::JSProxy::getTarget(
-                            vmcast<vm::JSObject>(*jsObjectInit), runtime_))
-                    : jsObjectInit;
-  
   vm::SymbolID symbol = getPredefinedSymbol(key);
   vm::NamedPropertyDescriptor desc;
-  bool hasOwned = vm::JSObject::getOwnNamedDescriptor(jsObject, runtime_, symbol, desc);
+  bool hasOwned = vm::JSObject::getOwnNamedDescriptor(makeHandle<vm::JSObject>(object), runtime_, symbol, desc);
   if (!hasOwned) {
     return getUndefined(result);
   }
@@ -5146,7 +5276,7 @@ napi_status NapiEnvironment::defineClass(
       makeHandle<vm::JSObject>(std::move(ctorRes));
 
   vm::NativeState *ns = vm::NativeState::create(
-      runtime_, context.release(), &NapiHostFunctionContext::finalize);
+      runtime_, context.release(), &NapiHostFunctionContext::finalizeState);
 
   vm::CallResult<bool> res = vm::JSObject::defineOwnProperty(
       classHandle,
@@ -5383,7 +5513,7 @@ vm::Handle<vm::DecoratedObject> NapiEnvironment::createExternalObject(
       makeHandle(vm::DecoratedObject::create(
           runtime_,
           makeHandle<vm::JSObject>(&runtime_.objectPrototype),
-          std::make_unique<NapiExternalValue>(*this, nativeData),
+          std::make_unique<NapiExternalValue>(pendingFinalizers_, nativeData),
           /*additionalSlotCount:*/ 1));
 
   // Add a special tag to differentiate from other decorated objects.
@@ -5485,6 +5615,7 @@ void NapiEnvironment::addToFinalizerQueue(NapiFinalizer *finalizer) noexcept {
 napi_status NapiEnvironment::processFinalizerQueue() noexcept {
   if (!isRunningFinalizers_) {
     isRunningFinalizers_ = true;
+    pendingFinalizers_->applyPendingFinalizers(this);
     NapiReference::finalizeAll(*this, finalizerQueue_);
     isRunningFinalizers_ = false;
   }
@@ -5659,6 +5790,20 @@ vm::WeakRoot<vm::JSObject> NapiEnvironment::createWeakRoot(
   return vm::WeakRoot<vm::JSObject>(object, runtime_);
 }
 
+// We must work aound the missing assignment operator for WeakRoot.
+void NapiEnvironment::createWeakRoot(
+    vm::WeakRoot<vm::JSObject> *weakRoot,
+    vm::JSObject *object) noexcept {
+  weakRoot->~WeakRoot();
+  ::new (weakRoot) vm::WeakRoot<vm::JSObject>(object, runtime_);
+}
+
+void NapiEnvironment::clearWeakRoot(
+    vm::WeakRoot<vm::JSObject> *weakRoot) noexcept {
+  weakRoot->~WeakRoot();
+  ::new (weakRoot) vm::WeakRoot<vm::JSObject>();
+}
+
 const vm::PinnedHermesValue &NapiEnvironment::lockWeakRoot(
     vm::WeakRoot<vm::JSObject> &weakRoot) noexcept {
   if (vm::JSObject *ptr = weakRoot.get(runtime_, runtime_.getHeap())) {
@@ -5722,9 +5867,9 @@ napi_status NapiEnvironment::createExternalArrayBuffer(
         reinterpret_cast<uint8_t *>(externalData),
         byteLength,
         externalBuffer.release(),
-        [](void *context) {
+        [](vm::GC & /*gc*/, vm::NativeState *ns) {
           std::unique_ptr<NapiExternalBuffer> externalBuffer(
-              reinterpret_cast<NapiExternalBuffer *>(context));
+              reinterpret_cast<NapiExternalBuffer *>(ns->context()));
         });
   }
   return scope.setResult(std::move(buffer));
@@ -5878,13 +6023,14 @@ napi_status NapiEnvironment::createTypedArray(
   return scope.setResult(std::move(typedArray));
 }
 
-template <vm::CellKind CellKind>
-/*static*/ constexpr const char *NapiEnvironment::getTypedArrayName() noexcept {
-  static constexpr const char *names[] = {
+static constexpr const char *typedArrayNames[] = {
 #define TYPED_ARRAY(name, type) #name "Array",
 #include "hermes/VM/TypedArrays.def"
-  };
-  return names
+};
+
+template <vm::CellKind CellKind>
+/*static*/ constexpr const char *NapiEnvironment::getTypedArrayName() noexcept {
+  return typedArrayNames
       [static_cast<int>(CellKind) -
        static_cast<int>(vm::CellKind::TypedArrayBaseKind_first)];
 }
@@ -6380,10 +6526,7 @@ napi_status NapiEnvironment::runScript(
   // To delete prepared script after execution.
   std::unique_ptr<NapiScriptModel> scriptModel{
       reinterpret_cast<NapiScriptModel *>(preparedScript)};
-  auto rv = scope.setResult(runPreparedScript(preparedScript, result));
-  bool unusedResult;
-  drainMicrotasks(0, &unusedResult);
-  return rv;
+  return scope.setResult(runPreparedScript(preparedScript, result));
 }
 
 napi_status NapiEnvironment::createPreparedScript(
@@ -6558,7 +6701,7 @@ vm::Handle<> NapiEnvironment::makeHandle(vm::Handle<> value) noexcept {
 
 // Useful for converting index to a name/index handle.
 vm::Handle<> NapiEnvironment::makeHandle(uint32_t value) noexcept {
-  return makeHandle(vm::HermesValue::encodeDoubleValue(value));
+  return makeHandle(vm::HermesValue::encodeUntrustedNumberValue(value));
 }
 
 template <class T>
