@@ -789,6 +789,8 @@ class NapiEnvironment final {
   // Exported function to get `int64_t` value from a napi_value number.
   napi_status getNumberValue(napi_value value, int64_t *result) noexcept;
 
+  napi_status IsFloatValue(napi_value value, bool *result) noexcept;
+
   //-----------------------------------------------------------------------------
   // Methods to work with Strings
   //-----------------------------------------------------------------------------
@@ -3800,6 +3802,18 @@ napi_status NapiEnvironment::getNumberValue(
   RETURN_STATUS_IF_FALSE(phv(value)->isNumber(), napi_number_expected);
   return setResult(
       NapiDoubleConversion::toInt64(phv(value)->getDouble()), result);
+}
+
+napi_status NapiEnvironment::IsFloatValue(
+    napi_value value,
+    bool *result) noexcept {
+  CHECK_ARG(value);
+  CHECK_ARG(result);
+  RETURN_STATUS_IF_FALSE(phv(value)->isNumber(), napi_number_expected);
+
+  *result = phv(value)->isDouble();
+
+  return napi_ok;
 }
 
 //-----------------------------------------------------------------------------
@@ -7010,6 +7024,11 @@ napi_typeof(napi_env env, napi_value value, napi_valuetype *result) {
 napi_status NAPI_CDECL
 napi_get_value_double(napi_env env, napi_value value, double *result) {
   return CHECKED_ENV(env)->getNumberValue(value, result);
+}
+
+napi_status NAPI_CDECL
+napi_is_float(napi_env env, napi_value value, bool *result) {
+  return CHECKED_ENV(env)->IsFloatValue(value, result);
 }
 
 napi_status NAPI_CDECL
