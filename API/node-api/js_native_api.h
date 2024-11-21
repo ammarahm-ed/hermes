@@ -117,6 +117,9 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_typeof(napi_env env,
 NAPI_EXTERN napi_status NAPI_CDECL napi_get_value_double(napi_env env,
                                                          napi_value value,
                                                          double* result);
+
+NAPI_EXTERN napi_status NAPI_CDECL napi_is_float(napi_env env, napi_value value, bool *result);
+
 NAPI_EXTERN napi_status NAPI_CDECL napi_get_value_int32(napi_env env,
                                                         napi_value value,
                                                         int32_t* result);
