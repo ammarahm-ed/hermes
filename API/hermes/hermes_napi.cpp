@@ -621,6 +621,12 @@ class NapiEnvironment final {
   ~NapiEnvironment();
 
  public:
+   int jsEnterState = 0;
+   void enter() noexcept;
+   void exit() noexcept;
+
+
+ public:
   // Exported function to increment the ref count by one.
   napi_status incRefCount() noexcept;
 
@@ -3407,6 +3413,17 @@ NapiEnvironment::~NapiEnvironment() {
   CRASH_IF_FALSE(references_.isEmpty());
 }
 
+void NapiEnvironment::enter() noexcept {
+  this->jsEnterState++;
+}
+
+void NapiEnvironment::exit() noexcept {
+  if (--this->jsEnterState <= 0) {
+    bool unusedResult;
+    this->drainMicrotasks(0, &unusedResult);
+  }
+}
+
 napi_status NapiEnvironment::incRefCount() noexcept {
   refCount_++;
   return napi_status::napi_ok;
@@ -4891,14 +4908,23 @@ napi_status NapiEnvironment::callFunction(
   for (uint32_t i = 0; i < argCount; ++i) {
     newFrame->getArgRef(static_cast<int32_t>(i)) = *phv(args[i]);
   }
+
+  this->enter();
+
   vm::CallResult<vm::PseudoHandle<>> callRes =
       vm::Callable::call(funcHandle, runtime_);
+  
+  this->exit();
+
   CHECK_NAPI(checkJSErrorStatus(callRes, napi_pending_exception));
 
   if (result) {
     RETURN_FAILURE_IF_FALSE(!callRes->get().isEmpty());
     return scope.setResult(callRes->get());
   }
+
+
+
   return clearLastNativeError();
 }
 
@@ -4964,10 +4990,13 @@ napi_status NapiEnvironment::createNewInstance(
   for (size_t i = 0; i < argCount; ++i) {
     newFrame->getArgRef(static_cast<int32_t>(i)) = *phv(args[i]);
   }
+   this->enter();
   // The last parameter indicates that this call should construct an object.
   vm::CallResult<vm::PseudoHandle<>> callRes =
       vm::Callable::call(ctorHandle, runtime_);
   CHECK_NAPI(checkJSErrorStatus(callRes, napi_pending_exception));
+
+  this->exit();
 
   // 13.2.2.9:
   //    If Type(result) is Object then return result
@@ -6529,6 +6558,7 @@ napi_status NapiEnvironment::runScript(
   CHECK_NAPI(getStringValueUTF8(source, buffer.get(), sourceSize + 1, nullptr));
 
   jsr_prepared_script preparedScript{};
+
   CHECK_NAPI(createPreparedScript(
       reinterpret_cast<uint8_t *>(buffer.release()),
       sourceSize,
@@ -6541,6 +6571,7 @@ napi_status NapiEnvironment::runScript(
   // To delete prepared script after execution.
   std::unique_ptr<NapiScriptModel> scriptModel{
       reinterpret_cast<NapiScriptModel *>(preparedScript)};
+
   return scope.setResult(runPreparedScript(preparedScript, result));
 }
 
@@ -6678,11 +6709,13 @@ napi_status NapiEnvironment::runPreparedScript(
   CHECK_ARG(preparedScript);
   const NapiScriptModel *hermesPrep =
       reinterpret_cast<NapiScriptModel *>(preparedScript);
+  this->enter();
   vm::CallResult<vm::HermesValue> res = runtime_.runBytecode(
       hermesPrep->bytecodeProvider(),
       hermesPrep->runtimeFlags(),
       hermesPrep->sourceURL(),
       vm::Runtime::makeNullHandle<vm::Environment>());
+  this->exit();
   return scope.setResult(std::move(res));
 }
 
