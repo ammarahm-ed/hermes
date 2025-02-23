@@ -6484,7 +6484,7 @@ napi_status NapiEnvironment::adjustExternalMemory(
     int64_t *adjusted_value) noexcept {
   if (change_in_bytes > 0) runtime_.getHeap().creditExternalMemory(runtime_.getGlobal().get(), change_in_bytes);
   else runtime_.getHeap().debitExternalMemory(runtime_.getGlobal().get(), -change_in_bytes);
-  externalMemorySize = += change_in_bytes;
+  externalMemorySize += change_in_bytes;
   *adjusted_value = externalMemorySize;
   return napi_ok;
 }
