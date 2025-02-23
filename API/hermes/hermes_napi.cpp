@@ -926,9 +926,6 @@ class NapiEnvironment final {
   // Exported function to create a new Object instance.
   napi_status createObject(napi_value *result) noexcept;
 
-  napi_status NapiEnvironment::createHostObject(
-    std::shared_ptr<facebook::jsi::HostObject> ho, napi_value* result) noexcept;
-
   // Exported function to get object's prototype.
   napi_status getPrototype(napi_value object, napi_value *result) noexcept;
 
@@ -4260,15 +4257,6 @@ napi_status NapiEnvironment::createObject(napi_value *result) noexcept {
   return scope.setResult(vm::JSObject::create(runtime_));
 }
 
-napi_status NapiEnvironment::createHostObject(
-  std::shared_ptr<facebook::jsi::HostObject> ho, napi_value* result) {
-vm::GCScope gcScope(runtime_);
-auto objRes = vm::HostObject::createWithoutPrototype(
-    runtime_, std::make_unique<JsiProxy>(*this, ho));
-checkStatus(objRes.getStatus());
-return scope.setResult(objRes);
-}
-
 napi_status NapiEnvironment::getPrototype(
     napi_value object,
     napi_value *result) noexcept {
@@ -6494,7 +6482,7 @@ napi_status NapiEnvironment::drainMicrotasks(
 napi_status NapiEnvironment::adjustExternalMemory(
     int64_t change_in_bytes,
     int64_t *adjusted_value) noexcept {
-  if (change_in_bytes > 0) runtime_.getHeap().creditExternalMemory(runtime_.getGlobal().get(), change_in_bytes)
+  if (change_in_bytes > 0) runtime_.getHeap().creditExternalMemory(runtime_.getGlobal().get(), change_in_bytes);
   else runtime_.getHeap().debitExternalMemory(runtime_.getGlobal().get(), -change_in_bytes);
   externalMemorySize = += change_in_bytes;
   *adjusted_value = externalMemorySize;
