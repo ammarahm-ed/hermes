@@ -1167,6 +1167,190 @@ TEST_P(HermesRuntimeTest, NativeExceptionDoesNotUseGlobalError) {
       test.call(*rt).getString(*rt).utf8(*rt));
 }
 
+TEST_P(HermesRuntimeTest, UTF16ConversionTest) {
+  String ascii = String::createFromUtf8(*rt, "z");
+  EXPECT_EQ(ascii.utf16(*rt), u"z");
+
+  String foobar = String::createFromUtf8(*rt, "foobar");
+  EXPECT_EQ(foobar.utf16(*rt), u"foobar");
+
+  // 你 in UTF-8 encoding is 0xe4 0xbd 0xa0 and 好 is 0xe5 0xa5 0xbd
+  // 你 in UTF-16 encoding is 0x4f60 and 好 is 0x597d
+  String chineseHello = String::createFromUtf8(*rt, "\xe4\xbd\xa0\xe5\xa5\xbd");
+  EXPECT_EQ(chineseHello.utf16(*rt), u"\x4f60\x597d");
+
+  // 👍 in UTF-8 encoding is 0xf0 0x9f 0x91 0x8d
+  // 👍 in UTF-16 encoding is 0xd83d 0xdc4d
+  String thumbsUpEmoji = String::createFromUtf8(*rt, "\xf0\x9f\x91\x8d");
+  EXPECT_EQ(thumbsUpEmoji.utf16(*rt), u"\xd83d\xdc4d");
+
+  // String is foobar👍你好
+  String combined = String::createFromUtf8(
+      *rt, "foobar\xf0\x9f\x91\x8d\xe4\xbd\xa0\xe5\xa5\xbd");
+  EXPECT_EQ(combined.utf16(*rt), u"foobar\xd83d\xdc4d\x4f60\x597d");
+
+  // We've only added specific implementations for HermesRuntime. The ABI
+  // runtime will convert to UTF8 first, causing the lone surrogates to be
+  // replaced with the Unicode replacement character. We will eventually add the
+  // UTF16-related APIs to the ABI Runtime and test these cases as well.
+  if (dynamic_cast<HermesRuntime *>(rt.get())) {
+    // Thumbs up emoji is encoded as 0xd83d 0xdc4d. These test UTF16 with lone
+    // high and low surrogates.
+    String loneHighSurrogate = eval("'\\ud83d'").getString(*rt);
+    EXPECT_EQ(loneHighSurrogate.utf16(*rt), std::u16string(u"\xd83d"));
+
+    String loneLowSurrogate = eval("'\\udc4d'").getString(*rt);
+    EXPECT_EQ(loneLowSurrogate.utf16(*rt), std::u16string(u"\xdc4d"));
+  }
+}
+
+TEST_P(HermesRuntimeTest, CreateFromUtf16Test) {
+  std::u16string utf16 = u"foobar";
+
+  auto jsString = String::createFromUtf16(*rt, utf16);
+  EXPECT_EQ(jsString.utf16(*rt), utf16);
+  auto prop = PropNameID::forUtf16(*rt, utf16);
+  EXPECT_EQ(prop.utf16(*rt), utf16);
+
+  // 👋 in UTF-16 encoding is 0xd83d 0xdc4b
+  utf16 = u"hello!\xd83d\xdc4b";
+  jsString = String::createFromUtf16(*rt, utf16.data(), utf16.length());
+  EXPECT_EQ(jsString.utf16(*rt), utf16);
+  prop = PropNameID::forUtf16(*rt, utf16);
+  EXPECT_EQ(prop.utf16(*rt), utf16);
+
+  // We've only added specific UTF16 implementation HermesRuntime. The ABI
+  // runtime will convert to UTF8 first, then to UTF16. This causes lone
+  // surrogates to be replaced with the Unicode replacement character. Until we
+  // add the UF16 implementation to the ABI Runtime, gate the lone surrogate
+  // test case.
+  if (dynamic_cast<HermesRuntime *>(rt.get())) {
+    // Thumbs up emoji is encoded as 0xd83d 0xdc4d. The following tests String
+    // creation with a lone surrogate.
+    utf16 = u"\xd83d";
+    jsString = String::createFromUtf16(*rt, utf16.data(), utf16.length());
+    EXPECT_EQ(jsString.utf16(*rt), utf16);
+    prop = PropNameID::forUtf16(*rt, utf16);
+    EXPECT_EQ(prop.utf16(*rt), utf16);
+  }
+}
+
+TEST_P(HermesRuntimeTest, GetStringDataTest) {
+  std::u16string buf;
+  auto cb = [&buf](bool ascii, const void *data, size_t num) {
+    // this callback copies the string content, but removes every 'o' character
+    if (ascii) {
+      const char *begin = (const char *)data;
+      const char *end = (const char *)data + num;
+      while (begin < end) {
+        char curr = begin[0];
+        if (curr != 'o') {
+          buf.push_back((char16_t)curr);
+        }
+        begin++;
+      }
+    } else {
+      const char16_t *begin = (const char16_t *)data;
+      const char16_t *end = (const char16_t *)data + num;
+      while (begin < end) {
+        char16_t curr = begin[0];
+        if (curr != 'o') {
+          buf.push_back(curr);
+        }
+        begin++;
+      }
+    }
+  };
+
+  String asciiString = String::createFromUtf8(*rt, "foobar");
+  asciiString.getStringData(*rt, cb);
+  EXPECT_EQ(buf, u"fbar");
+  buf.clear();
+
+  // String is foobar👍你好
+  String utf16Str = String::createFromUtf8(
+      *rt, "foobar\xf0\x9f\x91\x8d\xe4\xbd\xa0\xe5\xa5\xbd");
+  utf16Str.getStringData(*rt, cb);
+  EXPECT_EQ(buf, u"fbar\xd83d\xdc4d\x4f60\x597d");
+  buf.clear();
+}
+
+TEST_P(HermesRuntimeTest, GetPropNameIdDataTest) {
+  std::u16string buf;
+  auto cb = [&buf](bool ascii, const void *data, size_t num) {
+    // this callback copies the string content, but removes every 'o' character
+    if (ascii) {
+      const char *begin = (const char *)data;
+      const char *end = (const char *)data + num;
+      while (begin < end) {
+        char curr = begin[0];
+        if (curr != 'o') {
+          buf.push_back((char16_t)curr);
+        }
+        begin++;
+      }
+    } else {
+      const char16_t *begin = (const char16_t *)data;
+      const char16_t *end = (const char16_t *)data + num;
+      while (begin < end) {
+        char16_t curr = begin[0];
+        if (curr != 'o') {
+          buf.push_back(curr);
+        }
+        begin++;
+      }
+    }
+  };
+
+  PropNameID ascii = PropNameID::forAscii(*rt, "foobar");
+  ascii.getPropNameIdData(*rt, cb);
+  EXPECT_EQ(buf, u"fbar");
+  buf.clear();
+
+  // String is foobar👍你好
+  PropNameID utf16 = PropNameID::forUtf8(
+      *rt, "foobar\xf0\x9f\x91\x8d\xe4\xbd\xa0\xe5\xa5\xbd");
+  utf16.getPropNameIdData(*rt, cb);
+  EXPECT_EQ(buf, u"fbar\xd83d\xdc4d\x4f60\x597d");
+  buf.clear();
+}
+
+TEST_P(HermesRuntimeTest, SetPrototypeOf) {
+  Object prototypeObj(*rt);
+  prototypeObj.setProperty(*rt, "someProperty", 123);
+  Value prototype(*rt, prototypeObj);
+
+  Object child(*rt);
+  child.setPrototype(*rt, prototype);
+  EXPECT_EQ(child.getProperty(*rt, "someProperty").getNumber(), 123);
+
+  auto getPrototypeRes = child.getPrototype(*rt).asObject(*rt);
+  EXPECT_EQ(getPrototypeRes.getProperty(*rt, "someProperty").getNumber(), 123);
+
+  // Tests null value as prototype
+  child.setPrototype(*rt, Value::null());
+  EXPECT_TRUE(child.getPrototype(*rt).isNull());
+
+  // Throw when prototype is neither an Object nor null
+  EXPECT_THROW(child.setPrototype(*rt, Value(1)), JSError);
+}
+
+TEST_P(HermesRuntimeTest, CreateObjectWithPrototype) {
+  Object prototypeObj(*rt);
+  prototypeObj.setProperty(*rt, "someProperty", 123);
+  Value prototype(*rt, prototypeObj);
+
+  Object child = Object::create(*rt, prototype);
+  EXPECT_EQ(child.getProperty(*rt, "someProperty").getNumber(), 123);
+
+  // Tests null value as prototype
+  child = Object::create(*rt, Value::null());
+  EXPECT_TRUE(child.getPrototype(*rt).isNull());
+
+  // Throw when prototype is neither an Object nor null
+  EXPECT_THROW(Object::create(*rt, Value(1)), JSError);
+}
+
 INSTANTIATE_TEST_CASE_P(
     Runtimes,
     HermesRuntimeTest,
