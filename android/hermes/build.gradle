@@ -27,7 +27,7 @@ android {
         arguments "-DIMPORT_HERMESC=${rootProject.ext.hermesC}"
         arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
         arguments "-DHERMES_BUILD_SHARED_JSI=True"
-        targets "libhermesvm"
+        targets "hermesvm"
       }
     }
     ndk {
