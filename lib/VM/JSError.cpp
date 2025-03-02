@@ -523,34 +523,6 @@ ExecutionStatus JSError::recordStackTrace(
 ExecutionStatus JSError::setupStack(
     Handle<JSObject> selfHandle,
     Runtime &runtime) {
-  // Lazily allocate the accessor.
-  if (runtime.jsErrorStackAccessor.isUndefined()) {
-    // This code path allocates quite a few handles, so make sure we
-    // don't disturb the parent GCScope and free them.
-    GCScope gcScope{runtime};
-
-    auto getter = NativeFunction::create(
-        runtime,
-        Handle<JSObject>::vmcast(&runtime.functionPrototype),
-        nullptr,
-        errorStackGetter,
-        Predefined::getSymbolID(Predefined::emptyString),
-        0,
-        Runtime::makeNullHandle<JSObject>());
-
-    auto setter = NativeFunction::create(
-        runtime,
-        Handle<JSObject>::vmcast(&runtime.functionPrototype),
-        nullptr,
-        errorStackSetter,
-        Predefined::getSymbolID(Predefined::emptyString),
-        1,
-        Runtime::makeNullHandle<JSObject>());
-
-    auto crtRes = PropertyAccessor::create(runtime, getter, setter);
-    runtime.jsErrorStackAccessor = crtRes;
-  }
-
   auto accessor =
       Handle<PropertyAccessor>::vmcast(&runtime.jsErrorStackAccessor);
 
