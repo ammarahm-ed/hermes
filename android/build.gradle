@@ -17,6 +17,10 @@ buildscript {
     if (hermes_ws == null || hermes_ws == "") {
       throw new InvalidUserDataException("HERMES_WS_DIR is not set")
     }
+    
+    println("HERMES_WS_DIR: ${hermes_ws}")
+
+
     outputDir = file("${hermes_ws}/build_android/outputs")
     outputDir.mkdirs()
     file("${outputDir}/aar").mkdirs()
