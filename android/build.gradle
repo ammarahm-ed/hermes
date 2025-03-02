@@ -17,9 +17,16 @@ buildscript {
     if (hermes_ws == null || hermes_ws == "") {
       throw new InvalidUserDataException("HERMES_WS_DIR is not set")
     }
-    
-    println("HERMES_WS_DIR: ${hermes_ws}")
 
+    def wsDir = new File(hermes_ws + "/build")
+    if (wsDir.exists()) {
+      println("\nContents of HERMES_WS_DIR:")
+      wsDir.eachFileRecurse { file ->
+        println " - ${file.path.replace(hermes_ws, '')}"
+      }
+    } else {
+      println("WARNING: HERMES_WS_DIR directory does not exist!")
+    }
 
     outputDir = file("${hermes_ws}/build_android/outputs")
     outputDir.mkdirs()
