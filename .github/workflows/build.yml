@@ -18,7 +18,7 @@ jobs:
         path: hermes
     - name: Build Hermes Compiler
       run: |-
-        cmake -S hermes -B build ${RELEASE_FLAGS}
+        cmake -S hermes -B build -G Ninja ${RELEASE_FLAGS}
         # Build the Hermes compiler so that the cross compiler build can
         # access it to build the VM
         cmake --build ./build --target hermesc -j 4
