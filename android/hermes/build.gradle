@@ -20,7 +20,6 @@ android {
     externalNativeBuild {
       cmake {
         arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
-        arguments "-DHERMESVM_COMPRESSED_POINTERS=ON"
         arguments "-DHERMESVM_HEAP_HV_MODE=HEAP_HV_PREFER32"
         arguments "-DHERMES_IS_ANDROID=True"
         arguments "-DHERMES_IS_MOBILE_BUILD=0"
