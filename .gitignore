@@ -9,6 +9,7 @@ TAGS
 buck-out
 .buckd
 .buckconfig.local
+staging
 
 # Python
 *.pyc

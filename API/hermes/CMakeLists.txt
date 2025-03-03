@@ -55,10 +55,10 @@ add_subdirectory(cdp)
 
 set(api_sources
   hermes.cpp
-  hermes_napi.cpp
+  # hermes_napi.cpp
   DebuggerAPI.cpp
   AsyncDebuggerAPI.cpp
-  MurmurHash.cpp
+  # MurmurHash.cpp
   RuntimeTaskRunner.cpp
   ${CDP_API_SOURCES}
   )

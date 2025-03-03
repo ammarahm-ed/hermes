@@ -22,6 +22,7 @@
 #include <unordered_map>
 
 typedef struct napi_env__ *napi_env;
+typedef int napi_status;
 struct HermesTestHelper;
 struct SHUnit;
 struct SHRuntime;
@@ -52,7 +53,7 @@ class HermesRuntimeImpl;
 class HERMES_EXPORT HermesRuntime : public jsi::Runtime {
  public:
 
-  void createNapiEnv(napi_env *env);
+  napi_status createNapiEnv(napi_env *env);
 
   static bool isHermesBytecode(const uint8_t *data, size_t len);
   // Returns the supported bytecode version.

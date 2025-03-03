@@ -6,7 +6,7 @@
  */
 
 #include "hermes.h"
-#include "ScriptStore.h"
+// #include "ScriptStore.h"
 
 #include "llvh/Support/Compiler.h"
 
@@ -80,12 +80,12 @@ namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
 
-napi_status hermes_create_napi_env(
-    ::hermes::vm::Runtime &runtime,
-    bool isInspectable,
-    std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
-    const ::hermes::vm::RuntimeConfig &runtimeConfig,
-    napi_env *env);
+// napi_status hermes_create_napi_env(
+//     ::hermes::vm::Runtime &runtime,
+//     bool isInspectable,
+//     std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
+//     const ::hermes::vm::RuntimeConfig &runtimeConfig,
+//     napi_env *env);
 
 namespace facebook {
 namespace hermes {
@@ -1154,9 +1154,10 @@ inline const HermesRuntimeImpl *impl(const HermesRuntime *rt) {
 }
 } // namespace
 
-void HermesRuntime::createNapiEnv(napi_env *env) {
-  auto imp = impl(this);
-  return hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
+napi_status HermesRuntime::createNapiEnv(napi_env *env) {
+  // auto imp = impl(this);
+  return 0;
+  // return hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
 }
 
 bool HermesRuntime::isHermesBytecode(const uint8_t *data, size_t len) {
