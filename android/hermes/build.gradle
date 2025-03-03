@@ -29,6 +29,7 @@ android {
         arguments "-DIMPORT_HERMESC=${rootProject.ext.hermesC}"
         arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
         arguments "-DHERMES_BUILD_SHARED_JSI=True"
+        arguments "-DIMPORT_HOST_COMPILERS=${rootProject.ext.hermesC}"
         targets "hermesvm"
       }
     }
