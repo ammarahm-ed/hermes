@@ -55,10 +55,10 @@ add_subdirectory(cdp)
 
 set(api_sources
   hermes.cpp
-  # hermes_napi.cpp
+  hermes_napi.cpp
   DebuggerAPI.cpp
   AsyncDebuggerAPI.cpp
-  # MurmurHash.cpp
+  MurmurHash.cpp
   RuntimeTaskRunner.cpp
   ${CDP_API_SOURCES}
   )
@@ -79,9 +79,10 @@ endif()
 
 add_hermes_library(hermesapi
   ${api_sources}
-  LINK_OBJLIBS hermesPublic LINK_LIBS jsi ${CDP_DEPS}
+  LINK_OBJLIBS hermesPublic LINK_LIBS jsi hermesNapi ${CDP_DEPS}
   )
-target_include_directories(hermesapi_obj PUBLIC ..)
+target_include_directories(hermesapi_obj PUBLIC .. ../node-api ../../include)
+
 
 add_hermes_library(synthTrace hermes_tracing.cpp SynthTrace.cpp TracingRuntime.cpp
   LINK_OBJLIBS hermesapi)

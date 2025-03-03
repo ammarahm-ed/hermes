@@ -72,7 +72,8 @@
 #include "ScriptStore.h"
 #include "hermes_api.h"
 
-#include "hermes/BCGen/HBC/BytecodeProviderFromSrc.h"
+
+#include "hermes/BCGen/HBC/BCProviderFromSrc.h"
 #include "hermes/DebuggerAPI.h"
 #include "hermes/SourceMap/SourceMapParser.h"
 #include "hermes/Support/SimpleDiagHandler.h"
@@ -7843,18 +7844,18 @@ napi_status NAPI_CDECL napi_object_seal(napi_env env, napi_value object) {
 // Hermes specific API
 //=============================================================================
 
-napi_status hermes_create_napi_env(
+void hermes_create_napi_env(
     ::hermes::vm::Runtime &runtime,
     bool isInspectable,
     std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
     const ::hermes::vm::RuntimeConfig &runtimeConfig,
     napi_env *env) {
   if (!env) {
-    return napi_status::napi_invalid_arg;
+    return;
   }
   *env = hermes::napi::napiEnv(new hermes::napi::NapiEnvironment(
       runtime, isInspectable, std::move(preparedScript), runtimeConfig));
-  return napi_status::napi_ok;
+  return;
 }
 
 //=============================================================================

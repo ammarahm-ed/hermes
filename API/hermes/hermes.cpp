@@ -6,7 +6,7 @@
  */
 
 #include "hermes.h"
-// #include "ScriptStore.h"
+#include "ScriptStore.h"
 
 #include "llvh/Support/Compiler.h"
 
@@ -80,12 +80,12 @@ namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
 
-// napi_status hermes_create_napi_env(
-//     ::hermes::vm::Runtime &runtime,
-//     bool isInspectable,
-//     std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
-//     const ::hermes::vm::RuntimeConfig &runtimeConfig,
-//     napi_env *env);
+void hermes_create_napi_env(
+  ::hermes::vm::Runtime &runtime,
+  bool isInspectable,
+  std::shared_ptr<facebook::jsi::PreparedScriptStore> preparedScript,
+  const ::hermes::vm::RuntimeConfig &runtimeConfig,
+  napi_env *env);
 
 namespace facebook {
 namespace hermes {
@@ -147,7 +147,7 @@ class InstallHermesFatalErrorHandler {
  public:
   InstallHermesFatalErrorHandler() {
     // The LLVM fatal error handler can only be installed once. Use a Meyer's
-    // singleton to guarantee it - the static "dummy" is guaranteed by the
+    // singleton to guaranctee it - the static "dummy" is guaranteed by the
     // compiler to be initialized no more than once.
     static int dummy = ([]() {
       llvh::install_fatal_error_handler(detail::hermesFatalErrorHandler);
@@ -1154,10 +1154,9 @@ inline const HermesRuntimeImpl *impl(const HermesRuntime *rt) {
 }
 } // namespace
 
-napi_status HermesRuntime::createNapiEnv(napi_env *env) {
-  // auto imp = impl(this);
-  return 0;
-  // return hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
+void HermesRuntime::createNapiEnv(napi_env *env) {
+  auto imp = impl(this);
+  hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
 }
 
 bool HermesRuntime::isHermesBytecode(const uint8_t *data, size_t len) {
