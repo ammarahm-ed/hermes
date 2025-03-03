@@ -6,7 +6,6 @@
  */
 
 #include "hermes.h"
-#include "hermes_api.h"
 #include "ScriptStore.h"
 
 #include "llvh/Support/Compiler.h"
@@ -66,7 +65,6 @@ int __llvm_profile_dump(void);
 }
 #endif
 
-
 // Android OSS has a bug where exception data can get mangled when going via
 // fbjni. This macro can be used to expose the root cause in adb log. It serves
 // no purpose other than as a backup.
@@ -81,7 +79,6 @@ int __llvm_profile_dump(void);
 namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
-
 
 napi_status hermes_create_napi_env(
     ::hermes::vm::Runtime &runtime,
@@ -1142,7 +1139,22 @@ class HermesRuntimeImpl final : public HermesRuntime,
   ::hermes::hbc::CompileFlags compileFlags_{};
 };
 
-napi_status HermesRuntime::createNapiEnv(napi_env *env) {
+namespace {
+inline HermesRuntimeImpl *impl(HermesRuntime *rt) {
+  // This is guaranteed safe because HermesRuntime is abstract so
+  // cannot be constructed, and the only instances created are
+  // HermesRuntimeImpl's created by the factory function.  It's kind
+  // of like pimpl, but different.
+  return static_cast<HermesRuntimeImpl *>(rt);
+}
+
+inline const HermesRuntimeImpl *impl(const HermesRuntime *rt) {
+  // See above comment
+  return static_cast<const HermesRuntimeImpl *>(rt);
+}
+} // namespace
+
+void HermesRuntime::createNapiEnv(napi_env *env) {
   auto imp = impl(this);
   return hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
 }
