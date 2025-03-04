@@ -2048,6 +2048,14 @@ class NapiCallbackInfo final {
   }
 
   napi_value thisArg() noexcept {
+    if (!nativeArgs_.getNewTarget().isUndefined() && nativeArgs_.getThisArg().isUndefined()) {
+      hermes::vm::Runtime &rt = context_.env_.runtime();
+      vm::Handle<vm::Callable> ctorHandle = rt.makeHandle<vm::Callable>(nativeArgs_.getNewTarget());
+    
+      auto thisRes = vm::ordinaryCreateFromConstructor_RJS(rt, ctorHandle, rt.objectPrototype);
+      return napiValue(rt.makeHandle(std::move(*thisRes)));
+    }
+
     return napiValue(&nativeArgs_.getThisArg());
   }
 
@@ -4970,7 +4978,12 @@ napi_status NapiEnvironment::createNewInstance(
   CHECK_NAPI(checkJSErrorStatus(thisRes));
   // We need to capture this in case the ctor doesn't return an object,
   // we need to return this object.
-  vm::Handle<> thisHandle = makeHandle(std::move(*thisRes));;
+  vm::Handle<> thisHandle = makeHandle(std::move(*thisRes));
+
+  if (thisRes->getHermesValue().isUndefined()) {
+    auto thisResult = vm::ordinaryCreateFromConstructor_RJS(runtime_, ctorHandle, runtime_.objectPrototype);
+    thisHandle = makeHandle(std::move(*thisResult));
+  }
 
   // 13.2.2.8:
   //    Let result be the result of calling the [[Call]] internal property of
@@ -4979,6 +4992,7 @@ napi_status NapiEnvironment::createNewInstance(
   //
   // For us result == res.
 
+  this->enter();
   vm::ScopedNativeCallFrame newFrame{
       runtime_,
       static_cast<uint32_t>(argCount),
@@ -4992,7 +5006,6 @@ napi_status NapiEnvironment::createNewInstance(
   for (size_t i = 0; i < argCount; ++i) {
     newFrame->getArgRef(static_cast<int32_t>(i)) = *phv(args[i]);
   }
-   this->enter();
   // The last parameter indicates that this call should construct an object.
   vm::CallResult<vm::PseudoHandle<>> callRes =
       vm::Callable::call(ctorHandle, runtime_);
