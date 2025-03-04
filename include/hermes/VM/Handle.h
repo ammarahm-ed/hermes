@@ -173,7 +173,7 @@ class PseudoHandle {
 /// A simple typed wrapper around a PinnedHermesValue, providing convenient
 /// conversion to/from a Handle<T>.
 template <typename T = HermesValue>
-class PinnedValue : private PinnedHermesValue {
+class PinnedValue : public PinnedHermesValue {
   template <class U>
   friend class Handle;
   friend struct RootAcceptor;

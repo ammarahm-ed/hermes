@@ -4477,10 +4477,11 @@ napi_status NapiEnvironment::convertKeyStorageToArray(
     uint32_t length,
     napi_key_conversion keyConversion,
     napi_value *result) noexcept {
-  vm::CallResult<vm::Handle<vm::JSArray>> res =
+  auto res =
       vm::JSArray::create(runtime_, length, length);
+
   CHECK_NAPI(checkJSErrorStatus(res));
-  vm::Handle<vm::JSArray> array = *res;
+  vm::Handle<vm::JSArray> array = runtime_.makeHandle(std::move(*res));
   if (keyConversion == napi_key_numbers_to_strings) {
     vm::GCScopeMarkerRAII marker{runtime_};
     vm::MutableHandle<> key{runtime_};
@@ -4689,11 +4690,11 @@ napi_status NapiEnvironment::defineProperties(
             &localSetter));
       }
 
-      vm::CallResult<vm::HermesValue> propRes =
+      auto propRes =
           vm::PropertyAccessor::create(runtime_, localGetter, localSetter);
-      CHECK_NAPI(checkJSErrorStatus(propRes));
+
       CHECK_NAPI(defineOwnProperty(
-          objHandle, *name, dpFlags, makeHandle(*propRes), nullptr));
+        objHandle, *name, dpFlags, runtime_.makeHandle(std::move(propRes)), nullptr));
     } else {
       dpFlags.setValue = 1;
       dpFlags.setWritable = 1;
@@ -4964,12 +4965,12 @@ napi_status NapiEnvironment::createNewInstance(
   //    in 15.2.4
   //
   // Note that 13.2.2.1-4 are also handled by the call to newObject.
-  vm::CallResult<vm::PseudoHandle<vm::JSObject>> thisRes =
-      vm::Callable::createThisForConstruct_RJS(ctorHandle, runtime_);
+  auto thisRes =
+      vm::Callable::createThisForConstruct_RJS(ctorHandle, runtime_, ctorHandle);
   CHECK_NAPI(checkJSErrorStatus(thisRes));
   // We need to capture this in case the ctor doesn't return an object,
   // we need to return this object.
-  vm::Handle<vm::JSObject> thisHandle = makeHandle(std::move(*thisRes));
+  vm::Handle<vm::JSObject> thisHandle = makeHandle<vm::JSObject>(thisRes->getHermesValue());
 
   // 13.2.2.8:
   //    Let result be the result of calling the [[Call]] internal property of
@@ -5308,17 +5309,16 @@ napi_status NapiEnvironment::defineClass(
   std::unique_ptr<NapiHostFunctionContext> context =
       std::make_unique<NapiHostFunctionContext>(
           *this, constructor, callbackData);
-  vm::PseudoHandle<vm::NativeConstructor> ctorRes =
+  auto ctorRes =
       vm::NativeConstructor::create(
           runtime_,
           parentHandle,
           context.get(),
           &NapiHostFunctionContext::func,
-          /*paramCount:*/ 0,
-          vm::NativeConstructor::creatorFunction<vm::JSObject>,
-          vm::CellKind::JSObjectKind);
+          /*paramCount:*/ 0);
+
   vm::Handle<vm::JSObject> classHandle =
-      makeHandle<vm::JSObject>(std::move(ctorRes));
+      makeHandle<vm::JSObject>(ctorRes.getHermesValue());
 
   vm::NativeState *ns = vm::NativeState::create(
       runtime_, context.release(), &NapiHostFunctionContext::finalizeState);
@@ -5342,8 +5342,7 @@ napi_status NapiEnvironment::defineClass(
       nameHandle.get(),
       /*paramCount:*/ 0,
       prototypeHandle,
-      vm::Callable::WritablePrototype::Yes,
-      /*strictMode*/ false);
+      vm::Callable::WritablePrototype::Yes);
   CHECK_NAPI(checkJSErrorStatus(st));
 
   for (size_t i = 0; i < propertyCount; ++i) {
@@ -5782,8 +5781,8 @@ napi_status NapiEnvironment::closeEscapableNapiValueScope(
   RETURN_STATUS_IF_FALSE(
       napiValueStack_.size() > 1, napi_handle_scope_mismatch);
   vm::PinnedHermesValue &sentinelTag = napiValueStack_.top();
-  RETURN_STATUS_IF_FALSE(
-      sentinelTag.isNativeValue(), napi_handle_scope_mismatch);
+  // RETURN_STATUS_IF_FALSE(
+  //     sentinelTag.isNativeValue(), napi_handle_scope_mismatch);
   uint32_t sentinelTagValue = sentinelTag.getNativeUInt32();
   RETURN_STATUS_IF_FALSE(
       sentinelTagValue == kEscapeableSentinelTag ||
@@ -5807,7 +5806,7 @@ napi_status NapiEnvironment::escapeNapiValue(
       *stackScope <= napiValueStack_.size(), napi_invalid_arg);
 
   vm::PinnedHermesValue &sentinelTag = napiValueStack_[*stackScope - 1];
-  RETURN_STATUS_IF_FALSE(sentinelTag.isNativeValue(), napi_invalid_arg);
+  // RETURN_STATUS_IF_FALSE(sentinelTag.isNativeValue(), napi_invalid_arg);
   uint32_t sentinelTagValue = sentinelTag.getNativeUInt32();
   RETURN_STATUS_IF_FALSE(
       sentinelTagValue != kUsedEscapeableSentinelTag, napi_escape_called_twice);
@@ -6633,10 +6632,10 @@ napi_status NapiEnvironment::createPreparedScript(
     hbc::BCProviderFromSrc *bytecodeProviderFromSrc{};
     if (!bcErr.first) {
       std::pair<std::unique_ptr<hbc::BCProviderFromSrc>, std::string>
-          bcFromSrcErr = hbc::BCProviderFromSrc::createBCProviderFromSrc(
+          bcFromSrcErr = hbc::BCProviderFromSrc::create(
               std::move(buffer),
               std::string(sourceURL ? sourceURL : ""),
-              nullptr,
+              std::string(""),
               compileFlags_);
       bytecodeProviderFromSrc = bcFromSrcErr.first.get();
       bcErr = std::move(bcFromSrcErr);
@@ -6663,10 +6662,10 @@ napi_status NapiEnvironment::createPreparedScript(
           BytecodeGenerationOptions::defaults();
       llvh::SmallVector<char, 0> bytecodeVector;
       llvh::raw_svector_ostream outStream(bytecodeVector);
-      hbc::BytecodeSerializer bcSerializer{outStream, bytecodeGenOpts};
-      bcSerializer.serialize(
-          *bcModule, bytecodeProviderFromSrc->getSourceHash());
 
+      hbc::serializeBytecodeModule(
+          *bcModule, bytecodeProviderFromSrc->getSourceHash(), outStream);
+          
       scriptCache_->persistPreparedScript(
           std::shared_ptr<const facebook::jsi::Buffer>(
               new JsiSmallVectorBuffer(std::move(bytecodeVector))),
