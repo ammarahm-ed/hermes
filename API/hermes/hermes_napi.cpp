@@ -4481,7 +4481,7 @@ napi_status NapiEnvironment::convertKeyStorageToArray(
       vm::JSArray::create(runtime_, length, length);
 
   CHECK_NAPI(checkJSErrorStatus(res));
-  vm::Handle<vm::JSArray> array = runtime_.makeHandle(std::move(*res));
+  vm::Handle<vm::JSArray> array = makeHandle(std::move(*res));
   if (keyConversion == napi_key_numbers_to_strings) {
     vm::GCScopeMarkerRAII marker{runtime_};
     vm::MutableHandle<> key{runtime_};
@@ -4694,7 +4694,7 @@ napi_status NapiEnvironment::defineProperties(
           vm::PropertyAccessor::create(runtime_, localGetter, localSetter);
 
       CHECK_NAPI(defineOwnProperty(
-        objHandle, *name, dpFlags, runtime_.makeHandle(std::move(propRes)), nullptr));
+        objHandle, *name, dpFlags, makeHandle(std::move(propRes)), nullptr));
     } else {
       dpFlags.setValue = 1;
       dpFlags.setWritable = 1;
@@ -4970,7 +4970,7 @@ napi_status NapiEnvironment::createNewInstance(
   CHECK_NAPI(checkJSErrorStatus(thisRes));
   // We need to capture this in case the ctor doesn't return an object,
   // we need to return this object.
-  vm::Handle<vm::JSObject> thisHandle = makeHandle<vm::JSObject>(thisRes->getHermesValue());
+  vm::Handle<> thisHandle = makeHandle(std::move(*thisRes));;
 
   // 13.2.2.8:
   //    Let result be the result of calling the [[Call]] internal property of
@@ -4998,16 +4998,16 @@ napi_status NapiEnvironment::createNewInstance(
       vm::Callable::call(ctorHandle, runtime_);
   CHECK_NAPI(checkJSErrorStatus(callRes, napi_pending_exception));
 
-  this->exit();
 
   // 13.2.2.9:
   //    If Type(result) is Object then return result
   // 13.2.2.10:
   //    Return obj
   vm::HermesValue resultValue = callRes->get();
+  this->exit();
   return scope.setResult(
       resultValue.isObject() ? std::move(resultValue)
-                             : thisHandle.getHermesValue());
+                             : std::move(*thisHandle));
 }
 
 napi_status NapiEnvironment::isInstanceOf(
@@ -5318,7 +5318,7 @@ napi_status NapiEnvironment::defineClass(
           /*paramCount:*/ 0);
 
   vm::Handle<vm::JSObject> classHandle =
-      makeHandle<vm::JSObject>(ctorRes.getHermesValue());
+      makeHandle<vm::JSObject>(std::move(ctorRes));
 
   vm::NativeState *ns = vm::NativeState::create(
       runtime_, context.release(), &NapiHostFunctionContext::finalizeState);
@@ -6604,76 +6604,80 @@ napi_status NapiEnvironment::createPreparedScript(
     bcErr = hbc::BCProviderFromBuffer::createBCProviderFromBuffer(
         std::move(buffer));
   } else {
-#if defined(HERMESVM_LEAN)
-    bcErr.second = "prepareJavaScript source compilation not supported";
-#else
+// #if defined(HERMESVM_LEAN)
+//     bcErr.second = "prepareJavaScript source compilation not supported";
+// #else
 
-    facebook::jsi::ScriptSignature scriptSignature;
-    facebook::jsi::JSRuntimeSignature runtimeSignature;
-    const char *prepareTag = "perf";
+    // facebook::jsi::ScriptSignature scriptSignature;
+    // facebook::jsi::JSRuntimeSignature runtimeSignature;
+    // const char *prepareTag = "perf";
 
-    if (scriptCache_) {
-      uint64_t hash{};
-      murmurhash(buffer->data(), buffer->size(), /*ref*/ hash);
-      facebook::jsi::JSRuntimeVersion_t runtimeVersion =
-          HermesBuildVersion.version;
-      scriptSignature = {std::string(sourceURL ? sourceURL : ""), hash};
-      runtimeSignature = {"Hermes", runtimeVersion};
-    }
+    // if (scriptCache_) {
+    //   uint64_t hash{};
+    //   murmurhash(buffer->data(), buffer->size(), /*ref*/ hash);
+    //   facebook::jsi::JSRuntimeVersion_t runtimeVersion =
+    //       HermesBuildVersion.version;
+    //   scriptSignature = {std::string(sourceURL ? sourceURL : ""), hash};
+    //   runtimeSignature = {"Hermes", runtimeVersion};
+    // }
 
-    std::shared_ptr<const facebook::jsi::Buffer> cache;
-    if (scriptCache_) {
-      cache = scriptCache_->tryGetPreparedScript(
-          scriptSignature, runtimeSignature, prepareTag);
-      bcErr = hbc::BCProviderFromBuffer::createBCProviderFromBuffer(
-          std::make_unique<JsiBuffer>(std::move(cache)));
-    }
+    // std::shared_ptr<const facebook::jsi::Buffer> cache;
+    // if (scriptCache_) {
+    //   cache = scriptCache_->tryGetPreparedScript(
+    //       scriptSignature, runtimeSignature, prepareTag);
+    //   bcErr = hbc::BCProviderFromBuffer::createBCProviderFromBuffer(
+    //       std::make_unique<JsiBuffer>(std::move(cache)));
+    // }
 
     hbc::BCProviderFromSrc *bytecodeProviderFromSrc{};
     if (!bcErr.first) {
+      llvh::StringRef sourceMap;
       std::pair<std::unique_ptr<hbc::BCProviderFromSrc>, std::string>
           bcFromSrcErr = hbc::BCProviderFromSrc::create(
               std::move(buffer),
               std::string(sourceURL ? sourceURL : ""),
-              std::string(""),
+              sourceMap,
               compileFlags_);
       bytecodeProviderFromSrc = bcFromSrcErr.first.get();
       bcErr = std::move(bcFromSrcErr);
-    }
-
-    if (scriptCache_ && bytecodeProviderFromSrc) {
-      hbc::BytecodeModule *bcModule =
-          bytecodeProviderFromSrc->getBytecodeModule();
-
-      // Serialize/deserialize can't handle lazy compilation as of now. Do a
-      // check to make sure there is no lazy BytecodeFunction in module_.
-      for (uint32_t i = 0; i < bcModule->getNumFunctions(); i++) {
-        if (bytecodeProviderFromSrc->isFunctionLazy(i)) {
-          goto CannotSerialize;
-        }
+      if (bcErr.first) {
+        runtimeFlags.persistent = bcErr.first->allowPersistent();
       }
-
-      // Serialize the bytecode. Call BytecodeSerializer to do the heavy
-      // lifting. Write to a SmallVector first, so we can know the total bytes
-      // and write it first and make life easier for Deserializer. This is going
-      // to be slower than writing to Serializer directly but it's OK to slow
-      // down serialization if it speeds up Deserializer.
-      BytecodeGenerationOptions bytecodeGenOpts =
-          BytecodeGenerationOptions::defaults();
-      llvh::SmallVector<char, 0> bytecodeVector;
-      llvh::raw_svector_ostream outStream(bytecodeVector);
-
-      hbc::serializeBytecodeModule(
-          *bcModule, bytecodeProviderFromSrc->getSourceHash(), outStream);
-          
-      scriptCache_->persistPreparedScript(
-          std::shared_ptr<const facebook::jsi::Buffer>(
-              new JsiSmallVectorBuffer(std::move(bytecodeVector))),
-          scriptSignature,
-          runtimeSignature,
-          prepareTag);
     }
-#endif
+
+    // if (scriptCache_ && bytecodeProviderFromSrc) {
+    //   hbc::BytecodeModule *bcModule =
+    //       bytecodeProviderFromSrc->getBytecodeModule();
+
+    //   // Serialize/deserialize can't handle lazy compilation as of now. Do a
+    //   // check to make sure there is no lazy BytecodeFunction in module_.
+    //   for (uint32_t i = 0; i < bcModule->getNumFunctions(); i++) {
+    //     if (bytecodeProviderFromSrc->isFunctionLazy(i)) {
+    //       goto CannotSerialize;
+    //     }
+    //   }
+
+    //   // Serialize the bytecode. Call BytecodeSerializer to do the heavy
+    //   // lifting. Write to a SmallVector first, so we can know the total bytes
+    //   // and write it first and make life easier for Deserializer. This is going
+    //   // to be slower than writing to Serializer directly but it's OK to slow
+    //   // down serialization if it speeds up Deserializer.
+    //   BytecodeGenerationOptions bytecodeGenOpts =
+    //       BytecodeGenerationOptions::defaults();
+    //   llvh::SmallVector<char, 0> bytecodeVector;
+    //   llvh::raw_svector_ostream outStream(bytecodeVector);
+
+    //   hbc::serializeBytecodeModule(
+    //       *bcModule, bytecodeProviderFromSrc->getSourceHash(), outStream);
+          
+    //   scriptCache_->persistPreparedScript(
+    //       std::shared_ptr<const facebook::jsi::Buffer>(
+    //           new JsiSmallVectorBuffer(std::move(bytecodeVector))),
+    //       scriptSignature,
+    //       runtimeSignature,
+    //       prepareTag);
+    // }
+// #endif
   }
   if (!bcErr.first) {
     NapiStringBuilder sb(" Buffer size: ", bufSize, ", starts with: ");
