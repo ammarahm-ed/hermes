@@ -87,6 +87,10 @@ function f(x) {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -101,15 +105,15 @@ function f(x) {
 // CHECK-NEXT:i2[ASCII, 6..6] #00019E07: f
 
 // CHECK:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:[@ 0] DeclareGlobalVar 1<UInt32>
 // CHECK-NEXT:[@ 5] DeclareGlobalVar 2<UInt32>
 // CHECK-NEXT:[@ 10] GetGlobalObject 2<Reg8>
 // CHECK-NEXT:[@ 12] LoadConstUndefined 0<Reg8>
 // CHECK-NEXT:[@ 14] CreateClosure 1<Reg8>, 0<Reg8>, 1<UInt16>
-// CHECK-NEXT:[@ 19] PutByIdStrict 2<Reg8>, 1<Reg8>, 1<UInt8>, 1<UInt16>
+// CHECK-NEXT:[@ 19] PutByIdStrict 2<Reg8>, 1<Reg8>, 0<UInt8>, 1<UInt16>
 // CHECK-NEXT:[@ 25] CreateClosure 1<Reg8>, 0<Reg8>, 2<UInt16>
-// CHECK-NEXT:[@ 30] PutByIdStrict 2<Reg8>, 1<Reg8>, 2<UInt8>, 2<UInt16>
+// CHECK-NEXT:[@ 30] PutByIdStrict 2<Reg8>, 1<Reg8>, 1<UInt8>, 2<UInt16>
 // CHECK-NEXT:[@ 36] Ret 0<Reg8>
 
 // CHECK:Function<g>(1 params, 1 registers, 0 numbers, 1 non-pointers):
@@ -117,9 +121,9 @@ function f(x) {
 // CHECK-NEXT:[@ 2] Ret 0<Reg8>
 
 // CHECK:Function<f>(2 params, 12 registers, 1 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0010, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0011
 // CHECK-NEXT:[@ 0] LoadParam 2<Reg8>, 1<UInt8>
-// CHECK-NEXT:[@ 3] SwitchImm 2<Reg8>, 292<UInt32>, 161<Addr32>, 0<UInt32>, 16<UInt32>
+// CHECK-NEXT:[@ 3] UIntSwitchImm 2<Reg8>, 292<UInt32>, 161<Addr32>, 0<UInt32>, 16<UInt32>
 // CHECK-NEXT:[@ 21] LoadConstInt 0<Reg8>, 3352<Imm32>
 // CHECK-NEXT:[@ 27] Ret 0<Reg8>
 // CHECK-NEXT:[@ 29] LoadConstInt 0<Reg8>, 3523<Imm32>
@@ -145,7 +149,7 @@ function f(x) {
 // CHECK-NEXT:[@ 109] LoadConstInt 0<Reg8>, 362<Imm32>
 // CHECK-NEXT:[@ 115] Ret 0<Reg8>
 // CHECK-NEXT:[@ 117] GetGlobalObject 3<Reg8>
-// CHECK-NEXT:[@ 119] GetByIdShort 3<Reg8>, 3<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 119] GetByIdShort 3<Reg8>, 3<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 124] LoadConstUndefined 1<Reg8>
 // CHECK-NEXT:[@ 126] Call1 3<Reg8>, 3<Reg8>, 1<Reg8>
 // CHECK-NEXT:[@ 130] LoadConstInt 0<Reg8>, 342<Imm32>
@@ -158,7 +162,7 @@ function f(x) {
 // CHECK-NEXT:[@ 157] Ret 0<Reg8>
 // CHECK-NEXT:[@ 159] LoadConstUInt8 0<Reg8>, 32<UInt8>
 // CHECK-NEXT:[@ 162] Ret 0<Reg8>
-// CHECK-NEXT:[@ 164] SwitchImm 2<Reg8>, 199<UInt32>, 116<Addr32>, 1<UInt32>, 14<UInt32>
+// CHECK-NEXT:[@ 164] UIntSwitchImm 2<Reg8>, 199<UInt32>, 116<Addr32>, 1<UInt32>, 14<UInt32>
 // CHECK-NEXT:[@ 182] LoadConstInt 0<Reg8>, 3342<Imm32>
 // CHECK-NEXT:[@ 188] Ret 0<Reg8>
 // CHECK-NEXT:[@ 190] LoadConstInt 0<Reg8>, 3254<Imm32>
@@ -174,7 +178,7 @@ function f(x) {
 // CHECK-NEXT:[@ 230] LoadConstInt 0<Reg8>, 2332<Imm32>
 // CHECK-NEXT:[@ 236] Ret 0<Reg8>
 // CHECK-NEXT:[@ 238] GetGlobalObject 2<Reg8>
-// CHECK-NEXT:[@ 240] GetByIdShort 2<Reg8>, 2<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 240] GetByIdShort 2<Reg8>, 2<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 245] LoadConstUndefined 1<Reg8>
 // CHECK-NEXT:[@ 247] Call1 2<Reg8>, 2<Reg8>, 1<Reg8>
 // CHECK-NEXT:[@ 251] LoadConstInt 0<Reg8>, 342<Imm32>
@@ -186,7 +190,7 @@ function f(x) {
 // CHECK-NEXT:[@ 272] LoadConstInt 0<Reg8>, 342<Imm32>
 // CHECK-NEXT:[@ 278] Ret 0<Reg8>
 // CHECK-NEXT:[@ 280] GetGlobalObject 2<Reg8>
-// CHECK-NEXT:[@ 282] GetByIdShort 2<Reg8>, 2<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 282] GetByIdShort 2<Reg8>, 2<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 287] LoadConstUndefined 1<Reg8>
 // CHECK-NEXT:[@ 289] Call1 2<Reg8>, 2<Reg8>, 1<Reg8>
 // CHECK-NEXT:[@ 293] Ret 1<Reg8>
@@ -238,11 +242,11 @@ function f(x) {
 // CHECK-NEXT:    bc 5: line 10 col 1
 // CHECK-NEXT:    bc 19: line 10 col 1
 // CHECK-NEXT:    bc 30: line 10 col 1
-// CHECK-NEXT:  0x0010  function idx 2, starts at line 12 col 1
+// CHECK-NEXT:  0x0011  function idx 2, starts at line 12 col 1
 // CHECK-NEXT:    bc 119: line 23 col 13
 // CHECK-NEXT:    bc 126: line 23 col 14
 // CHECK-NEXT:    bc 240: line 58 col 13
 // CHECK-NEXT:    bc 247: line 58 col 14
 // CHECK-NEXT:    bc 282: line 75 col 13
 // CHECK-NEXT:    bc 289: line 75 col 14
-// CHECK-NEXT:  0x002a  end of debug source table
+// CHECK-NEXT:  0x002d  end of debug source table

@@ -84,7 +84,7 @@ void LReference::emitStore(Value *value) {
       return;
     case Kind::Destructuring:
       return irgen_->emitDestructuringAssignment(
-          declInit_, destructuringTarget_, value);
+          declInit_, llvh::cast<ESTree::PatternNode>(ast_), value);
   }
 
   llvm_unreachable("invalid LReference kind");
@@ -148,6 +148,15 @@ llvh::StringRef ESTreeIRGen::propertyKeyAsString(
     return llvh::StringRef(storage.begin(), len);
   }
 
+  // Handle BigInt Literals, because they're a type of NumericLiteral.
+  // ES15 12.9.3
+  if (auto *Lit = llvh::dyn_cast<ESTree::BigIntLiteralNode>(Key)) {
+    LLVM_DEBUG(
+        llvh::dbgs() << "Loading BigInt Literal \"" << Lit->_bigint->str()
+                     << "\"\n");
+    return Lit->_bigint->str();
+  }
+
   llvm_unreachable("Don't know this kind of property key");
   return llvh::StringRef();
 }
@@ -177,6 +186,8 @@ void ESTreeIRGen::doIt(llvh::StringRef topLevelFunctionName) {
   // Function context for topLevelFunction.
   FunctionContext topLevelFunctionContext{
       this, topLevelFunction, Program->getSemInfo()};
+  Function::ScopedLexicalScopeChange lexScopeChange(
+      curFunction()->function, Program->getSemInfo()->getFunctionBodyScope());
 
   emitFunctionPrologue(
       Program,
@@ -206,7 +217,9 @@ void ESTreeIRGen::doIt(llvh::StringRef topLevelFunctionName) {
 
 Function *ESTreeIRGen::doItInScope(EvalCompilationDataInst *evalDataInst) {
   LLVM_DEBUG(llvh::dbgs() << "Processing program in scope.\n");
-  auto *varScope = evalDataInst->getFuncVarScope();
+  sema::LexicalScope *lexScope = semCtx_.getParentLexicalScope();
+  assert(lexScope && "SemCtx parent lexical scope cannot be null");
+  VariableScope *varScope = getLexicalScopeData(lexScope);
   assert(varScope && "eval IRGen cannot have null variable scope");
 
   ESTree::ProgramNode *Program;
@@ -395,6 +408,12 @@ Function *ESTreeIRGen::doLazyFunction(Function *lazyFunc) {
   // Free the allocated legacy class context.
   if (curFunction()->legacyClassContext)
     curFunction()->legacyClassContext.reset();
+
+  // promotedDecls is used immediately and relies on IdentifierNode,
+  // which is deallocated between invocations of lazy compilation.
+  // Therefore, it is necessary to clear promotedDecls when freeing the
+  // AST in order to avoid dangling pointers.
+  semCtx_.clearPromotedDecls();
   return compiledFunc;
 }
 
@@ -414,6 +433,11 @@ Value *ESTreeIRGen::genMemberExpressionProperty(
   // Arrays and objects may be accessed with integer indices.
   if (auto N = llvh::dyn_cast<ESTree::NumericLiteralNode>(getProperty(Mem))) {
     return Builder.getLiteralNumber(N->_value);
+  }
+
+  if (auto *PN = llvh::dyn_cast<ESTree::PrivateNameNode>(getProperty(Mem))) {
+    auto *id = llvh::cast<ESTree::IdentifierNode>(PN->_id);
+    return genPrivateNameValue(id);
   }
 
   // ESTree encodes property access as MemberExpression -> Identifier.
@@ -559,12 +583,33 @@ Value *ESTreeIRGen::emitIteratorSymbol() {
       "iterator");
 }
 
+Value *ESTreeIRGen::emitAsyncIteratorSymbol() {
+  return Builder.createLoadPropertyInst(
+      Builder.createGetBuiltinClosureInst(BuiltinMethod::globalThis_Symbol),
+      "asyncIterator");
+}
+
 ESTreeIRGen::IteratorRecordSlow ESTreeIRGen::emitGetIteratorSlow(Value *obj) {
   auto *method = Builder.createLoadPropertyInst(obj, emitIteratorSymbol());
   auto *iterator = Builder.createCallInst(
       method, /* newTarget */ Builder.getLiteralUndefined(), obj, {});
 
   emitEnsureObject(iterator, "iterator is not an object");
+  auto *nextMethod = Builder.createLoadPropertyInst(iterator, "next");
+
+  return {iterator, nextMethod};
+}
+
+ESTreeIRGen::IteratorRecordSlow ESTreeIRGen::emitGetAsyncIteratorSlow(
+    Value *obj) {
+  auto *makeAsyncIterator = Builder.createGetBuiltinClosureInst(
+      BuiltinMethod::HermesBuiltin_makeAsyncIterator);
+
+  auto *iterator = Builder.createCallInst(
+      makeAsyncIterator,
+      Builder.getLiteralUndefined(),
+      Builder.getLiteralUndefined(),
+      {obj});
   auto *nextMethod = Builder.createLoadPropertyInst(iterator, "next");
 
   return {iterator, nextMethod};
@@ -588,9 +633,11 @@ Value *ESTreeIRGen::emitIteratorValueSlow(Value *iterResult) {
   return Builder.createLoadPropertyInst(iterResult, "value");
 }
 
-void ESTreeIRGen::emitIteratorCloseSlow(
+void ESTreeIRGen::_emitIteratorCloseImpl(
+    ESTree::Node *astNode,
     hermes::irgen::ESTreeIRGen::IteratorRecordSlow iteratorRecord,
-    bool ignoreInnerException) {
+    bool ignoreInnerException,
+    bool isAsyncIterator) {
   auto *haveReturn = Builder.createBasicBlock(Builder.getFunction());
   auto *noReturn = Builder.createBasicBlock(Builder.getFunction());
 
@@ -608,12 +655,24 @@ void ESTreeIRGen::emitIteratorCloseSlow(
     emitTryCatchScaffolding(
         noReturn,
         // emitBody.
-        [this, returnMethod, &iteratorRecord](BasicBlock * /*catchBlock*/) {
-          Builder.createCallInst(
+        [this, returnMethod, &iteratorRecord, isAsyncIterator, astNode](
+            BasicBlock *catchBlock) {
+          SurroundingTry thisTry{
+              curFunction(),
+              astNode,
+              catchBlock,
+              {},
+              [](ESTree::Node *,
+                 ControlFlowChange cfc,
+                 BasicBlock *continueTarget) {}};
+
+          auto *callResult = Builder.createCallInst(
               returnMethod,
               /* newTarget */ Builder.getLiteralUndefined(),
               iteratorRecord.iterator,
               {});
+          if (isAsyncIterator)
+            genYieldOrAwaitExpr(callResult);
         },
         // emitNormalCleanup.
         []() {},
@@ -624,16 +683,32 @@ void ESTreeIRGen::emitIteratorCloseSlow(
           Builder.createBranchInst(nextBlock);
         });
   } else {
-    auto *innerResult = Builder.createCallInst(
+    auto *callResult = Builder.createCallInst(
         returnMethod,
         /* newTarget */ Builder.getLiteralUndefined(),
         iteratorRecord.iterator,
         {});
-    emitEnsureObject(innerResult, "iterator.return() did not return an object");
+    emitEnsureObject(
+        isAsyncIterator ? genYieldOrAwaitExpr(callResult) : callResult,
+        "iterator.return() did not return an object");
     Builder.createBranchInst(noReturn);
   }
 
   Builder.setInsertionBlock(noReturn);
+}
+
+void ESTreeIRGen::emitIteratorCloseSlow(
+    ESTree::Node *astNode,
+    hermes::irgen::ESTreeIRGen::IteratorRecordSlow iteratorRecord,
+    bool ignoreInnerException) {
+  _emitIteratorCloseImpl(astNode, iteratorRecord, ignoreInnerException, false);
+}
+
+void ESTreeIRGen::emitAsyncIteratorCloseSlow(
+    ESTree::Node *astNode,
+    hermes::irgen::ESTreeIRGen::IteratorRecordSlow iteratorRecord,
+    bool ignoreInnerException) {
+  _emitIteratorCloseImpl(astNode, iteratorRecord, ignoreInnerException, true);
 }
 
 ESTreeIRGen::IteratorRecord ESTreeIRGen::emitGetIterator(Value *obj) {
@@ -687,6 +762,8 @@ void ESTreeIRGen::emitDestructuringArray(
       genAnonymousLabelName("exc"), Type::createAnyType());
   // All exception handlers branch to this block.
   handler.exceptionBlock = Builder.createBasicBlock(Builder.getFunction());
+  bool fastDestructure =
+      Mod->getContext().getCodeGenerationSettings().enableFastDestructure;
 
   bool first = true;
   bool emittedRest = false;
@@ -697,20 +774,36 @@ void ESTreeIRGen::emitDestructuringArray(
 
   /// If the previous LReference is valid and non-empty, store "value" into
   /// it and reset the LReference.
-  auto storePreviousValue = [&lref, &handler, this, value]() {
-    if (lref && !lref->isEmpty()) {
-      if (lref->canStoreWithoutSideEffects()) {
-        lref->emitStore(Builder.createLoadStackInst(value));
-      } else {
-        // If we can't store without side effects, wrap the store in try/catch.
-        emitTryWithSharedHandler(
-            &handler, [this, &lref, value](BasicBlock * /*catchBlock*/) {
-              lref->emitStore(Builder.createLoadStackInst(value));
-            });
-      }
-      lref.reset();
-    }
-  };
+  auto storePreviousValue =
+      [&lref, &handler, this, value, iteratorRecord, fastDestructure]() {
+        if (lref && !lref->isEmpty()) {
+          if (fastDestructure || lref->canStoreWithoutSideEffects()) {
+            lref->emitStore(Builder.createLoadStackInst(value));
+          } else {
+            // If we can't store without side effects, wrap the store in
+            // try/catch.
+            emitTryWithSharedHandler(
+                &handler,
+                [this, &lref, value, iteratorRecord](BasicBlock *catchBlock) {
+                  SurroundingTry thisTry{
+                      curFunction(),
+                      lref->getNode(),
+                      catchBlock,
+                      {},
+                      [this, iteratorRecord](
+                          ESTree::Node *,
+                          ControlFlowChange cfc,
+                          BasicBlock *continueTarget) {
+                        if (cfc == ControlFlowChange::Break) {
+                          emitIteratorClose(iteratorRecord, false);
+                        }
+                      }};
+                  lref->emitStore(Builder.createLoadStackInst(value));
+                });
+          }
+          lref.reset();
+        }
+      };
 
   for (auto &elem : targetPat->_elements) {
     ESTree::Node *target = &elem;
@@ -744,14 +837,34 @@ void ESTreeIRGen::emitDestructuringArray(
         lref->emitStore(Builder.createLoadStackInst(value));
         lref.reset();
       }
-      emitTryWithSharedHandler(
-          &handler,
-          [this, &lref, value, target, declInit](BasicBlock * /*catchBlock*/) {
-            // Store the previous value, if we have one.
-            if (lref && !lref->isEmpty())
-              lref->emitStore(Builder.createLoadStackInst(value));
-            lref = createLRef(target, declInit);
-          });
+      if (fastDestructure) {
+        if (lref && !lref->isEmpty())
+          lref->emitStore(Builder.createLoadStackInst(value));
+        lref = createLRef(target, declInit);
+      } else {
+        emitTryWithSharedHandler(
+            &handler,
+            [this, &lref, value, target, declInit, iteratorRecord](
+                BasicBlock *catchBlock) {
+              SurroundingTry thisTry{
+                  curFunction(),
+                  target,
+                  catchBlock,
+                  {},
+                  [this, iteratorRecord](
+                      ESTree::Node *,
+                      ControlFlowChange cfc,
+                      BasicBlock *continueTarget) {
+                    if (cfc == ControlFlowChange::Break) {
+                      emitIteratorClose(iteratorRecord, false);
+                    }
+                  }};
+              // Store the previous value, if we have one.
+              if (lref && !lref->isEmpty())
+                lref->emitStore(Builder.createLoadStackInst(value));
+              lref = createLRef(target, declInit);
+            });
+      }
     }
 
     // Pseudocode of the algorithm for a step:
@@ -826,7 +939,30 @@ void ESTreeIRGen::emitDestructuringArray(
 
       // getDefaultBlock:
       Builder.setInsertionBlock(getDefaultBlock);
-      Builder.createStoreStackInst(genExpression(init, nameHint), value);
+      if (fastDestructure) {
+        Builder.createStoreStackInst(genExpression(init, nameHint), value);
+      } else {
+        emitTryWithSharedHandler(
+            &handler,
+            [this, init, nameHint, value, iteratorRecord](
+                BasicBlock *catchBlock) {
+              SurroundingTry thisTry{
+                  curFunction(),
+                  init,
+                  catchBlock,
+                  {},
+                  [this, iteratorRecord](
+                      ESTree::Node *,
+                      ControlFlowChange cfc,
+                      BasicBlock *continueTarget) {
+                    if (cfc == ControlFlowChange::Break) {
+                      emitIteratorClose(iteratorRecord, false);
+                    }
+                  }};
+              Builder.createStoreStackInst(
+                  genExpression(init, nameHint), value);
+            });
+      }
       Builder.createBranchInst(storeBlock);
 
       // storeBlock:
@@ -927,7 +1063,21 @@ void ESTreeIRGen::emitRestElement(
     lref = createLRef(rest->_argument, declInit);
   } else {
     emitTryWithSharedHandler(
-        handler, [this, &lref, rest, declInit](BasicBlock * /*catchBlock*/) {
+        handler,
+        [this, &lref, rest, declInit, iteratorRecord](BasicBlock *catchBlock) {
+          SurroundingTry thisTry{
+              curFunction(),
+              rest,
+              catchBlock,
+              {},
+              [this, iteratorRecord](
+                  ESTree::Node *,
+                  ControlFlowChange cfc,
+                  BasicBlock *continueTarget) {
+                if (cfc == ControlFlowChange::Break) {
+                  emitIteratorClose(iteratorRecord, false);
+                }
+              }};
           lref = createLRef(rest->_argument, declInit);
         });
   }
@@ -973,8 +1123,17 @@ void ESTreeIRGen::emitRestElement(
   if (lref->canStoreWithoutSideEffects()) {
     lref->emitStore(A);
   } else {
-    emitTryWithSharedHandler(
-        handler, [&lref, A](BasicBlock *) { lref->emitStore(A); });
+    emitTryWithSharedHandler(handler, [&lref, A, this](BasicBlock *catchBlock) {
+      SurroundingTry thisTry{
+          curFunction(),
+          lref->getNode(),
+          catchBlock,
+          {},
+          [](ESTree::Node *,
+             ControlFlowChange cfc,
+             BasicBlock *continueTarget) {}};
+      lref->emitStore(A);
+    });
   }
 }
 
@@ -1089,7 +1248,7 @@ void ESTreeIRGen::emitRestProperty(
         Builder.createAllocObjectLiteralInst({}, Builder.getLiteralNull());
 
     for (Literal *key : literalExcludedItems)
-      Builder.createDefineNewOwnPropertyInst(
+      Builder.createDefineOwnPropertyInst(
           zeroValue, excludedObj, key, IRBuilder::PropEnumerable::Yes);
 
     for (Value *key : computedExcludedItems) {
@@ -1246,7 +1405,10 @@ ESTreeIRGen::emitStore(Value *storedValue, Value *ptr, bool declInit) {
               Builder.createLoadFrameInst(RSI, var), Type::createEmpty());
         }
       }
-      if (var->getIsConst()) {
+      auto constness = var->getConstness();
+      if (constness == sema::Decl::Constness::Always ||
+          (Builder.getFunction()->isStrictMode() &&
+           constness == sema::Decl::Constness::StrictModeOnly)) {
         // If this is a const variable being reassigned, throw a TypeError.
         Builder.createThrowTypeErrorInst(Builder.getLiteralString(
             "assignment to constant variable '" + var->getName().str() + "'"));
@@ -1272,8 +1434,8 @@ ESTreeIRGen::emitStore(Value *storedValue, Value *ptr, bool declInit) {
 Instruction *ESTreeIRGen::emitResolveScopeInstIfNeeded(
     VariableScope *targetVarScope) {
   auto [startScope, startVarScope] = getResolveScopeStart(
-      curFunction()->curScope,
-      curFunction()->curScope->getVariableScope(),
+      curFunction()->curScope(),
+      curFunction()->curScope()->getVariableScope(),
       targetVarScope);
   if (startVarScope == targetVarScope)
     return startScope;
@@ -1283,12 +1445,12 @@ Instruction *ESTreeIRGen::emitResolveScopeInstIfNeeded(
 
 VariableScope *FunctionContext::getOrCreateInnerVariableScope(
     ESTree::Node *node) {
-  auto [it, inserted] = innerScopes_.try_emplace(node, nullptr);
+  auto [it, inserted] = innerScopes_.insert({node, nullptr});
   if (inserted)
     it->second =
-        irGen_->Builder.createVariableScope(curScope->getVariableScope());
+        irGen_->Builder.createVariableScope(currentScope_->getVariableScope());
   assert(
-      it->second->getParentScope() == curScope->getVariableScope() &&
+      it->second->getParentScope() == currentScope_->getVariableScope() &&
       "Inner scope created from multiple contexts");
   return it->second;
 }

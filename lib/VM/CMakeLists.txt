@@ -16,6 +16,7 @@ set(source_files
   DictPropertyMap.cpp
   Domain.cpp
   DummyObject.cpp
+  LargeDummyObject.cpp
   FastArray.cpp
   GCBase.cpp
   OrderedHashMap.cpp
@@ -61,7 +62,6 @@ set(source_files
   Profiler/SamplingProfilerPosix.cpp
   Profiler/SamplingProfilerWindows.cpp
   Profiler/SamplingProfilerSampler.cpp
-  SegmentedArray.cpp
   SingleObject.cpp
   StackFrame.cpp
   StackTracesTree.cpp
@@ -138,14 +138,14 @@ if (${HERMESVM_GCKIND} STREQUAL "MALLOC")
 elseif (${HERMESVM_GCKIND} STREQUAL "HADES")
   list(APPEND source_files
             gcs/AlignedHeapSegment.cpp
-            gcs/CardTableNC.cpp
+            gcs/CardBoundaryTable.cpp
             gcs/FillerCell.cpp
             gcs/HadesGC.cpp
   )
 elseif (${HERMESVM_GCKIND} STREQUAL "RUNTIME")
   list(APPEND source_files
           gcs/AlignedHeapSegment.cpp
-          gcs/CardTableNC.cpp gcs/FillerCell.cpp
+          gcs/CardBoundaryTable.cpp gcs/FillerCell.cpp
           gcs/HadesGC.cpp
   )
 else()
@@ -159,6 +159,7 @@ if (HERMESVM_ALLOW_JIT)
           JIT/arm64/JitEmitter.cpp JIT/arm64/JitEmitter.h
           JIT/arm64/JIT.cpp
           JIT/arm64/JitHandlers.cpp JIT/arm64/JitHandlers.h
+          JIT/PerfJitDump.cpp
   )
   set(JITLIBS asmjit)
 endif ()

@@ -55,9 +55,9 @@ static llvh::cl::opt<unsigned> Repeat(
     llvh::cl::Hidden);
 
 struct Flags : public cli::RuntimeFlags {
-  llvh::cl::opt<bool> GCPrintStats{
-      "gc-print-stats",
-      llvh::cl::desc("Output summary garbage collection statistics at exit"),
+  llvh::cl::opt<bool> GCPrintCollectionStats{
+      "gc-print-collection-stats",
+      llvh::cl::desc("Output statistics for each garbage collection at exit"),
       llvh::cl::cat(GCCategory),
       llvh::cl::init(false)};
 };
@@ -73,6 +73,10 @@ int main(int argc, char **argv) {
   llvh::sys::PrintStackTraceOnErrorSignal("hvm");
   llvh::PrettyStackTraceProgram X(argc, argv);
   llvh::llvm_shutdown_obj Y;
+
+  // Enable the microtask queue in the CLI by default.
+  flags.MicrotaskQueue.setInitialValue(true);
+
   llvh::cl::ParseCommandLineOptions(argc, argv, "Hermes VM driver\n");
 
   llvh::ErrorOr<std::unique_ptr<llvh::MemoryBuffer>> FileBufOrErr =
@@ -105,24 +109,35 @@ int main(int argc, char **argv) {
   }
 
   ExecuteOptions options;
+
+  auto gcConfigBuilder =
+      vm::GCConfig::Builder()
+          .withInitHeapSize(flags.InitHeapSize.bytes)
+          .withMaxHeapSize(flags.MaxHeapSize.bytes)
+          .withSanitizeConfig(vm::GCSanitizeConfig::Builder()
+                                  .withSanitizeRate(flags.GCSanitizeRate)
+                                  .withRandomSeed(flags.GCSanitizeRandomSeed)
+                                  .build())
+          .withShouldReleaseUnused(vm::kReleaseUnusedNone)
+          .withName("hvm");
+
+  std::vector<vm::GCAnalyticsEvent> gcAnalyticsEvents;
+  if (flags.GCPrintStats || flags.GCPrintCollectionStats) {
+    gcConfigBuilder.withShouldRecordStats(true);
+    if (flags.GCPrintCollectionStats) {
+      options.gcAnalyticsEvents = &gcAnalyticsEvents;
+      gcConfigBuilder.withAnalyticsCallback(
+          [&gcAnalyticsEvents](const vm::GCAnalyticsEvent &event) {
+            gcAnalyticsEvents.push_back(event);
+          });
+    }
+  }
+
   options.runtimeConfig =
       vm::RuntimeConfig::Builder()
-          .withGCConfig(vm::GCConfig::Builder()
-                            .withInitHeapSize(flags.InitHeapSize.bytes)
-                            .withMaxHeapSize(flags.MaxHeapSize.bytes)
-                            .withSanitizeConfig(
-                                vm::GCSanitizeConfig::Builder()
-                                    .withSanitizeRate(flags.GCSanitizeRate)
-                                    .withRandomSeed(flags.GCSanitizeRandomSeed)
-                                    .build())
-                            .withShouldRecordStats(flags.GCPrintStats)
-                            .withShouldReleaseUnused(vm::kReleaseUnusedNone)
-                            .withName("hvm")
-                            .build())
+          .withGCConfig(gcConfigBuilder.build())
           .withMaxNumRegisters(flags.MaxNumRegisters)
-          .withES6Promise(flags.ES6Promise)
           .withES6Proxy(flags.ES6Proxy)
-          .withES6Class(flags.EvalES6Class)
           .withIntl(flags.Intl)
           .withMicrotaskQueue(flags.MicrotaskQueue)
           .withTrackIO(flags.TrackBytecodeIO)

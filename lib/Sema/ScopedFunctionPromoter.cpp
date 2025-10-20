@@ -182,6 +182,17 @@ void ScopedFunctionPromoter::processDeclarations(Node *scope) {
     if (!node)
       continue;
 
+      // DeclCollector collects type aliases, but ScopedFunctionPromoter should
+      // skip them.
+#if HERMES_PARSE_FLOW
+    if (llvh::isa<ESTree::TypeAliasNode>(node))
+      continue;
+#endif
+#if HERMES_PARSE_TS
+    if (llvh::isa<ESTree::TSTypeAliasDeclarationNode>(node))
+      continue;
+#endif
+
     if (auto *funcDecl = llvh::dyn_cast<FunctionDeclarationNode>(node)) {
       if (funcDecls_.count(funcDecl)) {
         // We encountered one of the candidate declarations.
@@ -257,6 +268,18 @@ Decl::Kind ScopedFunctionPromoter::extractDeclaredIdents(
     return Decl::Kind::ScopedFunction;
   }
 
+#if HERMES_PARSE_FLOW
+  if (auto *hd = llvh::dyn_cast<HookDeclarationNode>(node)) {
+    resolver_.extractDeclaredIdentsFromID(hd->_id, idents);
+    return Decl::Kind::ScopedFunction;
+  }
+
+  if (auto *cd = llvh::dyn_cast<ComponentDeclarationNode>(node)) {
+    resolver_.extractDeclaredIdentsFromID(cd->_id, idents);
+    return Decl::Kind::ScopedFunction;
+  }
+#endif
+
   if (auto *cd = llvh::dyn_cast<ClassDeclarationNode>(node)) {
     resolver_.extractDeclaredIdentsFromID(cd->_id, idents);
     return Decl::Kind::Class;
@@ -264,8 +287,7 @@ Decl::Kind ScopedFunctionPromoter::extractDeclaredIdents(
 
   if (auto *catchClause = llvh::dyn_cast<CatchClauseNode>(node)) {
     resolver_.extractDeclaredIdentsFromID(catchClause->_param, idents);
-    if (auto *id =
-            llvh::dyn_cast_or_null<IdentifierNode>(catchClause->_param)) {
+    if (llvh::dyn_cast_or_null<IdentifierNode>(catchClause->_param)) {
       return Decl::Kind::ES5Catch;
     } else {
       return Decl::Kind::Catch;

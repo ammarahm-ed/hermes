@@ -28,7 +28,8 @@ namespace hermes {
 namespace vm {
 
 /// ES5.1 15.1.2.4
-CallResult<HermesValue> isNaN(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> isNaN(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto res = toNumber_RJS(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
@@ -37,7 +38,8 @@ CallResult<HermesValue> isNaN(void *, Runtime &runtime, NativeArgs args) {
 }
 
 /// ES5.1 15.1.2.5
-CallResult<HermesValue> isFinite(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> isFinite(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto res = toNumber_RJS(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
@@ -47,7 +49,7 @@ CallResult<HermesValue> isFinite(void *, Runtime &runtime, NativeArgs args) {
 }
 
 /// Needed to construct Function.prototype.
-CallResult<HermesValue> emptyFunction(void *, Runtime &, NativeArgs) {
+CallResult<HermesValue> emptyFunction(void *, Runtime &runtime) {
   return HermesValue::encodeUndefinedValue();
 }
 
@@ -62,13 +64,18 @@ static bool isValidRadixChar(char16_t c, int radix) {
 }
 
 /// ES5.1 15.1.2.2 parseInt(string, radix)
-CallResult<HermesValue> parseInt(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> parseInt(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // toString(arg0).
   auto strRes = toString_RJS(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto str = runtime.makeHandle(std::move(*strRes));
+  struct : public Locals {
+    PinnedValue<StringPrimitive> str;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.str = std::move(*strRes);
 
   int radix = 10;
   bool stripPrefix = true;
@@ -88,7 +95,7 @@ CallResult<HermesValue> parseInt(void *, Runtime &runtime, NativeArgs args) {
     }
   }
 
-  auto strView = StringPrimitive::createStringView(runtime, str);
+  auto strView = StringPrimitive::createStringView(runtime, lv.str);
   auto begin = strView.begin();
   auto end = strView.end();
 
@@ -149,15 +156,20 @@ static bool isPrefix(StringView str1, StringView str2) {
 }
 
 /// ES5.1 15.1.2.3 parseFloat(string)
-CallResult<HermesValue> parseFloat(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> parseFloat(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // toString(arg0).
   auto res = toString_RJS(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  auto strHandle = runtime.makeHandle(std::move(*res));
-  auto origStr = StringPrimitive::createStringView(runtime, strHandle);
+  struct : public Locals {
+    PinnedValue<StringPrimitive> strHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.strHandle = std::move(*res);
+  auto origStr = StringPrimitive::createStringView(runtime, lv.strHandle);
 
   auto &idTable = runtime.getIdentifierTable();
 
@@ -239,13 +251,12 @@ CallResult<HermesValue> parseFloat(void *, Runtime &runtime, NativeArgs args) {
 }
 
 /// Customized global function. gc() forces a GC collect.
-CallResult<HermesValue> gc(void *, Runtime &runtime, NativeArgs) {
+CallResult<HermesValue> gc(void *, Runtime &runtime) {
   runtime.collect("forced");
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-throwTypeError(void *ctx, Runtime &runtime, NativeArgs) {
+CallResult<HermesValue> throwTypeError(void *ctx, Runtime &runtime) {
   static const char *TypeErrorMessage[] = {
       "Restricted property cannot be accessed",
       "Dynamic requires are not allowed after static resolution",
@@ -262,6 +273,14 @@ throwTypeError(void *ctx, Runtime &runtime, NativeArgs) {
 // "Libhermes.h".
 void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   GCScope gcScope{runtime, "initGlobalObject", 350};
+
+  struct : public Locals {
+    PinnedValue<JSObject> tempHandle;
+    PinnedValue<> value;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  // Initialize constant values
 
   // Not enumerable, not writable, not configurable.
   DefinePropertyFlags constantDPF =
@@ -291,37 +310,47 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
       [&](SymbolID name, NativeFunctionPtr functionPtr, unsigned paramCount) {
         gcScope.clearAllHandles();
 
-        auto func = NativeFunction::createWithoutPrototype(
-            runtime, nullptr, functionPtr, name, paramCount);
+        auto func = NativeFunction::create(
+            runtime,
+            runtime.functionPrototype,
+            Runtime::makeNullHandle<Environment>(),
+            nullptr,
+            functionPtr,
+            name,
+            paramCount,
+            Runtime::makeNullHandle<JSObject>());
         runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
             runtime.getGlobal(), runtime, name, normalDPF, func));
         return func;
       };
 
   // 15.1.1.1 NaN.
+  lv.value = HermesValue::encodeNaNValue();
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::NaN),
       constantDPF,
-      runtime.makeHandle(HermesValue::encodeNaNValue())));
+      lv.value));
 
   // 15.1.1.2 Infinity.
+  lv.value = HermesValue::encodeTrustedNumberValue(
+      std::numeric_limits<double>::infinity());
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::Infinity),
       constantDPF,
-      runtime.makeHandle(HermesValue::encodeTrustedNumberValue(
-          std::numeric_limits<double>::infinity()))));
+      lv.value));
 
   // 15.1.1.2 undefined.
+  lv.value = HermesValue::encodeUndefinedValue();
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::undefined),
       constantDPF,
-      runtime.makeHandle(HermesValue::encodeUndefinedValue())));
+      lv.value));
 
   // "Forward declaration" of Object.prototype. Its properties will be populated
   // later.
@@ -351,6 +380,7 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   runtime.functionPrototype = NativeFunction::create(
       runtime,
       runtime.objectPrototype,
+      Runtime::makeNullHandle<Environment>(),
       nullptr,
       emptyFunction,
       Predefined::getSymbolID(Predefined::emptyString),
@@ -368,6 +398,7 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   auto throwTypeErrorFunction = NativeFunction::create(
       runtime,
       runtime.functionPrototype,
+      Runtime::makeNullHandle<Environment>(),
       (void *)TypeErrorKind::RestrictedProperty,
       throwTypeError,
       Predefined::getSymbolID(Predefined::emptyString),
@@ -471,13 +502,15 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   // populated later.
   runtime.setPrototype = JSObject::create(runtime);
 
-  runtime.setIteratorPrototype = createSetIteratorPrototype(runtime);
+  runtime.setIteratorPrototype.castAndSetHermesValue<JSObject>(
+      createSetIteratorPrototype(runtime));
 
   // "Forward declaration" of Map.prototype. Its properties will be
   // populated later.
   runtime.mapPrototype = JSObject::create(runtime);
 
-  runtime.mapIteratorPrototype = createMapIteratorPrototype(runtime);
+  runtime.mapIteratorPrototype.castAndSetHermesValue<JSObject>(
+      createMapIteratorPrototype(runtime));
 
   // "Forward declaration" of RegExp.prototype.
   // ES6: 21.2.5 "The RegExp prototype object is an ordinary object. It is not a
@@ -524,11 +557,13 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   runtime.textEncoderPrototype = JSObject::create(runtime);
 
   // Object constructor.
-  runtime.objectConstructor = createObjectConstructor(runtime);
+  runtime.objectConstructor.castAndSetHermesValue<NativeConstructor>(
+      createObjectConstructor(runtime));
 
 // All Error constructors.
-#define ALL_ERROR_TYPE(name)                                      \
-  runtime.name##Constructor = create##name##Constructor(runtime); \
+#define ALL_ERROR_TYPE(name)                                          \
+  runtime.name##Constructor.castAndSetHermesValue<NativeConstructor>( \
+      create##name##Constructor(runtime));                            \
   gcScope.clearAllHandles();
 #include "hermes/VM/NativeErrorTypes.def"
 
@@ -536,64 +571,75 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   populateCallSitePrototype(runtime);
 
   // String constructor.
-  runtime.stringConstructor = createStringConstructor(runtime);
+  runtime.stringConstructor.castAndSetHermesValue<NativeConstructor>(
+      createStringConstructor(runtime));
 
   // BigInt constructor.
   createBigIntConstructor(runtime);
 
   // Function constructor.
-  runtime.functionConstructor = createFunctionConstructor(runtime);
+  runtime.functionConstructor.castAndSetHermesValue<NativeConstructor>(
+      createFunctionConstructor(runtime));
 
   // Number constructor.
-  runtime.numberConstructor = createNumberConstructor(runtime);
+  runtime.numberConstructor.castAndSetHermesValue<NativeConstructor>(
+      createNumberConstructor(runtime));
 
   // Boolean constructor.
-  runtime.booleanConstructor = createBooleanConstructor(runtime);
+  runtime.booleanConstructor.castAndSetHermesValue<NativeConstructor>(
+      createBooleanConstructor(runtime));
 
   // Date constructor.
-  runtime.dateConstructor = createDateConstructor(runtime);
+  runtime.dateConstructor.castAndSetHermesValue<NativeConstructor>(
+      createDateConstructor(runtime));
 
   // RegExp constructor
-  runtime.regExpConstructor = createRegExpConstructor(runtime);
+  runtime.regExpConstructor.castAndSetHermesValue<NativeConstructor>(
+      createRegExpConstructor(runtime));
 
   // Array constructor.
-  runtime.arrayConstructor = createArrayConstructor(runtime);
+  runtime.arrayConstructor.castAndSetHermesValue<NativeConstructor>(
+      createArrayConstructor(runtime));
 
-  if (runtime.hasArrayBuffer()) {
-    // ArrayBuffer constructor.
-    runtime.arrayBufferConstructor = createArrayBufferConstructor(runtime);
+  // ArrayBuffer constructor.
+  runtime.arrayBufferConstructor.castAndSetHermesValue<NativeConstructor>(
+      createArrayBufferConstructor(runtime));
 
-    // DataView constructor.
-    runtime.dataViewConstructor = createDataViewConstructor(runtime);
+  // DataView constructor.
+  runtime.dataViewConstructor.castAndSetHermesValue<NativeConstructor>(
+      createDataViewConstructor(runtime));
 
-    // TypedArrayBase constructor.
-    runtime.typedArrayBaseConstructor =
-        createTypedArrayBaseConstructor(runtime);
+  // TypedArrayBase constructor.
+  runtime.typedArrayBaseConstructor.castAndSetHermesValue<NativeConstructor>(
+      createTypedArrayBaseConstructor(runtime));
 
-#define TYPED_ARRAY(name, type)                                             \
-  runtime.name##ArrayConstructor = create##name##ArrayConstructor(runtime); \
+#define TYPED_ARRAY(name, type)                                            \
+  runtime.name##ArrayConstructor.castAndSetHermesValue<NativeConstructor>( \
+      create##name##ArrayConstructor(runtime));                            \
   gcScope.clearAllHandles();
 #include "hermes/VM/TypedArrays.def"
-  } else {
-    gcScope.clearAllHandles();
-  } // hasArrayBuffer
 
   // Set constructor.
-  runtime.setConstructor = createSetConstructor(runtime);
+  runtime.setConstructor.castAndSetHermesValue<NativeConstructor>(
+      createSetConstructor(runtime));
 
   // Map constructor.
-  runtime.mapConstructor = createMapConstructor(runtime);
+  runtime.mapConstructor.castAndSetHermesValue<NativeConstructor>(
+      createMapConstructor(runtime));
 
   // WeakMap constructor.
-  runtime.weakMapConstructor = createWeakMapConstructor(runtime);
+  runtime.weakMapConstructor.castAndSetHermesValue<NativeConstructor>(
+      createWeakMapConstructor(runtime));
 
   // WeakSet constructor.
-  runtime.weakSetConstructor = createWeakSetConstructor(runtime);
+  runtime.weakSetConstructor.castAndSetHermesValue<NativeConstructor>(
+      createWeakSetConstructor(runtime));
 
   // Only define WeakRef constructor if microtasks are being used.
   if (LLVM_UNLIKELY(runtime.hasMicrotaskQueue())) {
     // WeakRef constructor.
-    runtime.weakRefConstructor = createWeakRefConstructor(runtime);
+    runtime.weakRefConstructor.castAndSetHermesValue<NativeConstructor>(
+        createWeakRefConstructor(runtime));
   }
 
   // Symbol constructor.
@@ -612,14 +658,16 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   populateRegExpStringIteratorPrototype(runtime);
 
   // GeneratorFunction constructor (not directly exposed in the global object).
-  runtime.generatorFunctionConstructor =
-      createGeneratorFunctionConstructor(runtime);
+  runtime.generatorFunctionConstructor.castAndSetHermesValue<NativeConstructor>(
+      createGeneratorFunctionConstructor(runtime));
 
   // AsyncFunction constructor (not directly exposed in the global object).
-  runtime.asyncFunctionConstructor = createAsyncFunctionConstructor(runtime);
+  runtime.asyncFunctionConstructor.castAndSetHermesValue<NativeConstructor>(
+      createAsyncFunctionConstructor(runtime));
 
   // TextEncoder constructor.
-  runtime.textEncoderConstructor = createTextEncoderConstructor(runtime);
+  runtime.textEncoderConstructor.castAndSetHermesValue<NativeConstructor>(
+      createTextEncoderConstructor(runtime));
 
   // %GeneratorPrototype%.
   populateGeneratorPrototype(runtime);
@@ -630,38 +678,43 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   }
 
   // Define the global Math object
+  lv.tempHandle.castAndSetHermesValue<JSObject>(createMathObject(runtime));
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::Math),
       normalDPF,
-      createMathObject(runtime)));
+      lv.tempHandle));
 
   // Define the global JSON object
+  createJSONObject(runtime, lv.tempHandle);
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::JSON),
       normalDPF,
-      createJSONObject(runtime)));
+      lv.tempHandle));
 
   if (LLVM_UNLIKELY(runtime.hasES6Proxy())) {
     // Define the global Reflect object
+    createReflectObject(runtime, lv.tempHandle);
     runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
         runtime.getGlobal(),
         runtime,
         Predefined::getSymbolID(Predefined::Reflect),
         normalDPF,
-        createReflectObject(runtime)));
+        lv.tempHandle));
   }
 
   // Define the global %HermesInternal object.
+  lv.tempHandle.castAndSetHermesValue<JSObject>(
+      createHermesInternalObject(runtime, jsLibFlags));
   runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
       runtime.getGlobal(),
       runtime,
       Predefined::getSymbolID(Predefined::HermesInternal),
       constantDPF,
-      createHermesInternalObject(runtime, jsLibFlags)));
+      lv.tempHandle));
 
 #ifdef HERMES_ENABLE_DEBUGGER
 
@@ -670,7 +723,7 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
       runtime.getGlobal(),
       runtime,
       runtime.getIdentifierTable().registerLazyIdentifier(
-          createASCIIRef("DebuggerInternal")),
+          runtime, createASCIIRef("DebuggerInternal")),
       constantDPF,
       createDebuggerInternalObject(runtime)));
 
@@ -739,6 +792,7 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   runtime.requireFunction = NativeFunction::create(
       runtime,
       runtime.functionPrototype,
+      Runtime::makeNullHandle<Environment>(),
       nullptr,
       require,
       Predefined::getSymbolID(Predefined::require),
@@ -754,12 +808,13 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   // Define the global Intl object
   // TODO T65916424: Consider how we can move this somewhere more modular.
   if (runtime.hasIntl()) {
+    lv.value = intl::createIntlObject(runtime);
     runtime.ignoreAllocationFailure(JSObject::defineOwnProperty(
         runtime.getGlobal(),
         runtime,
         Predefined::getSymbolID(Predefined::Intl),
         normalDPF,
-        intl::createIntlObject(runtime)));
+        lv.value));
   }
 #endif
 }

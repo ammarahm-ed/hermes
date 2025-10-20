@@ -20,6 +20,7 @@ namespace cdp {
 using namespace facebook::hermes::debugger;
 
 static const char *const kBreakpointsKey = "breakpoints";
+static const char *const kBreakpointsActiveKey = "breakpointsActive";
 
 enum class PausedNotificationReason { kException, kOther, kStep };
 
@@ -40,6 +41,18 @@ DebuggerDomainAgent::DebuggerDomainAgent(
       state_(state),
       enabled_(false),
       paused_(false) {
+  std::unique_ptr<StateValue> breakpointsActiveStateValue =
+      state_.getCopy({kBreakpointsActiveKey});
+  if (breakpointsActiveStateValue) {
+    BooleanStateValue *boolStateValue =
+        dynamic_cast<BooleanStateValue *>(breakpointsActiveStateValue.get());
+    breakpointsActive_ = boolStateValue->value;
+  } else {
+    // If the flag is not persisted in the state, then we default to true
+    // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/inspector/v8-debugger-agent-impl.cc;l=450-454;drc=27d34700b83f381c62e3a348de2e6dfdc08364b8
+    breakpointsActive_ = true;
+  }
+
   std::unique_ptr<StateValue> value = state_.getCopy({kBreakpointsKey});
   if (value) {
     DictionaryStateValue *dict =
@@ -172,37 +185,22 @@ void DebuggerDomainAgent::enable() {
   }
   enabled_ = true;
 
+#ifndef NDEBUG
+  for (const auto &[_, cdpBreakpoint] : cdpBreakpoints_) {
+    assert(
+        cdpBreakpoint.hermesBreakpoints.empty() &&
+        "Unexpected linked internal breakpoint");
+  }
+#endif
+
   // The debugger just got enabled; inform the client about all scripts.
   for (auto &srcLoc : runtime_.getDebugger().getLoadedScripts()) {
     sendScriptParsedNotificationToClient(srcLoc);
 
-    // TODO: Add test for this once state persistence is implemented
-    // Notify the client about all breakpoints in this script
-    for (const auto &[cdpBreakpointID, cdpBreakpoint] : cdpBreakpoints_) {
-      for (const HermesBreakpoint &hermesBreakpoint :
-           cdpBreakpoint.hermesBreakpoints) {
-        if (hermesBreakpoint.scriptID == srcLoc.fileId) {
-          // This should have been checked before storing the Hermes
-          // breakpoint in the CDP breakpoint.
-          assert(
-              hermesBreakpoint.breakpointID != debugger::kInvalidBreakpoint &&
-              "Invalid breakpoint");
-          debugger::BreakpointInfo breakpointInfo =
-              runtime_.getDebugger().getBreakpointInfo(
-                  hermesBreakpoint.breakpointID);
-          if (!breakpointInfo.resolved) {
-            // Resolved state changed between breakpoint creation and
-            // notification
-            assert(false && "Previously resolved breakpoint unresolved");
-            continue;
-          }
-
-          m::debugger::BreakpointResolvedNotification resolved;
-          resolved.breakpointId = std::to_string(cdpBreakpointID);
-          resolved.location =
-              m::debugger::makeLocation(breakpointInfo.resolvedLocation);
-          sendNotificationToClient(resolved);
-        }
+    for (auto &[cdpBreakpointID, cdpBreakpoint] : cdpBreakpoints_) {
+      if (srcLoc.fileName == cdpBreakpoint.description.url) {
+        applyBreakpointAndSendNotification(
+            cdpBreakpointID, cdpBreakpoint, srcLoc);
       }
     }
   }
@@ -234,6 +232,13 @@ void DebuggerDomainAgent::cleanUp() {
   // need that functionality, then we might need to track breakpoints set by
   // this client and only remove those.
   runtime_.getDebugger().deleteAllBreakpoints();
+
+  // Unlink all persisted CDPBreakpoints from their HermesBreakpoints, in case
+  // domain will be re-enabled. This is required, because all internal Hermes
+  // breakpoints were deleted above.
+  for (auto &[_, cdpBreakpoint] : cdpBreakpoints_) {
+    cdpBreakpoint.hermesBreakpoints.clear();
+  }
 
   if (debuggerEventCallbackId_ != kInvalidDebuggerEventCallbackID) {
     asyncDebugger_.removeDebuggerEventCallback_TS(debuggerEventCallbackId_);
@@ -449,24 +454,29 @@ bool DebuggerDomainAgent::isTopFrameLocationBlackboxed() {
   }
   debugger::SourceLocation loc = stackTrace.callFrameForIndex(0).location;
   if (breakpointsActive_) {
-    for (auto &[id, cdpBreakpoint] : cdpBreakpoints_) {
-      auto breakpointLoc =
-          runtime_.getDebugger().getBreakpointInfo(id).resolvedLocation;
+    for (const auto &[cdpBreakpointID, cdpBreakpoint] : cdpBreakpoints_) {
+      for (const HermesBreakpoint &hermesBreakpoint :
+           cdpBreakpoint.hermesBreakpoints) {
+        auto breakpointLoc =
+            runtime_.getDebugger()
+                .getBreakpointInfo(hermesBreakpoint.breakpointID)
+                .resolvedLocation;
 
-      auto locationHasManualBreakpoint =
-          (loc.fileId == breakpointLoc.fileId &&
-           loc.line - 1 == breakpointLoc.line &&
-           loc.column - 1 == breakpointLoc.column);
-      // Locations with manual breakpoints are not considered blackboxed.
-      // For example, if a user steps inside a blackboxed function, if any of
-      // the next lines in that function have a manual breakpoint, we should
-      // respect them and stop on them rather than stepping over them. The same
-      // logic applies to explicit pauses. While they trigger stepping into
-      // until out of blackboxed ranges, or until the program continues
-      // execution if one of these steps lands on a line with a manual
-      // breakpoint, we should stop on it.
-      if (locationHasManualBreakpoint) {
-        return false;
+        auto locationHasManualBreakpoint =
+            (loc.fileId == breakpointLoc.fileId &&
+             loc.line == breakpointLoc.line &&
+             loc.column == breakpointLoc.column);
+        // Locations with manual breakpoints are not considered blackboxed.
+        // For example, if a user steps inside a blackboxed function, if any of
+        // the next lines in that function have a manual breakpoint, we should
+        // respect them and stop on them rather than stepping over them. The
+        // same logic applies to explicit pauses. While they trigger stepping
+        // into until out of blackboxed ranges, or until the program continues
+        // execution if one of these steps lands on a line with a manual
+        // breakpoint, we should stop on it.
+        if (locationHasManualBreakpoint) {
+          return false;
+        }
       }
     }
   }
@@ -660,9 +670,19 @@ void DebuggerDomainAgent::removeBreakpoint(
 
 void DebuggerDomainAgent::setBreakpointsActive(
     const m::debugger::SetBreakpointsActiveRequest &req) {
-  // We don't check for `enabled_` here because V8 allows
-  // `setBreakpointsActive` to be called while debugger is disabled:
-  // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/inspector/v8-debugger-agent-impl.cc;l=562-563;drc=db2ef55b78602346f67f7f015ec6ebb9e554d228
+  // DomainState modifications are commited on Transaction destruction. With
+  // sendResponseToClient being called prior to scope exit, in the test
+  // environment this could cause a race condition.
+  {
+    // We don't check for `enabled_` here because V8 allows
+    // `setBreakpointsActive` to be called while debugger is disabled:
+    // https://source.chromium.org/chromium/chromium/src/+/main:v8/src/inspector/v8-debugger-agent-impl.cc;l=562-563;drc=db2ef55b78602346f67f7f015ec6ebb9e554d228
+    BooleanStateValue breakpointsActiveStateValue;
+    breakpointsActiveStateValue.value = req.active;
+    DomainState::Transaction transaction = state_.transaction();
+    transaction.add({kBreakpointsActiveKey}, breakpointsActiveStateValue);
+  }
+
   breakpointsActive_ = req.active;
   sendResponseToClient(m::makeOkResponse(req.id));
 }
@@ -765,14 +785,7 @@ void DebuggerDomainAgent::processNewLoadedScript() {
     // Apply existing breakpoints to the new script.
     for (auto &[id, breakpoint] : cdpBreakpoints_) {
       if (loc.fileName == breakpoint.description.url) {
-        auto breakpointInfo = applyBreakpoint(breakpoint, loc.fileId);
-        if (breakpointInfo) {
-          m::debugger::BreakpointResolvedNotification resolved;
-          resolved.breakpointId = std::to_string(id);
-          resolved.location =
-              m::debugger::makeLocation(breakpointInfo.value().location);
-          sendNotificationToClient(resolved);
-        }
+        applyBreakpointAndSendNotification(id, breakpoint, loc);
       }
     }
   }
@@ -851,21 +864,37 @@ DebuggerDomainAgent::createHermesBreakpoint(
   return HermesBreakpointLocation{breakpointID, info.resolvedLocation};
 }
 
+/// Applies a CDP breakpoint to a script. If successful, will send
+/// Debugger.breakpointResolved notification to client.
+void DebuggerDomainAgent::applyBreakpointAndSendNotification(
+    CDPBreakpointID cdpBreakpointID,
+    CDPBreakpoint &cdpBreakpoint,
+    const debugger::SourceLocation &srcLoc) {
+  auto hermesBreakpointLoc = applyBreakpoint(cdpBreakpoint, srcLoc.fileId);
+  if (hermesBreakpointLoc) {
+    m::debugger::BreakpointResolvedNotification resolved;
+    resolved.breakpointId = std::to_string(cdpBreakpointID);
+    resolved.location =
+        m::debugger::makeLocation(hermesBreakpointLoc.value().location);
+    sendNotificationToClient(resolved);
+  }
+}
+
 /// Apply a CDP breakpoint to a script, creating a Hermes breakpoint and
 /// associating it with the specified CDP breakpoint. Returns the newly-
 /// created Hermes breakpoint if successful, nullopt otherwise.
 std::optional<HermesBreakpointLocation> DebuggerDomainAgent::applyBreakpoint(
-    CDPBreakpoint &breakpoint,
+    CDPBreakpoint &cdpBreakpoint,
     debugger::ScriptID scriptID) {
   // Create the Hermes breakpoint
   std::optional<HermesBreakpointLocation> hermesBreakpoint =
-      createHermesBreakpoint(scriptID, breakpoint.description);
+      createHermesBreakpoint(scriptID, cdpBreakpoint.description);
   if (!hermesBreakpoint) {
     return {};
   }
 
   // Associate this Hermes breakpoint with the CDP breakpoint
-  breakpoint.hermesBreakpoints.push_back(
+  cdpBreakpoint.hermesBreakpoints.push_back(
       HermesBreakpoint{hermesBreakpoint.value().id, scriptID});
 
   return hermesBreakpoint;

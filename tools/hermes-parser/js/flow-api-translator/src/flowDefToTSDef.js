@@ -35,19 +35,22 @@ const DUMMY_LOC: FlowESTree.SourceLocation = {
   end: {line: 1, column: 0},
 };
 
+type LooseOmit<O: interface {}, K: $Keys<$FlowFixMe>> = Pick<
+  O,
+  Exclude<$Keys<O>, K>,
+>;
 function constructFlowNode<T: FlowESTree.BaseNode>(
-  node: $Diff<T, FlowESTree.BaseNode>,
+  node: LooseOmit<NoInfer<T>, 'parent'>,
 ): T {
-  // $FlowFixMe[prop-missing]
-  return node;
+  return (node: $FlowFixMe);
 }
 
 const cloneJSDocCommentsToNewNode =
-  // $FlowExpectedError[incompatible-cast] - trust me this re-type is 100% safe
+  // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
   (cloneJSDocCommentsToNewNodeOriginal: (mixed, mixed) => void);
 
 const makeCommentOwnLine =
-  // $FlowExpectedError[incompatible-cast] - trust me this re-type is 100% safe
+  // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
   (makeCommentOwnLineOriginal: (string, mixed) => string);
 
 const VALID_REACT_IMPORTS = new Set<string>(['React', 'react']);
@@ -60,7 +63,7 @@ let shouldAddReactImport: boolean | null = null;
 
 // Returns appropriate Identifier for `React` import.
 // If a global is in use, set a flag to indicate that we should add the import.
-function getReactIdentifier(hasReactImport: boolean) {
+function getReactIdentifier(hasReactImport: boolean): TSESTree.EntityName {
   if (shouldAddReactImport !== false) {
     shouldAddReactImport = !hasReactImport;
   }
@@ -99,8 +102,6 @@ export function flowDefToTSDef(
         node.type
       ](
         // $FlowExpectedError[incompatible-type]
-        // $FlowExpectedError[prop-missing]
-        // $FlowFixMe[incompatible-call]
         node,
       );
       tsBody.push(...(Array.isArray(result) ? result : [result]));
@@ -177,7 +178,7 @@ const getTransforms = (
     // $FlowExpectedError[prop-missing]
     // $FlowExpectedError[cannot-write]
     node.comments ??= [];
-    // $FlowExpectedError[incompatible-cast]
+    // $FlowExpectedError[incompatible-type]
     (node.comments: Array<TSESTree.Comment>).push(comment);
   }
   function unsupportedAnnotation(
@@ -408,7 +409,7 @@ const getTransforms = (
       }
     }
 
-    const bodyRepresentationType =
+    const bodyRepresentationType: TSESTree.TypeNode =
       body.type === 'EnumNumberBody'
         ? {type: 'TSNumberKeyword', loc: DUMMY_LOC}
         : {type: 'TSStringKeyword', loc: DUMMY_LOC};
@@ -421,6 +422,11 @@ const getTransforms = (
         const: false,
         declare: true,
         id: enumName,
+        body: {
+          type: 'TSEnumBody',
+          members,
+          loc: DUMMY_LOC,
+        },
         members,
       },
       // flow also exports `.cast`, `.isValid`, `.members` and `.getName` for enums
@@ -442,6 +448,7 @@ const getTransforms = (
         loc: DUMMY_LOC,
         declare: true,
         id: enumName,
+        kind: 'namespace',
         body: {
           type: 'TSModuleBlock',
           loc: DUMMY_LOC,
@@ -851,10 +858,9 @@ const getTransforms = (
         type: 'TSClassImplements',
         loc: DUMMY_LOC,
         expression: transform.Identifier(node.id, false),
-        typeParameters:
-          node.typeParameters == null
-            ? undefined
-            : transform.TypeParameterInstantiation(node.typeParameters),
+        typeParameters: transform.TypeParameterInstantiation(
+          node.typeParameters,
+        ),
       };
     },
     DeclareClass(
@@ -928,7 +934,7 @@ const getTransforms = (
               cloneJSDocCommentsToNewNode(member, newNode);
               classMembers.push(newNode);
             } else {
-              const [key, computed] = (() => {
+              const [key, computed] = ((): [TSESTree.PropertyName, boolean] => {
                 const _key = member.key;
                 if (_key.type === 'Identifier' && _key.name.startsWith('@@')) {
                   const name = _key.name.slice(2);
@@ -1063,12 +1069,11 @@ const getTransforms = (
           superClass == null
             ? null
             : superClass.id.type === 'QualifiedTypeIdentifier'
-            ? transform.QualifiedTypeIdentifier(superClass.id)
-            : transform.Identifier((superClass.id: $FlowFixMe), false),
-        superTypeParameters:
-          superClass?.typeParameters == null
-            ? undefined
-            : transform.TypeParameterInstantiation(superClass.typeParameters),
+              ? transform.QualifiedTypeIdentifier(superClass.id)
+              : transform.Identifier((superClass.id: $FlowFixMe), false),
+        superTypeParameters: transform.TypeParameterInstantiation(
+          superClass?.typeParameters,
+        ),
         typeParameters:
           node.typeParameters == null
             ? undefined
@@ -1372,7 +1377,10 @@ const getTransforms = (
             }: TSESTree.ExportNamedDeclarationWithoutSourceWithMultiple);
           }
 
-          const declarations = (() => {
+          const declarations = ((): Array<{
+            declaration: TSESTree.NamedExportDeclarations,
+            exportKind: TSESTree.ExportKind,
+          }> => {
             switch (node.declaration.type) {
               case 'DeclareClass':
                 return [
@@ -1441,9 +1449,66 @@ const getTransforms = (
             }
           })();
 
-          return declarations.map(
-            ({declaration, exportKind}) =>
-              ({
+          const mappedDeclarations: Array<
+            | TSESTree.ExportNamedDeclaration
+            | Array<TSESTree.ExportNamedDeclaration>,
+          > = declarations.map(({declaration, exportKind}) => {
+            if (
+              declaration.type === 'VariableDeclaration' &&
+              declaration.declarations.length === 1
+            ) {
+              const ident = declaration.declarations[0].id;
+              if (ident.type === 'Identifier') {
+                const name = ident.name;
+                return [
+                  {
+                    type: 'ExportNamedDeclaration',
+                    loc: DUMMY_LOC,
+                    // flow does not currently support assertions
+                    assertions: [],
+                    declaration,
+                    exportKind,
+                    source: null,
+                    specifiers: [],
+                  },
+                  {
+                    type: 'ExportNamedDeclaration',
+                    declaration: {
+                      type: 'TSTypeAliasDeclaration',
+                      declare: true,
+                      id: {
+                        type: 'Identifier',
+                        decorators: [],
+                        name,
+                        optional: false,
+                        loc: DUMMY_LOC,
+                      },
+                      typeAnnotation: {
+                        type: 'TSTypeQuery',
+                        exprName: {
+                          type: 'Identifier',
+                          decorators: [],
+                          name,
+                          optional: false,
+                          loc: DUMMY_LOC,
+                        },
+                        loc: DUMMY_LOC,
+                      },
+                      loc: DUMMY_LOC,
+                    },
+                    source: null,
+                    loc: DUMMY_LOC,
+                    specifiers: [],
+                    exportKind: 'type',
+                    // flow does not currently support assertions
+                    assertions: [],
+                  },
+                ];
+              }
+            }
+
+            const exportNamedDeclaration: TSESTree.ExportNamedDeclarationWithoutSourceWithSingle =
+              {
                 type: 'ExportNamedDeclaration',
                 loc: DUMMY_LOC,
                 // flow does not currently support assertions
@@ -1452,8 +1517,11 @@ const getTransforms = (
                 exportKind,
                 source: null,
                 specifiers: [],
-              }: TSESTree.ExportNamedDeclarationWithoutSourceWithSingle),
-          );
+              };
+            return exportNamedDeclaration;
+          });
+
+          return mappedDeclarations.flat();
         } else {
           return ({
             type: 'ExportNamedDeclaration',
@@ -1709,6 +1777,50 @@ const getTransforms = (
       // TODO - we could simulate this in a variety of ways
       // Examples - https://basarat.gitbook.io/typescript/main-1/nominaltyping
 
+      if (node.supertype == null && node.typeParameters == null) {
+        const name = `__${node.id.name}__`;
+        return {
+          type: 'TSTypeAliasDeclaration',
+          loc: DUMMY_LOC,
+          declare: true,
+          id: transform.Identifier(node.id, false),
+          typeAnnotation: {
+            type: 'TSIntersectionType',
+            types: [
+              {
+                type: 'TSSymbolKeyword',
+                loc: DUMMY_LOC,
+              },
+              {
+                type: 'TSTypeLiteral',
+                loc: DUMMY_LOC,
+                members: [
+                  {
+                    type: 'TSPropertySignature',
+                    computed: false,
+                    loc: DUMMY_LOC,
+                    key: {
+                      type: 'Identifier',
+                      name: name,
+                      loc: DUMMY_LOC,
+                    },
+                    typeAnnotation: {
+                      type: 'TSTypeAnnotation',
+                      loc: DUMMY_LOC,
+                      typeAnnotation: {
+                        type: 'TSStringKeyword',
+                        loc: DUMMY_LOC,
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            loc: DUMMY_LOC,
+          },
+        };
+      }
+
       return {
         type: 'TSTypeAliasDeclaration',
         loc: DUMMY_LOC,
@@ -1847,7 +1959,7 @@ const getTransforms = (
       })();
 
       const mainExport = {
-        type: 'ExportNamedDeclaration',
+        type: ('ExportNamedDeclaration': 'ExportNamedDeclaration'),
         loc: DUMMY_LOC,
         assertions: [],
         declaration: exportedDeclaration,
@@ -2069,6 +2181,37 @@ const getTransforms = (
           return unsupportedAnnotation(node, fullTypeName);
         }
 
+        case '$ArrayBufferView': {
+          // `$ArrayBufferView` => `ArrayBufferView`
+          return {
+            type: 'TSTypeReference',
+            loc: DUMMY_LOC,
+            typeName: {
+              type: 'Identifier',
+              loc: DUMMY_LOC,
+              name: 'ArrayBufferView',
+            },
+          };
+        }
+
+        case '$ArrayLike': {
+          // `$ArrayLike<T>` => `ArrayLike<T>`
+          return {
+            type: 'TSTypeReference',
+            loc: DUMMY_LOC,
+            typeName: {
+              type: 'Identifier',
+              loc: DUMMY_LOC,
+              name: 'ArrayLike',
+            },
+            typeParameters: {
+              type: 'TSTypeParameterInstantiation',
+              loc: DUMMY_LOC,
+              params: assertHasExactlyNTypeParameters(1),
+            },
+          };
+        }
+
         case '$Diff':
         case '$Rest': {
           // `$Diff<A, B>` => `Pick<A, Exclude<keyof A, keyof B>>`
@@ -2150,14 +2293,18 @@ const getTransforms = (
             );
           }
 
-          return {
-            type: 'TSImportType',
+          // New AST format for `typeof import('module')`
+          return ({
+            type: 'TSTypeQuery',
             loc: DUMMY_LOC,
-            isTypeOf: true,
-            argument: moduleName,
-            qualifier: null,
-            typeParameters: null,
-          };
+            exprName: {
+              type: 'TSImportType',
+              loc: DUMMY_LOC,
+              argument: moduleName,
+              qualifier: null,
+              typeParameters: null,
+            },
+          }: $FlowFixMe);
         }
 
         case '$FlowFixMe': {
@@ -2189,6 +2336,17 @@ const getTransforms = (
               },
               in: false,
               out: false,
+            },
+            key: {
+              type: 'Identifier',
+              loc: DUMMY_LOC,
+              name: 'K',
+            },
+            constraint: {
+              type: 'TSTypeOperator',
+              loc: DUMMY_LOC,
+              operator: 'keyof',
+              typeAnnotation: assertHasExactlyNTypeParameters(1)[0],
             },
             nameType: null,
             typeAnnotation: {
@@ -2643,8 +2801,8 @@ const getTransforms = (
               },
             };
           }
-          // React.ElementRef<typeof Component> -> React.ElementRef<typeof Component>
-          // React$ElementRef<typeof Component> -> React.ElementRef<typeof Component>
+          // React.ElementRef<typeof Component> -> React.ComponentRef<typeof Component>
+          // React$ElementRef<typeof Component> -> React.ComponentRef<typeof Component>
           case 'React$ElementRef':
           case 'React.ElementRef':
             return {
@@ -2657,7 +2815,7 @@ const getTransforms = (
                 right: {
                   type: 'Identifier',
                   loc: DUMMY_LOC,
-                  name: `ElementRef`,
+                  name: `ComponentRef`,
                 },
               },
               typeParameters: {
@@ -2763,7 +2921,7 @@ const getTransforms = (
               );
             }
 
-            const newParams = (() => {
+            const newParams = ((): $ReadOnlyArray<TSESTree.TypeNode> => {
               if (params.length === 1) {
                 return assertHasExactlyNTypeParameters(1);
               }
@@ -2943,10 +3101,9 @@ const getTransforms = (
           node.id.type === 'Identifier'
             ? transform.Identifier(node.id, false)
             : transform.QualifiedTypeIdentifier(node.id),
-        typeParameters:
-          node.typeParameters == null
-            ? undefined
-            : transform.TypeParameterInstantiation(node.typeParameters),
+        typeParameters: transform.TypeParameterInstantiation(
+          node.typeParameters,
+        ),
       };
     },
     Identifier(
@@ -2997,12 +3154,12 @@ const getTransforms = (
     ): Array<DeclarationOrUnsupported<TSESTree.ImportDeclaration>> {
       const importKind = node.importKind;
 
-      const specifiers = [];
+      const specifiers: Array<TSESTree.ImportClause> = [];
       const unsupportedSpecifiers: Array<TSESTree.TSTypeAliasDeclaration> = [];
       node.specifiers.forEach(spec => {
         let id = (() => {
           if (node.importKind === 'typeof' || spec.importKind === 'typeof') {
-            const id = {
+            const id: TSESTree.Identifier = {
               type: 'Identifier',
               loc: DUMMY_LOC,
               name: getPlaceholderNameForTypeofImport(),
@@ -3064,7 +3221,7 @@ const getTransforms = (
               loc: DUMMY_LOC,
               assertions: node.assertions.map(transform.ImportAttribute),
               importKind:
-                importKind === 'typeof' ? 'type' : importKind ?? 'value',
+                importKind === 'typeof' ? 'type' : (importKind ?? 'value'),
               source: transform.StringLiteral(node.source),
               specifiers,
             },
@@ -3079,12 +3236,13 @@ const getTransforms = (
       return {
         type: 'TSInterfaceHeritage',
         loc: DUMMY_LOC,
-        // Bug: node.id can be qualified
-        expression: transform.Identifier((node.id: $FlowFixMe), false),
-        typeParameters:
-          node.typeParameters == null
-            ? undefined
-            : transform.TypeParameterInstantiation(node.typeParameters),
+        expression:
+          node.id.type === 'QualifiedTypeIdentifier'
+            ? transform.QualifiedTypeIdentifier(node.id)
+            : transform.Identifier(node.id, false),
+        typeParameters: transform.TypeParameterInstantiation(
+          node.typeParameters,
+        ),
       };
     },
     InterfaceTypeAnnotation(
@@ -3103,10 +3261,9 @@ const getTransforms = (
               loc: DUMMY_LOC,
               // Bug: ex.id can be qualified
               typeName: transform.Identifier((ex.id: $FlowFixMe), false),
-              typeParameters:
-                ex.typeParameters == null
-                  ? undefined
-                  : transform.TypeParameterInstantiation(ex.typeParameters),
+              typeParameters: transform.TypeParameterInstantiation(
+                ex.typeParameters,
+              ),
             })),
             transform.ObjectTypeAnnotation(node.body),
           ],
@@ -3244,6 +3401,12 @@ const getTransforms = (
             in: false,
             out: false,
           },
+          key: {
+            type: 'Identifier',
+            loc: DUMMY_LOC,
+            name: prop.keyTparam.name,
+          },
+          constraint: transformTypeAnnotationType(prop.sourceType),
           readonly: prop.variance?.kind === 'plus',
           optional: prop.optional === 'Optional',
           typeAnnotation: transformTypeAnnotationType(prop.propType),
@@ -3371,8 +3534,8 @@ const getTransforms = (
         type T = { ...T1, ...T2, ...T3, b: string  };
         // becomes
         type T =
-          & Omit<T1, keyof (T2 | T3 | { b: string })>
-          & Omit<T2, keyof (T3 | { b: string })>
+          & Omit<T1, keyof T2 | keyof T3 | keyof { b: string }>
+          & Omit<T2, keyof T3 | keyof { b: string }>
           & Omit<T3, keyof { b: string }>
           & { b: string };
         ```
@@ -3429,7 +3592,7 @@ const getTransforms = (
         const tsBody = members
           .sort((a, b) => a.start - b.start)
           .map(({node}) => node);
-        const objectType = {
+        const objectType: TSESTree.TypeNode = {
           type: 'TSTypeLiteral',
           loc: DUMMY_LOC,
           members: tsBody,
@@ -3453,14 +3616,22 @@ const getTransforms = (
               params: [
                 currentType,
                 {
-                  type: 'TSTypeOperator',
+                  type: 'TSUnionType',
                   loc: DUMMY_LOC,
-                  operator: 'keyof',
-                  typeAnnotation: {
-                    type: 'TSUnionType',
-                    loc: DUMMY_LOC,
-                    types: [...remainingTypes, objectType],
-                  },
+                  types: [
+                    ...remainingTypes.map(t => ({
+                      type: 'TSTypeOperator',
+                      loc: DUMMY_LOC,
+                      operator: 'keyof',
+                      typeAnnotation: t,
+                    })),
+                    {
+                      type: 'TSTypeOperator',
+                      loc: DUMMY_LOC,
+                      operator: 'keyof',
+                      typeAnnotation: objectType,
+                    },
+                  ],
                 },
               ],
             },
@@ -3490,7 +3661,38 @@ const getTransforms = (
     },
     ObjectTypeIndexer(
       node: FlowESTree.ObjectTypeIndexer,
-    ): TSESTree.TSIndexSignature {
+    ): TSESTree.TSIndexSignature | TSESTree.TSPropertySignatureComputedName {
+      if (node.key.type === 'GenericTypeAnnotation') {
+        const ident =
+          node.key.id.type === 'Identifier' ? node.key.id : node.key.id.id;
+        return {
+          type: 'TSPropertySignature',
+          computed: true,
+          loc: DUMMY_LOC,
+          key: {
+            type: 'BinaryExpression',
+            operator: 'in',
+            loc: DUMMY_LOC,
+            left: {
+              type: 'Identifier',
+              name: node.id == null ? '$$Key$$' : node.id.name,
+              loc: DUMMY_LOC,
+            },
+            right: {
+              type: 'Identifier',
+              name: ident.name,
+              loc: DUMMY_LOC,
+            },
+          },
+          readonly: node.variance?.kind === 'plus',
+          static: node.static,
+          typeAnnotation: {
+            type: 'TSTypeAnnotation',
+            loc: DUMMY_LOC,
+            typeAnnotation: transformTypeAnnotationType(node.value),
+          },
+        };
+      }
       return {
         type: 'TSIndexSignature',
         loc: DUMMY_LOC,
@@ -3703,14 +3905,14 @@ const getTransforms = (
       node: FlowESTree.TupleTypeAnnotation,
     ): TSESTree.TSTupleType | TSESTree.TSTypeOperator {
       const allReadOnly =
-        node.types.length > 0 &&
-        node.types.every(
+        node.elementTypes.length > 0 &&
+        node.elementTypes.every(
           element =>
             element.type === 'TupleTypeLabeledElement' &&
             element.variance != null &&
             element.variance.kind === 'plus',
         );
-      const elems = node.types.map(element => {
+      const elems = node.elementTypes.map((element): TSESTree.TypeNode => {
         switch (element.type) {
           case 'TupleTypeLabeledElement':
             if (!allReadOnly && element.variance != null) {
@@ -3748,7 +3950,7 @@ const getTransforms = (
         }
       });
 
-      const elementTypes = node.inexact
+      const elementTypes: Array<TSESTree.TypeNode> = node.inexact
         ? [
             ...elems,
             {
@@ -3864,8 +4066,14 @@ const getTransforms = (
       };
     },
     TypeParameterInstantiation(
-      node: FlowESTree.TypeParameterInstantiation,
-    ): TSESTree.TSTypeParameterInstantiation {
+      node: ?FlowESTree.TypeParameterInstantiation,
+    ): TSESTree.TSTypeParameterInstantiation | void {
+      // Empty parameters in Flow are valid, but TS requires at least one parameter.
+      // This ensures empty type parameters are not created in TS
+      if (node == null || node.params.length === 0) {
+        return undefined;
+      }
+
       return {
         type: 'TSTypeParameterInstantiation',
         loc: DUMMY_LOC,
@@ -3971,7 +4179,7 @@ const getTransforms = (
 
       // TS cannot support `renderType` so we always use ReactNode as the return type.
       const hasReactImport = isReactImport(node, 'React');
-      const returnType = {
+      const returnType: TSESTree.TSTypeAnnotation = {
         type: 'TSTypeAnnotation',
         loc: DUMMY_LOC,
         // If no rendersType we assume its ReactNode type.
@@ -4010,10 +4218,12 @@ const getTransforms = (
     // $FlowExpectedError[missing-local-annot]
     transform[key] = (node, ...args) => {
       const result = originalFn(node, ...args);
-      if (Array.isArray(result)) {
-        cloneJSDocCommentsToNewNode(node, result[0]);
-      } else {
-        cloneJSDocCommentsToNewNode(node, result);
+      if (node != null && result != null) {
+        if (Array.isArray(result)) {
+          cloneJSDocCommentsToNewNode(node, result[0]);
+        } else {
+          cloneJSDocCommentsToNewNode(node, result);
+        }
       }
       return result;
     };

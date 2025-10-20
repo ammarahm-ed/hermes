@@ -8,6 +8,7 @@
 #include <hermes/Support/Algorithms.h>
 #include <hermes/Support/MemoryBuffer.h>
 #include <hermes/TraceInterpreter.h>
+#include <hermes/VM/JIT/Config.h>
 #include <hermes/VM/RuntimeFlags.h>
 #include <hermes/hermes.h>
 #include <hermes/hermes_tracing.h>
@@ -133,11 +134,11 @@ struct Flags : public cli::RuntimeFlags {
       cat(GCCategory),
       init(false)};
 
-  opt<bool> GCPrintStats{
-      "gc-print-stats",
-      desc("Output summary garbage collection statistics at exit"),
+  opt<bool> GCPrintCollectionStats{
+      "gc-print-collection-stats",
+      desc("Output statistics for each garbage collection at exit"),
       cat(GCCategory),
-      init(true)};
+      init(false)};
 
   opt<bool> BasicBlockProfiling{
       "basic-block-profiling",
@@ -232,6 +233,19 @@ int main(int argc, char **argv) {
                    << "each rep, which probably isn't what you want.\n";
     }
 
+#if !HERMESVM_JIT
+    if (cl::flags.JIT != cli::VMOnlyRuntimeFlags::JITMode::Off) {
+      llvh::errs() << "JIT is not enabled in this build\n";
+      return EXIT_FAILURE;
+    }
+#endif
+
+    if (cl::flags.DumpJITCode ||
+        cl::flags.JIT == cli::VMOnlyRuntimeFlags::JITMode::Force) {
+      llvh::errs() << "synth does not support -Xjit=force or -Xdump-jitcode\n";
+      return EXIT_FAILURE;
+    }
+
     // These are not config parameters: just set them according to the
     // runtime flag.
     options.useTraceConfig = cl::UseTraceConfig;
@@ -246,7 +260,7 @@ int main(int argc, char **argv) {
       options.profileFileName = std::string{tmpfile.begin(), tmpfile.end()};
     }
     options.forceGCBeforeStats = cl::flags.GCBeforeStats;
-    options.enableJIT = cl::flags.EnableJIT;
+    options.enableJIT = cl::flags.JIT != cli::VMOnlyRuntimeFlags::JITMode::Off;
     options.disableSourceHashCheck = cl::DisableSourceHashCheck;
 
     options.basicBlockProfiling = cl::flags.BasicBlockProfiling;
@@ -262,8 +276,6 @@ int main(int argc, char **argv) {
       shouldPrintGCStats = (cl::flags.GCPrintStats || cl::flags.GCBeforeStats);
     }
 
-    llvh::Optional<::hermes::vm::gcheapsize_t> minHeapSize =
-        execOption(cl::flags.MinHeapSize);
     llvh::Optional<::hermes::vm::gcheapsize_t> initHeapSize =
         execOption(cl::flags.InitHeapSize);
     llvh::Optional<::hermes::vm::gcheapsize_t> maxHeapSize =
@@ -289,12 +301,19 @@ int main(int argc, char **argv) {
       llvh::EnableStatistics();
 #endif
 
-    options.gcConfigBuilder.withShouldRecordStats(shouldPrintGCStats);
-    if (minHeapSize) {
-      options.gcConfigBuilder.withMinHeapSize(*minHeapSize);
+    std::vector<GCAnalyticsEvent> gcAnalyticsEvents;
+    if (shouldPrintGCStats) {
+      options.gcConfigBuilder.withShouldRecordStats(true);
+      if (cl::flags.GCPrintCollectionStats) {
+        options.gcAnalyticsEvents = &gcAnalyticsEvents;
+        options.gcConfigBuilder.withAnalyticsCallback(
+            [&gcAnalyticsEvents](const ::hermes::vm::GCAnalyticsEvent &event) {
+              gcAnalyticsEvents.push_back(event);
+            });
+      }
     }
     if (initHeapSize) {
-      options.gcConfigBuilder.withMinHeapSize(*initHeapSize);
+      options.gcConfigBuilder.withInitHeapSize(*initHeapSize);
     }
     if (maxHeapSize) {
       options.gcConfigBuilder.withMaxHeapSize(*maxHeapSize);
@@ -350,9 +369,12 @@ int main(int argc, char **argv) {
           options,
           [stream = std::ref(os)](
               const ::hermes::vm::RuntimeConfig &config) mutable {
+            auto *hermesRoot =
+                facebook::jsi::castInterface<facebook::hermes::IHermesRootAPI>(
+                    facebook::hermes::makeHermesRootAPI());
             auto &st = stream.get();
             return facebook::hermes::makeTracingHermesRuntime(
-                facebook::hermes::makeHermesRuntime(config),
+                hermesRoot->makeHermesRuntime(config),
                 config,
                 std::move(st),
                 /* forReplay */ true);

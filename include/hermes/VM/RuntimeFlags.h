@@ -15,6 +15,7 @@
 #include "hermes/Public/RuntimeConfig.h"
 #include "hermes/Support/MemorySizeParser.h"
 #include "hermes/Support/RandomSeedParser.h"
+#include "hermes/Utils/CompilerRuntimeFlags.h"
 
 #include <string>
 
@@ -68,12 +69,6 @@ struct VMOnlyRuntimeFlags {
 #endif
   };
 
-  llvh::cl::opt<MemorySize, false, MemorySizeParser> MinHeapSize{
-      "gc-min-heap",
-      llvh::cl::desc("Minimum heap size.  Format: <unsigned>{{K,M,G}{iB}"),
-      llvh::cl::cat(GCCategory),
-      llvh::cl::init(MemorySize{vm::GCConfig::getDefaultMinHeapSize()})};
-
   llvh::cl::opt<MemorySize, false, MemorySizeParser> InitHeapSize{
       "gc-init-heap",
       llvh::cl::desc("Initial heap size.  Format: <unsigned>{{K,M,G}{iB}"),
@@ -86,6 +81,12 @@ struct VMOnlyRuntimeFlags {
           "Sizing heuristic: fraction of heap to be occupied by live data."),
       llvh::cl::cat(GCCategory),
       llvh::cl::init(vm::GCConfig::getDefaultOccupancyTarget())};
+
+  llvh::cl::opt<bool> GCPrintStats{
+      "gc-print-stats",
+      llvh::cl::desc("Output summary garbage collection statistics at exit"),
+      llvh::cl::cat(GCCategory),
+      llvh::cl::init(false)};
 
   llvh::cl::opt<ExecuteOptions::SampleProfilingMode> SampleProfiling{
       "sample-profiling",
@@ -120,23 +121,10 @@ struct VMOnlyRuntimeFlags {
       llvh::cl::cat(RuntimeCategory),
       llvh::cl::init(vm::RuntimeConfig::getDefaultMaxNumRegisters())};
 
-  llvh::cl::opt<bool> ES6Promise{
-      "Xes6-promise",
-      llvh::cl::desc("Enable support for ES6 Promise"),
-      llvh::cl::init(vm::RuntimeConfig::getDefaultES6Promise()),
-      llvh::cl::cat(RuntimeCategory)};
-
   llvh::cl::opt<bool> ES6Proxy{
       "Xes6-proxy",
       llvh::cl::desc("Enable support for ES6 Proxy"),
       llvh::cl::init(vm::RuntimeConfig::getDefaultES6Proxy()),
-      llvh::cl::cat(RuntimeCategory)};
-
-  llvh::cl::opt<bool> EvalES6Class{
-      "Xeval-es6-class",
-      llvh::cl::Hidden,
-      llvh::cl::desc("Enable support for ES6 Class"),
-      llvh::cl::init(vm::RuntimeConfig::getDefaultES6Class()),
       llvh::cl::cat(RuntimeCategory)};
 
   llvh::cl::opt<bool> Intl{
@@ -210,20 +198,31 @@ struct VMOnlyRuntimeFlags {
       llvh::cl::cat(GCCategory),
       llvh::cl::init(false)};
 
-  llvh::cl::opt<bool> EnableJIT{
-      "Xjit",
-      llvh::cl::Hidden,
-      llvh::cl::cat(RuntimeCategory),
-      llvh::cl::desc("enable JIT compilation"),
-      llvh::cl::init(false)};
+  enum class JITMode {
+    // JIT is ON with default thresholds.
+    On,
+    // Every function is JIT compiled immediately, ignoring thresholds.
+    Force,
+    // JIT is OFF, no JIT compilation is performed.
+    Off,
+  };
 
-  llvh::cl::opt<bool> ForceJIT{
-      "Xforce-jit",
+  llvh::cl::opt<JITMode> JIT{
+      "Xjit",
+      llvh::cl::ValueOptional,
       llvh::cl::Hidden,
       llvh::cl::ZeroOrMore,
       llvh::cl::cat(RuntimeCategory),
-      llvh::cl::desc("force JIT compilation of every function"),
-      llvh::cl::init(false)};
+      llvh::cl::desc("JIT mode (default off)"),
+      llvh::cl::init(JITMode::Off),
+      values(
+          clEnumValN(JITMode::On, "", "JIT is on"),
+          clEnumValN(JITMode::On, "on", "JIT is on"),
+          clEnumValN(
+              JITMode::Force,
+              "force",
+              "force JIT compilation of every function"),
+          clEnumValN(JITMode::Off, "off", "JIT is disabled"))};
 
   llvh::cl::opt<uint32_t> JITThreshold{
       "Xjit-threshold",
@@ -248,6 +247,24 @@ struct VMOnlyRuntimeFlags {
       llvh::cl::init(0),
       llvh::cl::ValueRequired};
 
+#ifdef HERMES_ENABLE_PERF_PROF
+  llvh::cl::opt<bool> PerfProf{
+      "Xperf-prof",
+      llvh::cl::Hidden,
+      llvh::cl::cat(RuntimeCategory),
+      llvh::cl::desc("Enable perf profiling support"),
+      llvh::cl::init(false)};
+
+  llvh::cl::opt<std::string> PerfProfDir{
+      "Xperf-prof-dir",
+      llvh::cl::Hidden,
+      llvh::cl::cat(RuntimeCategory),
+      llvh::cl::desc(
+          "Directory path for generated perf supplementary data, default is /tmp"),
+      llvh::cl::init("/tmp"),
+      llvh::cl::ValueRequired};
+#endif
+
   llvh::cl::opt<bool> JITCrashOnError{
       "Xjit-crash-on-error",
       llvh::cl::Hidden,
@@ -269,6 +286,13 @@ struct VMOnlyRuntimeFlags {
       llvh::cl::init(true)
 #endif
   };
+
+  llvh::cl::opt<bool> JITEmitCounters{
+      "Xjit-emit-counters",
+      llvh::cl::Hidden,
+      llvh::cl::cat(RuntimeCategory),
+      llvh::cl::desc("Whether to emit counters in JIT compiled code"),
+      llvh::cl::init(false)};
 };
 
 /// All command line runtime options relevant to the VM, including options
@@ -279,34 +303,7 @@ struct VMOnlyRuntimeFlags {
 ///
 /// This struct can be used as a header-only dependency and instantiated by
 /// any client needing to parse these command line options.
-struct RuntimeFlags : public VMOnlyRuntimeFlags {
-  llvh::cl::opt<bool> EnableEval{
-      "enable-eval",
-      llvh::cl::init(true),
-      llvh::cl::desc("Enable support for eval()")};
-
-  // This is normally a compiler option, but it also applies to strings given
-  // to eval or the Function constructor.
-  llvh::cl::opt<bool> VerifyIR{
-      "verify-ir",
-#ifdef HERMES_SLOW_DEBUG
-      llvh::cl::init(true),
-#else
-      llvh::cl::init(false),
-      llvh::cl::Hidden,
-#endif
-      llvh::cl::desc("Verify the IR after creating it")};
-
-  llvh::cl::opt<bool> EmitAsyncBreakCheck{
-      "emit-async-break-check",
-      llvh::cl::desc("Emit instruction to check async break request"),
-      llvh::cl::init(false)};
-
-  llvh::cl::opt<bool> OptimizedEval{
-      "optimized-eval",
-      llvh::cl::desc("Turn on compiler optimizations in eval."),
-      llvh::cl::init(false)};
-};
+struct RuntimeFlags : public VMOnlyRuntimeFlags, CompilerRuntimeFlags {};
 
 #ifndef HERMES_IS_MOBILE_BUILD
 /// Build runtime config from the parsed command line flags.

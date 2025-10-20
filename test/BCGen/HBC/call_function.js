@@ -21,6 +21,10 @@ foo(0,0,1);
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -34,13 +38,13 @@ foo(0,0,1);
 // CHECK-NEXT:i1[ASCII, 6..8] #9290584E: foo
 
 // CHECK:Function<global>(1 params, 16 registers, 2 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "foo"
 // CHECK-NEXT:    GetGlobalObject   r3
 // CHECK-NEXT:    LoadConstUndefined r2
 // CHECK-NEXT:    CreateClosure     r4, r2, Function<foo>
-// CHECK-NEXT:    PutByIdStrict     r3, r4, 1, "foo"
-// CHECK-NEXT:    GetByIdShort      r3, r3, 1, "foo"
+// CHECK-NEXT:    PutByIdStrict     r3, r4, 0, "foo"
+// CHECK-NEXT:    GetByIdShort      r3, r3, 0, "foo"
 // CHECK-NEXT:    LoadConstUInt8    r1, 1
 // CHECK-NEXT:    LoadConstZero     r0
 // CHECK-NEXT:    Call4             r3, r3, r2, r0, r0, r1
@@ -62,4 +66,4 @@ foo(0,0,1);
 // CHECK-NEXT:    bc 14: line 9 col 1
 // CHECK-NEXT:    bc 20: line 12 col 1
 // CHECK-NEXT:    bc 30: line 12 col 4
-// CHECK-NEXT:  0x0010  end of debug source table
+// CHECK-NEXT:  0x0011  end of debug source table

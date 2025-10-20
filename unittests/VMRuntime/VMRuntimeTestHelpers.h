@@ -36,10 +36,11 @@ static constexpr uint32_t kInitHeapSize = 1 << 16;
 static constexpr uint32_t kMaxHeapSize = 1 << 19;
 static constexpr uint32_t kInitHeapLarge = 1 << 20;
 static constexpr uint32_t kMaxHeapLarge = 1 << 24;
+static constexpr uint32_t kExtremeHeapLarge = 1 << 28;
 
 static const GCConfig::Builder kTestGCConfigBaseBuilder =
     GCConfig::Builder().withSanitizeConfig(
-        vm::GCSanitizeConfig::Builder().withSanitizeRate(0.0).build());
+        vm::GCSanitizeConfig::Builder().withSanitizeRate(0.01).build());
 
 static const GCConfig kTestGCConfigSmall =
     GCConfig::Builder(kTestGCConfigBaseBuilder)
@@ -61,6 +62,12 @@ static const GCConfig kTestGCConfigLarge =
         .withMaxHeapSize(kMaxHeapLarge)
         .build();
 
+static const GCConfig kTestGCConfigExtremeLarge =
+    GCConfig::Builder(kTestGCConfigBuilder)
+        .withInitHeapSize(kInitHeapLarge)
+        .withMaxHeapSize(kExtremeHeapLarge)
+        .build();
+
 static const RuntimeConfig kTestRTConfigSmallHeap =
     RuntimeConfig::Builder().withGCConfig(kTestGCConfigSmall).build();
 
@@ -72,6 +79,9 @@ static const RuntimeConfig kTestRTConfig =
 
 static const RuntimeConfig kTestRTConfigLargeHeap =
     RuntimeConfig::Builder().withGCConfig(kTestGCConfigLarge).build();
+
+static const RuntimeConfig kTestRTConfigExtremeLargeHeap =
+    RuntimeConfig::Builder().withGCConfig(kTestGCConfigExtremeLarge).build();
 
 template <typename T>
 ::testing::AssertionResult isException(
@@ -145,6 +155,12 @@ class LargeHeapRuntimeTestFixture : public RuntimeTestFixtureBase {
       : RuntimeTestFixtureBase(kTestRTConfigLargeHeap) {}
 };
 
+class ExtremeLargeHeapRuntimeTestFixture : public RuntimeTestFixtureBase {
+ public:
+  ExtremeLargeHeapRuntimeTestFixture()
+      : RuntimeTestFixtureBase(kTestRTConfigExtremeLargeHeap) {}
+};
+
 /// Configuration for the GC which fixes a size -- \p sz -- for the heap, and
 /// does not permit any growth.  Intended only for testing purposes where we
 /// don't expect or want the heap to grow.
@@ -164,7 +180,7 @@ inline const GCConfig TestGCConfigFixedSize(
 #define EXPECT_STRINGPRIM(str, x)                                           \
   do {                                                                      \
     GCScopeMarkerRAII marker{runtime};                                      \
-    Handle<> xHandle{runtime, x};                                           \
+    auto xHandle = runtime.makeHandle(x);                                   \
     Handle<StringPrimitive> strHandle =                                     \
         StringPrimitive::createNoThrow(runtime, str);                       \
     EXPECT_TRUE(                                                            \
@@ -251,7 +267,7 @@ inline const GCConfig TestGCConfigFixedSize(
 /// Get the global object.
 #define GET_GLOBAL(predefinedId) GET_VALUE(runtime.getGlobal(), predefinedId)
 
-inline HermesValue operator"" _hd(long double d) {
+inline HermesValue operator""_hd(long double d) {
   return HermesValue::encodeTrustedNumberValue(d);
 }
 
@@ -261,10 +277,13 @@ inline HermesValue operator"" _hd(long double d) {
 class DummyRuntime final : public RuntimeBase, public HandleRootOwner {
  private:
   GCBase::GCCallbacksWrapper<DummyRuntime> gcCallbacksWrapper_;
-  GCStorage gcStorage_;
+  GC heap_;
 
  public:
   std::vector<WeakRoot<GCCell> *> weakRoots{};
+  std::vector<WeakSmallHermesValue *> weakSHVs;
+  /// Head of the locals list used for VM operations.
+  Locals *vmLocals{};
 
   /// Create a DummyRuntime with the default parameters.
   static std::shared_ptr<DummyRuntime> create(const GCConfig &gcConfig);
@@ -282,7 +301,8 @@ class DummyRuntime final : public RuntimeBase, public HandleRootOwner {
   /// Provide the correct storage provider based on build modes.
   /// All decorator StorageProviders must wrap the one returned from this
   /// function.
-  static std::unique_ptr<StorageProvider> defaultProvider();
+  static std::unique_ptr<StorageProvider> defaultProvider(
+      uint64_t providerSize = 128 << 20);
 
   ~DummyRuntime();
 
@@ -300,23 +320,26 @@ class DummyRuntime final : public RuntimeBase, public HandleRootOwner {
       typename T,
       HasFinalizer hasFinalizer = HasFinalizer::No,
       LongLived longLived = LongLived::No,
+      CanBeLarge canBeLarge = CanBeLarge::No,
+      MayFail mayFail = MayFail::No,
       class... Args>
   T *makeAVariable(uint32_t size, Args &&...args) {
-    return getHeap().makeAVariable<T, hasFinalizer, longLived>(
-        size, std::forward<Args>(args)...);
+    return getHeap()
+        .makeAVariable<T, hasFinalizer, longLived, canBeLarge, mayFail>(
+            size, std::forward<Args>(args)...);
   }
 
   GC &getHeap() {
-    return *gcStorage_.get();
+    return heap_;
   }
 
   void collect();
 
-  void markRoots(RootAndSlotAcceptorWithNames &acceptor, bool);
+  void markRoots(RootAcceptorWithNames &acceptor, bool);
 
   void markWeakRoots(WeakRootAcceptor &weakAcceptor, bool);
 
-  void markRootsForCompleteMarking(RootAndSlotAcceptorWithNames &acceptor);
+  void markRootsForCompleteMarking(RootAcceptorWithNames &acceptor);
 
   unsigned int getSymbolsEnd() const {
     return 0;
@@ -373,6 +396,40 @@ class DummyRuntime final : public RuntimeBase, public HandleRootOwner {
       const GCConfig &gcConfig,
       std::shared_ptr<StorageProvider> storageProvider,
       std::shared_ptr<CrashManager> crashMgr);
+};
+
+/// RAII class to push/pop a Locals struct within a scope. This is a duplicate
+/// of LocalsRAII in Runtime.h.
+class [[nodiscard]] DummyLocalsRAII {
+  DummyRuntime &runtime_;
+  Locals *locals_;
+
+ public:
+  template <typename T>
+  explicit DummyLocalsRAII(DummyRuntime &runtime, T *locals)
+      : runtime_(runtime), locals_(locals) {
+    locals->prev = runtime_.vmLocals;
+    locals->numLocals =
+        (sizeof(T) - offsetof(Locals, locals)) / sizeof(PinnedHermesValue);
+#ifdef HERMES_SLOW_DEBUG
+    // All pointer/symbol type PinnedValues in locals must be initialized/reset
+    // to default. Otherwise, potential dangling pointers could be accessed by
+    // the GC.
+    for (size_t i = 0; i < locals_->numLocals; ++i) {
+      auto &phv = locals_->locals[i];
+      assert(
+          (!phv.isPointer() || !phv.getPointer()) &&
+          (!phv.isSymbol() || phv.getSymbol().isInvalid()));
+    }
+#endif
+    runtime_.vmLocals = locals;
+  }
+  ~DummyLocalsRAII() {
+    assert(
+        runtime_.vmLocals == locals_ &&
+        "LocalsRAII must be destroyed in the reverse order of creation");
+    runtime_.vmLocals = locals_->prev;
+  }
 };
 
 /// A DummyRuntimeTestFixtureBase should be used by any test that requires a

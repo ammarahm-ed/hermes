@@ -35,6 +35,10 @@ function foo(a) {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -48,26 +52,26 @@ function foo(a) {
 // CHECK-NEXT:i1[ASCII, 6..8] #9290584E: foo
 
 // CHECK:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "foo"
-// CHECK-NEXT:    GetGlobalObject   r1
+// CHECK-NEXT:    GetGlobalObject   r2
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    CreateClosure     r2, r0, Function<foo>
-// CHECK-NEXT:    PutByIdLoose      r1, r2, 1, "foo"
+// CHECK-NEXT:    CreateClosure     r1, r0, Function<foo>
+// CHECK-NEXT:    PutByIdLoose      r2, r1, 0, "foo"
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Function<foo>(2 params, 12 registers, 0 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x000a, lexical 0x0000
-// CHECK-NEXT:    LoadParam         r3, 1
+// CHECK-NEXT:Offset in debug table: source 0x000b
+// CHECK-NEXT:    LoadParam         r2, 1
 // CHECK-NEXT:L9:
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    Call1             r0, r3, r0
+// CHECK-NEXT:    Call1             r0, r2, r0
 // CHECK-NEXT:    Jmp               L2
 // CHECK-NEXT:L1:
-// CHECK-NEXT:    Catch             r2
+// CHECK-NEXT:    Catch             r3
 // CHECK-NEXT:L8:
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    Call1             r0, r2, r0
+// CHECK-NEXT:    Call1             r0, r3, r0
 // CHECK-NEXT:    Jmp               L4
 // CHECK-NEXT:L3:
 // CHECK-NEXT:    Catch             r1
@@ -75,20 +79,20 @@ function foo(a) {
 // CHECK-NEXT:    Call1             r0, r1, r0
 // CHECK-NEXT:L4:
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    Call1             r0, r2, r0
+// CHECK-NEXT:    Call1             r0, r3, r0
 // CHECK-NEXT:L2:
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    Call1             r1, r3, r0
+// CHECK-NEXT:    Call1             r1, r2, r0
 // CHECK-NEXT:    Ret               r0
 // CHECK-NEXT:L5:
 // CHECK-NEXT:    Catch             r0
 // CHECK-NEXT:    LoadConstUndefined r1
-// CHECK-NEXT:    Call1             r1, r2, r1
+// CHECK-NEXT:    Call1             r1, r3, r1
 // CHECK-NEXT:    Throw             r0
 // CHECK-NEXT:L6:
 // CHECK-NEXT:    Catch             r0
 // CHECK-NEXT:    LoadConstUndefined r1
-// CHECK-NEXT:    Call1             r1, r3, r1
+// CHECK-NEXT:    Call1             r1, r2, r1
 // CHECK-NEXT:    Throw             r0
 
 // CHECK:Exception Handlers:
@@ -108,7 +112,7 @@ function foo(a) {
 // CHECK-NEXT:  0x0000  function idx 0, starts at line 10 col 1
 // CHECK-NEXT:    bc 0: line 10 col 1
 // CHECK-NEXT:    bc 14: line 10 col 1
-// CHECK-NEXT:  0x000a  function idx 1, starts at line 10 col 1
+// CHECK-NEXT:  0x000b  function idx 1, starts at line 10 col 1
 // CHECK-NEXT:    bc 3: line 11 col 3
 // CHECK-NEXT:    bc 5: line 12 col 6
 // CHECK-NEXT:    bc 9: line 13 col 3
@@ -128,4 +132,4 @@ function foo(a) {
 // CHECK-NEXT:    bc 53: line 23 col 11
 // CHECK-NEXT:    bc 57: line 24 col 6
 // CHECK-NEXT:    bc 61: line 25 col 3
-// CHECK-NEXT:  0x0047  end of debug source table
+// CHECK-NEXT:  0x0049  end of debug source table

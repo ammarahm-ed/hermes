@@ -48,9 +48,8 @@ ESTREE_NODE_8_ARGS(
 ESTREE_IGNORE_IF_EMPTY(FunctionExpression, typeParameters)
 ESTREE_IGNORE_IF_EMPTY(FunctionExpression, returnType)
 ESTREE_IGNORE_IF_EMPTY(FunctionExpression, predicate)
-ESTREE_NODE_8_ARGS(
+ESTREE_NODE_7_ARGS(
     ArrowFunctionExpression, FunctionLike,
-    NodePtr, id, true,
     NodeList, params, false,
     NodePtr, body, false,
     NodePtr, typeParameters, true,
@@ -169,7 +168,17 @@ ESTREE_LAST(LoopStatement)
 
 ESTREE_NODE_0_ARGS(DebuggerStatement, Statement)
 ESTREE_NODE_0_ARGS(EmptyStatement, Statement)
-ESTREE_NODE_1_ARGS(BlockStatement, Statement, NodeList, body, false)
+// The Hermes Parser inserts implicit BlockStatements in certain cases,
+// notably around function declarations used directly as the body of 'if'.
+// This is done to ensure semantics are the same as if there were braces,
+// or in arrow function expression bodies.
+// The 'implicit' flag indicates whether the block statement was implicitly
+// added.
+ESTREE_NODE_2_ARGS(BlockStatement, Statement,
+    NodeList, body, false,
+    NodeBoolean, implicit, false
+)
+ESTREE_IGNORE_IF_EMPTY(BlockStatement, implicit)
 ESTREE_NODE_1_ARGS(StaticBlock, Statement, NodeList, body, false)
 ESTREE_NODE_1_ARGS(BreakStatement, Statement, NodePtr, label, true)
 ESTREE_NODE_1_ARGS(ContinueStatement, Statement, NodePtr, label, true)
@@ -288,7 +297,7 @@ ESTREE_NODE_1_ARGS(
 ESTREE_NODE_2_ARGS(
     ImportExpression, Base,
     NodePtr, source, false,
-    NodePtr, attributes, true)
+    NodePtr, options, true)
 
 ESTREE_FIRST(CallExpressionLike, Base)
 ESTREE_NODE_3_ARGS(
@@ -848,6 +857,10 @@ ESTREE_NODE_0_ARGS(AnyTypeAnnotation, Flow)
 ESTREE_NODE_0_ARGS(MixedTypeAnnotation, Flow)
 ESTREE_NODE_0_ARGS(BigIntTypeAnnotation, Flow)
 ESTREE_NODE_0_ARGS(VoidTypeAnnotation, Flow)
+ESTREE_NODE_0_ARGS(NeverTypeAnnotation, Flow)
+ESTREE_NODE_0_ARGS(UnknownTypeAnnotation, Flow)
+ESTREE_NODE_0_ARGS(UndefinedTypeAnnotation, Flow)
+
 ESTREE_NODE_5_ARGS(
     FunctionTypeAnnotation, Flow,
     NodeList, params, false,
@@ -902,7 +915,7 @@ ESTREE_NODE_2_ARGS(
     NodePtr, id, false)
 ESTREE_NODE_2_ARGS(
     TupleTypeAnnotation, Flow,
-    NodeList, types, false,
+    NodeList, elementTypes, false,
     NodeBoolean, inexact, false)
 ESTREE_NODE_2_ARGS(
     TupleTypeSpreadElement, Flow,
@@ -961,11 +974,13 @@ ESTREE_NODE_3_ARGS(
     NodePtr, id, false,
     NodePtr, typeParameters, true,
     NodePtr, right, false)
-ESTREE_NODE_4_ARGS(
+ESTREE_NODE_6_ARGS(
     OpaqueType, Flow,
     NodePtr, id, false,
     NodePtr, typeParameters, true,
     NodePtr, impltype, false,
+    NodePtr, lowerBound, true,
+    NodePtr, upperBound, true,
     NodePtr, supertype, true)
 
 ESTREE_NODE_4_ARGS(
@@ -980,11 +995,13 @@ ESTREE_NODE_3_ARGS(
     NodePtr, id, false,
     NodePtr, typeParameters, true,
     NodePtr, right, false)
-ESTREE_NODE_4_ARGS(
+ESTREE_NODE_6_ARGS(
     DeclareOpaqueType, Flow,
     NodePtr, id, false,
     NodePtr, typeParameters, true,
     NodePtr, impltype, true,
+    NodePtr, lowerBound, true,
+    NodePtr, upperBound, true,
     NodePtr, supertype, true)
 ESTREE_NODE_4_ARGS(
     DeclareInterface, Flow,

@@ -8,18 +8,36 @@
 #include "hermes/VM/JIT/Config.h"
 #if HERMESVM_JIT
 #include "JitEmitter.h"
+#include "JitImpl.h"
 
 #include "JitHandlers.h"
 
 #include "../RuntimeOffsets.h"
-#include "hermes/BCGen/HBC/StackFrameLayout.h"
+#include "hermes/BCGen/SerializedLiteralParser.h"
 #include "hermes/FrontEndDefs/Builtins.h"
 #include "hermes/Support/ErrorHandling.h"
+#include "hermes/VM/ArrayStorage.h"
 #include "hermes/VM/Callable.h"
+#include "hermes/VM/IdentifierTable.h"
 #include "hermes/VM/Interpreter.h"
+#include "hermes/VM/JSObject-inline.h"
 #include "hermes/VM/StaticHUtils.h"
+#include "hermes/VMLayouts/StackFrameLayout.h"
+#include "llvh/ADT/Statistic.h"
 
 #define DEBUG_TYPE "jit"
+
+STATISTIC(
+    JITNumGetByIdSpec,
+    "JITNumGetByIdSpec: number of GetById specialized fast paths emitted");
+
+// Disable warnings about missing designated initializers since they occur often
+// when we construct SlowPaths.
+#ifdef __clang__
+#if __has_warning("-Wmissing-designated-field-initializers")
+#pragma clang diagnostic ignored "-Wmissing-designated-field-initializers"
+#endif
+#endif
 
 #if defined(HERMESVM_COMPRESSED_POINTERS) && !defined(HERMESVM_CONTIGUOUS_HEAP)
 #error JIT does not support non-contiguous heap with compressed pointers
@@ -47,8 +65,54 @@ namespace {
 // time the HERMESVALUE_VERSION changes, and going through the JIT and updating
 // any relevant code.
 static_assert(
-    HERMESVALUE_VERSION == 1,
+    HERMESVALUE_VERSION == 2,
     "HermesValue version mismatch, JIT may need to be updated");
+
+/// Get the tag for the HermesValue in \p xIn and place it in \p xOut.
+/// xOut and xIn may be the same, but if they are, xIn will be clobbered.
+void emit_sh_ljs_get_tag(
+    a64::Assembler &a,
+    const a64::GpX &xOut,
+    const a64::GpX &xIn) {
+  static_assert(
+      HERMESVALUE_VERSION == 2,
+      "kHV_NumDataBits is 48 and can be easily shifted");
+  a.asr(xOut, xIn, kHV_NumDataBits);
+}
+
+/// Check whether \p xTagReg is the tag for a pointer value.
+/// CPU flags are updated as result. b.hs success.
+void emit_sh_ljs_tag_is_pointer(a64::Assembler &a, const a64::GpX &xTagReg) {
+  static_assert(
+      HERMESVALUE_VERSION == 2,
+      "All tags above HVTag_FirstPointer are pointers");
+  // The valid pointer tags are: 0xfc (FirstPointer) to 0xff (LastTag), but
+  // all sign extended to 64 bits.
+  // We need an unsigned comparison (tag >= 0xfc) to catch all pointers.
+  // Doubles may have 0 in the tag bits, e.g. so we have to use
+  // unsigned condition codes to make sure they don't get detected as pointers.
+  a.cmn(xTagReg, -HVTag_FirstPointer);
+}
+
+/// Emit code to check whether the input reg is an object tag,
+/// using the specified register.
+/// The input reg is not modified.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_tag_is_object(a64::Assembler &a, const a64::GpX &xTagReg) {
+  static_assert(
+      (int16_t)HVTag_Object == (int16_t)(-1) && "HV_TagObject must be -1");
+  a.cmn(xTagReg, -HVTag_Object);
+}
+
+/// Emit code to check whether the input reg is string tag, using the specified
+/// register.
+/// The input reg is not modified.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_tag_is_string(a64::Assembler &a, const a64::GpX &xTagReg) {
+  static_assert(
+      (int16_t)HVTag_Str == (int16_t)(-3) && "HV_TagObject must be -1");
+  a.cmn(xTagReg, -HVTag_Str);
+}
 
 void emit_sh_ljs_get_pointer(
     a64::Assembler &a,
@@ -57,7 +121,7 @@ void emit_sh_ljs_get_pointer(
   // See:
   // https://dinfuehr.github.io/blog/encoding-of-immediate-values-on-aarch64/
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "kHV_DataMask is 0x000...1111... and can be encoded as a logical immediate");
   a.and_(xOut, xIn, kHV_DataMask);
 }
@@ -66,7 +130,7 @@ void emit_sh_ljs_get_pointer(
 /// The same register is used for input and output.
 void emit_sh_ljs_object(a64::Assembler &a, const a64::GpX &inOut) {
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "HVTag_Object << kHV_NumDataBits is 0x1111...0000... and can be encoded as a logical immediate");
   a.movk(inOut, (uint16_t)HVTag_Object, kHV_NumDataBits);
 }
@@ -79,9 +143,45 @@ void emit_sh_ljs_object2(
     const a64::GpX &xOut,
     const a64::GpX &xIn) {
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "HVTag_Object << kHV_NumDataBits is 0x1111...0000... and can be encoded as a logical immediate");
   a.orr(xOut, xIn, (uint64_t)HVTag_Object << kHV_NumDataBits);
+}
+
+/// Emit code to check whether the input HermesValue is a double.
+/// The input reg is not modified.
+/// The temp reg is modified.
+/// CPU flags are updated as result. b.lo on success.
+void emit_sh_ljs_is_double(
+    a64::Assembler &a,
+    const a64::GpX &xInput,
+    const a64::GpX &xTmp) {
+  static_assert(
+      HERMESVALUE_VERSION == 2,
+      "numbers must be lower than HVTag_First << kHV_NumDataBits");
+  a.mov(xTmp, ((uint64_t)HVTag_First << kHV_NumDataBits));
+  a.cmp(xInput, xTmp);
+}
+
+/// Encode a string pointer into a tagged string (SHLegacyValue).
+/// The same register is used for input and output.
+void emit_sh_ljs_string(a64::Assembler &a, const a64::GpX &inOut) {
+  static_assert(
+      HERMESVALUE_VERSION == 2,
+      "HVTag_Str << kHV_NumDataBits is 0x1101...0000... and can be encoded as a logical immediate");
+  a.movk(inOut, (uint16_t)HVTag_Str, kHV_NumDataBits);
+}
+
+/// Encode a string pointer into a tagged string (SmallHermesValue).
+/// The same register is used for input and output.
+void emit_shv_string(a64::Assembler &a, const a64::GpX &inOut) {
+#ifdef HERMESVM_BOXED_DOUBLES
+  static_assert(
+      SmallHermesValue::kVersion == 1, "String tagging requires simple or");
+  a.orr(inOut, inOut, HermesValue32::Tag::String);
+#else
+  emit_sh_ljs_string(a, inOut);
+#endif
 }
 
 /// Emit code to check whether the input reg is an object, using the specified
@@ -92,26 +192,20 @@ void emit_sh_ljs_is_object(
     a64::Assembler &a,
     const a64::GpX &xTempReg,
     const a64::GpX &xInputReg) {
-  // Check if frConstructed is an object.
-  // Get the tag bits in xTmpConstructedTag by right shifting.
-  static_assert(
-      (int16_t)HVTag_Object == (int16_t)(-1) && "HV_TagObject must be -1");
-  a.asr(xTempReg, xInputReg, kHV_NumDataBits);
-  a.cmn(xTempReg, -HVTag_Object);
+  emit_sh_ljs_get_tag(a, xTempReg, xInputReg);
+  emit_sh_ljs_tag_is_object(a, xTempReg);
 }
 
-/// Emit code to check whether the input reg is a string, using the specified
-/// temp register. The input reg is not
+/// Emit code to check whether the input HermesValue is a string,
+/// using the specified temp register. The input reg is not
 /// modified unless it is the same as the temp, which is allowed.
 /// CPU flags are updated as result. b.eq on success.
 void emit_sh_ljs_is_string(
     a64::Assembler &a,
     const a64::GpX &xTempReg,
     const a64::GpX &xInputReg) {
-  // Get the tag bits by right shifting.
-  static_assert((int16_t)HVTag_Str == (int16_t)(-3) && "HV_TagStr must be -3");
-  a.asr(xTempReg, xInputReg, kHV_NumDataBits);
-  a.cmn(xTempReg, -HVTag_Str);
+  emit_sh_ljs_get_tag(a, xTempReg, xInputReg);
+  emit_sh_ljs_tag_is_string(a, xTempReg);
 }
 
 /// Emit code to check whether the input reg is a bigint, using the specified
@@ -188,7 +282,7 @@ void emit_sh_ljs_is_undefined(
     const a64::GpX &xInputReg) {
   // Get the tag bits by right shifting.
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "HVETag_Undefined must be at kHV_NumDataBits - 1");
   static_assert(
       (int16_t)HVETag_Undefined == (int16_t)(-12) &&
@@ -208,7 +302,7 @@ void emit_sh_ljs_is_symbol(
     const a64::GpX &xInputReg) {
   // Get the tag bits by right shifting.
   static_assert(
-      HERMESVALUE_VERSION == 1, "HVETag_Symbol must be at kHV_NumDataBits - 1");
+      HERMESVALUE_VERSION == 2, "HVETag_Symbol must be at kHV_NumDataBits - 1");
   static_assert(
       (int16_t)HVETag_Symbol == (int16_t)(-9) && "HVETag_Symbol must be -9");
   a.asr(xTempReg, xInputReg, kHV_NumDataBits - 1);
@@ -219,14 +313,130 @@ void emit_sh_ljs_is_symbol(
 /// into a HermesValue boolean by adding the corresponding tag.
 void emit_sh_ljs_bool(a64::Assembler &a, const a64::GpX inOut) {
   static constexpr SHLegacyValue baseBool = HermesValue::encodeBoolValue(false);
-  // We know that the ETag for bool as a 0 in its lowest bit, and is therefore a
-  // shifted 16 bit value. We can exploit this to use movk to set the tag.
-  static_assert(HERMESVALUE_VERSION == 1);
+  // We know that the ETag for bool has a 0 in its lowest bit, and is therefore
+  // a shifted 16 bit value. We can exploit this to use movk to set the tag.
+  static_assert(HERMESVALUE_VERSION == 2);
   static_assert(
       (llvh::isShiftedUInt<16, kHV_NumDataBits>(baseBool.raw)) &&
       "Boolean tag must be 16 bits.");
+  a.lsl(inOut, inOut, kHV_BoolBitIdx);
   // Add the bool tag.
   a.movk(inOut, baseBool.raw >> kHV_NumDataBits, kHV_NumDataBits);
+}
+
+/// Store the HermesValue for the bool \p val into \p out.
+void emit_sh_ljs_bool_const(a64::Assembler &a, const a64::GpX &out, bool val) {
+  static constexpr SHLegacyValue baseBool = HermesValue::encodeBoolValue(false);
+  // We know that the ETag for bool has a 0 in its lowest bit, and is therefore
+  // a shifted 16 bit value. We can exploit this to use movk to set the tag.
+  static_assert(HERMESVALUE_VERSION == 2);
+  static_assert(
+      (llvh::isShiftedUInt<16, kHV_NumDataBits>(baseBool.raw)) &&
+      "Boolean tag must be 16 bits.");
+  if (val) {
+    // Put 1 at the value and add the bool tag.
+    a.mov(out, (uint64_t)1 << kHV_BoolBitIdx);
+    a.movk(out, baseBool.raw >> kHV_NumDataBits, kHV_NumDataBits);
+  } else {
+    a.mov(out, baseBool.raw);
+  }
+}
+
+/// Maximum natural offset (+1) that can be encoded in a load/store instruction
+/// for a given operand width. The instruction contains a 12-bit unsigned
+/// offset which is multiplied by the size of the load, so the maximum offset is
+/// 2^12 * \c width.
+///
+/// https://developer.arm.com/documentation/ddi0602/2024-06/Base-Instructions/LDR--immediate---Load-register--immediate--?lang=en
+/// https://developer.arm.com/documentation/ddi0602/2024-06/Base-Instructions/LDRH--immediate---Load-register-halfword--immediate--?lang=en
+/// https://developer.arm.com/documentation/ddi0602/2024-06/Base-Instructions/LDRB--immediate---Load-register-byte--immediate--?lang=en
+constexpr inline uint32_t maxNaturalBaseOffset(unsigned width) {
+  return (1 << 12) * width;
+}
+
+/// Maximum offset (+1) that can be encoded in a load instruction, i.e. can be
+/// loaded by \c emit_load_from_base_offset() without requiring an extra
+/// register.
+constexpr uint32_t kMaxInlineBaseOffset = maxNaturalBaseOffset(8);
+
+/// Load a value with the specified width from the base register with an
+/// unsigned immediate offset. The wrapper is necessary since the immediate
+/// offset for loads is limited to 12-bits and may not always be sufficient, in
+/// which case we need to use alternate techniques. The base and destination
+/// registers must not be the same, since in rare cases we need to use the
+/// destination register as scratch.
+///
+/// \param WIDTH The width of the load, in bytes. Must be one of 1, 2, 4, or 8.
+/// \param INLINE_LOAD If true, the offset must be less than or equal to
+///   \c kMaxInlineBaseOffset, and the load will always be emitted without
+///   needing a temporary register.
+/// \param destReg The destination register to load the value into.
+/// \param baseReg The base register to calculate the load address.
+/// \param tmpReg A temporary register that must be different from \p baseReg,
+///   but could be the same as \p destReg. This is only needed when
+///   \c INLINE_LOAD is false, pass {} otherwise.
+/// \param offset The offset to add to the base register. Must be aligned to
+///   WIDTH.
+template <unsigned WIDTH, bool INLINE_LOAD = false>
+void emit_load_from_base_offset(
+    a64::Assembler &a,
+    const a64::GpX &destReg,
+    const a64::GpX &baseReg,
+    const a64::GpX &tmpReg,
+    uint32_t offset) {
+  static_assert(
+      WIDTH == 1 || WIDTH == 2 || WIDTH == 4 || WIDTH == 8,
+      "Unsupported width for load");
+  assert(
+      (INLINE_LOAD || tmpReg.isValid()) &&
+      "Temporary register must be valid when INLINE_LOAD is false");
+  assert(
+      (INLINE_LOAD || tmpReg != baseReg) &&
+      "tmpReg must not be the same as baseReg when INLINE_LOAD is false");
+  // Assert that the offset is aligned to the load width.
+  assert(offset % WIDTH == 0 && "Offset must be aligned to the load width");
+
+  // Maximum offset (+1) that can be used when loading a value with this width.
+  constexpr uint32_t kMaxNaturalOffset = maxNaturalBaseOffset(WIDTH);
+
+  if (offset < kMaxNaturalOffset) {
+    // The offset fits in the natural range for the load width.
+    if constexpr (WIDTH == 1) {
+      a.ldrb(destReg.w(), a64::Mem(baseReg, offset));
+    } else if constexpr (WIDTH == 2) {
+      a.ldrh(destReg.w(), a64::Mem(baseReg, offset));
+    } else if constexpr (WIDTH == 4) {
+      a.ldr(destReg.w(), a64::Mem(baseReg, offset));
+    } else {
+      a.ldr(destReg, a64::Mem(baseReg, offset));
+    }
+  } else if (offset < kMaxInlineBaseOffset) {
+    // The offset fits in the range for a 64-bit load.
+    a.ldr(destReg, a64::Mem(baseReg, offset & ~(uint32_t)7));
+    a.ubfx(destReg, destReg, (offset & 7) * 8, WIDTH * 8);
+  } else if constexpr (!INLINE_LOAD) {
+    // We must perform an explicit addition.
+    a.mov(tmpReg, offset / WIDTH);
+    if constexpr (WIDTH == 1) {
+      a.ldrb(destReg.w(), a64::Mem(baseReg, tmpReg));
+    } else if constexpr (WIDTH == 2) {
+      a.ldrh(
+          destReg.w(),
+          a64::Mem(baseReg, tmpReg, a64::Shift(a64::ShiftOp::kLSL, 1)));
+    } else if constexpr (WIDTH == 4) {
+      a.ldr(
+          destReg.w(),
+          a64::Mem(baseReg, tmpReg, a64::Shift(a64::ShiftOp::kLSL, 2)));
+    } else {
+      a.ldr(
+          destReg,
+          a64::Mem(baseReg, tmpReg, a64::Shift(a64::ShiftOp::kLSL, 3)));
+    }
+  } else {
+    a.reportError(
+        asmjit::kErrorInvalidImmediate,
+        "emit_load_from_base_offset(): offset is too large for INLINE_LOAD=true");
+  }
 }
 
 /// For a register containing a pointer to a GCCell, retrieve its CellKind (a
@@ -234,13 +444,14 @@ void emit_sh_ljs_bool(a64::Assembler &a, const a64::GpX inOut) {
 /// \p wOut and \p xIn may refer to the same register.
 void emit_gccell_get_kind(
     a64::Assembler &a,
-    const a64::GpW &wOut,
+    const a64::GpX &xOut,
     const a64::GpX &xIn) {
-  a.ldrb(
-      wOut,
-      a64::Mem(
-          xIn,
-          offsetof(SHGCCell, kindAndSize) + RuntimeOffsets::kindAndSizeKind));
+  emit_load_from_base_offset<1, true>(
+      a,
+      xOut,
+      xIn,
+      {},
+      offsetof(SHGCCell, kindAndSize) + RuntimeOffsets::kindAndSizeKind);
 }
 
 /// For a register \p wIn that contains a CellKind, check whether it falls
@@ -318,33 +529,471 @@ void emit_sh_cp_decode_non_null(a64::Assembler &a, const a64::GpX &xInOut) {
 #endif
 }
 
-/// Load a compressed pointer from \p mem and decompress it into \p dest.
-void emit_load_and_sh_cp_decode(
-    a64::Assembler &a,
-    const a64::GpX &dest,
-    const a64::Mem &mem) {
+/// Given a pointer in \p xInOut that is known to be non-null, compress it and
+/// place the result in \p xInOut.
+void emit_sh_cp_encode_non_null(a64::Assembler &a, const a64::GpX &xInOut) {
 #ifdef HERMESVM_COMPRESSED_POINTERS
-  a.ldr(dest.w(), mem);
-  emit_sh_cp_decode(a, dest);
-#else
-  a.ldr(dest, mem);
-  (void)emit_sh_cp_decode;
+  a.sub(xInOut, xInOut, xRuntime);
 #endif
 }
 
-/// Load a compressed pointer that is known to be non-null from \p mem and
-/// decompress it into \p dest.
-void emit_load_and_sh_cp_decode_non_null(
+/// Similar to \c emit_sh_cp_decode_non_null(), but used when the input register
+/// needs to be preserved. It returns the result register which must then be
+/// used by the caller.
+/// The result register is either \p xIn or \p xMayBeRes.
+[[nodiscard]] const a64::GpX &emit_sh_cp_decode_non_null_preserve_input(
+    a64::Assembler &a,
+    const a64::GpX &xMayBeRes,
+    const a64::GpX &xIn) {
+  if constexpr (sizeof(SmallHermesValue) == 4) {
+    a.add(xMayBeRes, xRuntime, xIn);
+    return xMayBeRes;
+  } else {
+    return xIn;
+  }
+}
+
+/// Load a compressed pointer from \p mem.
+void emit_load_cp(
     a64::Assembler &a,
     const a64::GpX &dest,
     const a64::Mem &mem) {
 #ifdef HERMESVM_COMPRESSED_POINTERS
   a.ldr(dest.w(), mem);
-  emit_sh_cp_decode_non_null(a, dest);
 #else
   a.ldr(dest, mem);
-  (void)emit_sh_cp_decode_non_null;
 #endif
+}
+
+/// Store the compressed pointer in \p val to \p mem.
+void emit_store_cp(
+    a64::Assembler &a,
+    const a64::GpX &val,
+    const a64::Mem &mem) {
+  if constexpr (sizeof(CompressedPointer) == 4)
+    a.str(val.w(), mem);
+  else
+    a.str(val, mem);
+}
+
+/// Load a SmallHermesValue from \p mem.
+void emit_load_shv(
+    a64::Assembler &a,
+    const a64::GpX &dest,
+    const a64::Mem &mem) {
+  if constexpr (sizeof(SmallHermesValue) == 4) {
+    a.ldr(dest.w(), mem);
+  } else {
+    a.ldr(dest, mem);
+  }
+}
+
+/// Store a SmallHermesValue to \p mem.
+asmjit::Error
+emit_store_shv(a64::Assembler &a, const a64::GpX &val, const a64::Mem &mem) {
+  if constexpr (sizeof(SmallHermesValue) == 4) {
+    return a.str(val.w(), mem);
+  } else {
+    return a.str(val, mem);
+  }
+}
+
+/// Emit a comparison with an immediate.
+void emit_cmp_imm32(
+    a64::Assembler &a,
+    const a64::GpW &wReg,
+    uint32_t imm32,
+    const a64::GpW &wTmpReg) {
+  if (a64::Utils::isAddSubImm(imm32)) {
+    a.cmp(wReg, imm32);
+  } else {
+    a.mov(wTmpReg, imm32);
+    a.cmp(wReg, wTmpReg);
+  }
+}
+
+/// Load the slot16 from a cache entry.
+/// \param xResReg The register to load the slot16 into.
+/// \param xPropCacheReg The register containing the pointer to the start of
+///   the read property cache, which must not be the same as \p xResReg.
+/// \param cacheIdx The index of the cache entry to load.
+void emit_load_slot16(
+    a64::Assembler &a,
+    const a64::GpX &xResReg,
+    const a64::GpX &xPropCacheReg,
+    uint8_t cacheIdx) {
+  assert(
+      xPropCacheReg != xResReg &&
+      "xPropCacheReg must not be the same as xResReg");
+  emit_load_from_base_offset<2>(
+      a,
+      xResReg,
+      xPropCacheReg,
+      xResReg,
+      sizeof(SHReadPropertyCacheEntry) * cacheIdx +
+          offsetof(SHReadPropertyCacheEntry, _slot16));
+}
+
+/// A class implementing SmallHermesValue to HermesValue decoding.
+/// Given a SmallHermesValue in \p xInOut, decompress it and place the result in
+/// \p xInOut. Jump to \p doneLab if decoding is done early (but not in the
+/// fall-through case).
+///
+/// To facilitate sharing the decoding without an extra branch, the code is
+/// split into two parts: the first case and the rest of the cases. The first
+/// case checks its condition: if it doesn't match, it jumps to the rest of the
+/// cases. If it matches, it performs the decode and falls through.
+/// The intent is that the "rest cases" will be shared, while the first case
+/// may be emitted multiple times to save a branch.
+class Emit_sh_shv_decode {
+#ifdef HERMESVM_BOXED_DOUBLES
+  const a64::GpX xInOut;
+  asmjit::Label ptrLab;
+  const asmjit::Label &doneLab;
+#endif
+#ifndef NDEBUG
+  bool restEmitted = false;
+#endif
+
+ public:
+  explicit Emit_sh_shv_decode(
+      a64::Assembler &a,
+      const a64::GpX &xInOut,
+      const asmjit::Label &doneLab)
+#ifdef HERMESVM_BOXED_DOUBLES
+      : xInOut(xInOut), doneLab(doneLab) {
+    ptrLab = a.newLabel();
+  }
+#else
+  {
+  }
+#endif
+
+  /// Emit the code checking and decoding the first case of SHV values. Can be
+  /// invoked multiple times. Emitted code looks like:
+  /// \code
+  ///    check
+  ///    b.cond ptrLab
+  ///    decode
+  /// \endcode
+  ///
+  /// Note that it simply falls through on success.
+  void emitFirstCase(a64::Assembler &a);
+
+  /// Emit the code checking and decoding all other cases of SHV values. Can
+  /// only be invoked once. Emitted code at high level looks like:
+  /// \code
+  ///    ptrLab:
+  ///      check_ptr
+  ///      b.cond otherLab
+  ///      decode
+  ///      b doneLab
+  ///    otherLab:
+  ///      decode
+  /// \endcode
+  ///
+  /// Note that the last case does not branch to doneLab, so the caller must
+  /// do it (or fall through to doneLab).
+  void emitRestCases(a64::Assembler &a);
+
+  /// Emit the first case, followed by a branch to doneLab, and the rest of the
+  /// cases.
+  void emitAll(a64::Assembler &a) {
+    emitFirstCase(a);
+#ifdef HERMESVM_BOXED_DOUBLES
+    // emitFirstCase() falls through, so add an explicit branch to doneLab.
+    a.b(doneLab);
+#endif
+    emitRestCases(a);
+  }
+};
+
+void Emit_sh_shv_decode::emitFirstCase(a64::Assembler &a) {
+#ifdef HERMESVM_BOXED_DOUBLES
+  static_assert(HERMESVALUE_VERSION == 2, "Constructing HermesValue from bits");
+  static_assert(HermesValue32::kVersion == 1, "Decoding HV32 bits");
+  constexpr uint64_t kHV32TagMask = (1 << HermesValue32::kNumTagBits) - 1;
+
+  // Start by testing the tag bits for 0, if so, this is a "compressed HV64".
+  static_assert((int)HermesValue32::Tag::CompressedHV64 == 0);
+  a.tst(xInOut, kHV32TagMask);
+  // If the tag is non-zero, jump to the pointer check.
+  a.b_ne(ptrLab);
+  // CompressedHV64, just shift the bits if needed. Note the case where
+  // HermesValue32 is actually 64 bits is only used for testing, so it is not
+  // worth optimising here.
+  if constexpr (sizeof(SmallHermesValue) < sizeof(HermesValue))
+    a.lsl(xInOut, xInOut, 32);
+#endif
+}
+
+void Emit_sh_shv_decode::emitRestCases(a64::Assembler &a) {
+#ifndef NDEBUG
+  assert(!restEmitted && "Rest cases already emitted");
+  restEmitted = true;
+#endif
+#ifdef HERMESVM_BOXED_DOUBLES
+  asmjit::Label symLab = a.newLabel();
+  asmjit::Label bdLab = a.newLabel();
+
+  static_assert(HERMESVALUE_VERSION == 2, "Constructing HermesValue from bits");
+  static_assert(HermesValue32::kVersion == 1, "Decoding HV32 bits");
+  constexpr uint64_t kHV32TagMask = (1 << HermesValue32::kNumTagBits) - 1;
+
+  a.bind(ptrLab);
+
+  // See the comments below for why the exact bits are important.
+  static_assert((int)HermesValue32::Tag::String == 0b01);
+  static_assert((int)HermesValue32::Tag::BigInt == 0b10);
+  static_assert((int)HermesValue32::Tag::Object == 0b11);
+  // We know that the tag is 3 bits, and we have already checked for 0, so we
+  // can check for the 3 interesting pointer tags (which are in the range 1-3,
+  // i.e., less than 2^2) just by testing the most significant bit of the tag.
+  a.tbnz(xInOut, 2, symLab);
+  // We can decompress the pointer right away, since the HV32 representation
+  // just makes it look like an unaligned compressed pointer.
+  emit_sh_cp_decode_non_null(a, xInOut);
+  // Now we insert the new tag. First compute the "base" tag. The HV64 tag for a
+  // pointer can be computed by adding the HV32 tag to this base.
+  constexpr uint16_t baseTag =
+      (uint16_t)HermesValue::Tag::Str - (uint16_t)HermesValue32::Tag::String;
+  // Move in the base tag.
+  a.movk(xInOut, baseTag, kHV_NumDataBits);
+
+  // We know that the base tag has zeroes in its low 2 bits, and the HV32 tag is
+  // known to be in the low 2 bits at this point. So we can use bfi to simply
+  // copy those low bits over.
+  static_assert((baseTag & 0b11) == 0);
+  a.bfi(xInOut, xInOut, kHV_NumDataBits, 2);
+
+  // Clear the HV32 tag in the low bits.
+  a.and_(xInOut, xInOut, ~kHV32TagMask);
+  a.b(doneLab);
+
+  a.bind(symLab);
+  // There are only two cases left, Symbol and BoxedDouble. We can distinguish
+  // them with a single bit.
+  static_assert((int)HermesValue32::Tag::BoxedDouble == 0b100);
+  static_assert((int)HermesValue32::Tag::Symbol == 0b101);
+  static_assert((int)HermesValue32::Tag::_Last == 0b110);
+  // Test the low bit, to distinguish Symbol and BoxedDouble.
+  a.tbz(xInOut, 0, bdLab);
+  // SymbolID has a 17-bit tag in HV64, which means the tag cannot be inserted
+  // in a single instruction. However, we can exploit the fact that HV64 tags
+  // are particular double NaN's, with a sign bit of 1 and all-1 exponents, so
+  // they start with 0xfff. This means that the most significant bits of the tag
+  // are 1, and we can shift in those bits with an asr below as we shift out the
+  // HV32 tag. First, insert the low 14 bits of the symbol tag as a 16 bit
+  // immediate.
+  constexpr uint16_t symTag =
+      (uint16_t)((uint32_t)HVETag_Symbol << (HermesValue32::kNumTagBits - 1));
+  // Assert that the top bits are preserved with an arithmetic right shift.
+  static_assert(
+      ((int16_t)symTag) >> (HermesValue32::kNumTagBits - 1) == HVETag_Symbol);
+  a.movk(xInOut, symTag, kHV_NumDataBits);
+  // Next, shift in the high 1's as we shift out the HV32 tag.
+  a.asr(xInOut, xInOut, HermesValue32::kNumTagBits);
+  a.b(doneLab);
+
+  a.bind(bdLab);
+  // It is a boxed double. As with pointers, we can decode it as a compressed
+  // pointer first.
+  emit_sh_cp_decode_non_null(a, xInOut);
+  // Since the tag is still present, subtract it from the offset.
+  constexpr size_t bdOffs = RuntimeOffsets::boxedDoubleValue -
+      (size_t)HermesValue32::Tag::BoxedDouble;
+  a.ldr(xInOut, a64::Mem(xInOut, bdOffs));
+#endif
+}
+
+/// Given a SmallHermesValue in \p xInOut, decompress it into a HermesValue and
+/// place the result in \p xInOut. Jump to \p doneLab if decoding is done early
+/// (but not in the fall-through case).
+void emit_sh_shv_decode(
+    a64::Assembler &a,
+    const a64::GpX &xInOut,
+    const asmjit::Label &doneLab) {
+  Emit_sh_shv_decode(a, xInOut, doneLab).emitAll(a);
+}
+
+/// Load the lengthAndFlags of a HermesValue that contains a StringPrimitive
+/// into \p xOut.
+/// xOut and xIn may be the same, but xIn will be clobbered.
+/// \param xOut the output register for the length, which will be placed
+///  in xOut.w().
+/// \param xIn the input register containing the string HermesValue.
+void emit_stringprim_get_length_and_flags(
+    a64::Assembler &a,
+    const a64::GpX &xOut,
+    const a64::GpX &xIn) {
+  emit_sh_ljs_get_pointer(a, xOut, xIn);
+  a.ldr(
+      xOut.w(), a64::Mem(xOut, RuntimeOffsets::stringPrimitiveLengthAndFlags));
+}
+
+/// Emit code to initialize the fields on a JSObject.
+/// \param xObj contains a pointer to the object to initialise.
+/// \param xParent contains a compressed pointer to the parent object.
+/// \param xTempOrPropStorageOpt is a temporary register. It may contain
+///   a pointer to the PropStorage. If \p HasPropStorage is true, it's
+///   used to initialize the PropStorage, otherwise it's used as a temporary
+///   register.
+///   Either way, the value in xTempOrPropStorageOpt WILL be overwritten.
+/// \param xClazzOpt if invalid will use the default JSObject HiddenClass,
+///   otherwise a compressed pointer to the HiddenClass of the new object.
+void emit_jsobject_init(
+    a64::Assembler &a,
+    const a64::GpX &xObj,
+    const a64::GpX &xParent,
+    const a64::GpX &xTempOrPropStorageOpt,
+    bool hasPropStorage,
+    const a64::GpX &xClazzOpt = a64::GpX{}) {
+  // obj->flags = 0
+  a.str(a64::wzr, a64::Mem(xObj, offsetof(SHJSObject, flags)));
+
+  if (hasPropStorage) {
+    emit_sh_cp_encode_non_null(a, xTempOrPropStorageOpt);
+    emit_store_cp(
+        a,
+        xTempOrPropStorageOpt,
+        a64::Mem(xObj, offsetof(SHJSObject, propStorage)));
+  }
+
+  // No longer need the propStorage pointer. Alias for clarity.
+  const a64::GpX &xTemp = xTempOrPropStorageOpt;
+
+  if (!xClazzOpt.isValid()) {
+    // Load the hidden class compressed pointer into xClazz.
+    static_assert(
+        JSObject::numOverlapSlots<JSObject>() == 0,
+        "Cannot use 0 property root class.");
+    a.ldr(xTemp, a64::Mem(xRuntime, RuntimeOffsets::runtimeRootClazzes));
+    emit_sh_ljs_get_pointer(a, xTemp, xTemp);
+    emit_sh_cp_encode_non_null(a, xTemp);
+  }
+
+  const a64::GpX &xClazz = xClazzOpt.isValid() ? xClazzOpt : xTemp;
+
+  // Store the parent and hidden class.
+  // obj->parent = xParent
+  // obj->clazz = xClazz (may be the same as xTemp).
+  assert(xClazz.isValid());
+  static_assert(
+      offsetof(SHJSObject, clazz) - offsetof(SHJSObject, parent) ==
+          sizeof(CompressedPointer),
+      "clazz and parent must be adjacent to use stp");
+  if constexpr (sizeof(CompressedPointer) == 4)
+    a.stp(
+        xParent.w(), xClazz.w(), a64::Mem(xObj, offsetof(SHJSObject, parent)));
+  else
+    a.stp(xParent, xClazz, a64::Mem(xObj, offsetof(SHJSObject, parent)));
+
+  // If !hasPropStorage, obj->propStorage = nullptr.
+
+  // obj->directProps[N] = SmallHermesValue::encodeRawZeroValue()
+
+  // We want to zero the rest of the object. To simplify things, we align the
+  // size to the heap alignment of 8 bytes, which ensures that the end of the
+  // fill region is aligned to 8 bytes.
+  // Start the fill at propStorage if HasPropStorage is false,
+  // otherwise start after propStorage in the directProps.
+  size_t startZeroOffset = hasPropStorage
+      ? offsetof(SHJSObjectAndDirectProps, directProps)
+      : offsetof(SHJSObject, propStorage);
+  size_t bytesToZero = heapAlignSize(cellSize<JSObject>()) - startZeroOffset;
+  size_t zeroedBytes = 0;
+  assert(bytesToZero % 4 == 0 && "Must be a multiple of 4");
+
+  // If there is some amount that is not a multiple of 8, store that first.
+  if (bytesToZero & 4) {
+    a.str(a64::wzr, a64::Mem(xObj, startZeroOffset));
+    zeroedBytes += 4;
+  }
+
+  // Now store any amount that is not a multiple of 16. Note that since the end
+  // of the fill region is aligned to 8 bytes, we know all further stores will
+  // be aligned to 8 bytes.
+  if (bytesToZero & 8) {
+    a.str(a64::xzr, a64::Mem(xObj, startZeroOffset + zeroedBytes));
+    zeroedBytes += 8;
+  }
+  // Store the rest as multiples of 16.
+  for (; zeroedBytes < bytesToZero; zeroedBytes += 16) {
+    a.stp(a64::xzr, a64::xzr, a64::Mem(xObj, startZeroOffset + zeroedBytes));
+  }
+  assert(zeroedBytes == bytesToZero && "Did not zero the whole object");
+}
+
+/// Emit code to initialize the fields of a newly created environment.
+/// \param xNewEnvPtr contains a pointer to the object to initialise.
+/// \param xParentEnv contains a compressed pointer to the parent environment.
+/// \param xTemp is a temporary register for use by the emitted code.
+/// \param vTemp is a temporary vector register for use by the emitted code.
+/// \param size is the number of slots in the new environment.
+void emit_environment_init(
+    a64::Assembler &a,
+    const a64::GpX &xNewEnvPtr,
+    const a64::GpX &xParentEnv,
+    const a64::GpX &xTemp,
+    const a64::VecV &vTemp,
+    uint32_t size) {
+  // Store the size and parent to the first two fields.
+  a.mov(xTemp, size);
+  if constexpr (sizeof(CompressedPointer) == 4) {
+    a.stp(
+        xParentEnv.w(),
+        xTemp.w(),
+        a64::Mem(xNewEnvPtr, offsetof(SHEnvironment, parentEnvironment)));
+  } else {
+    a.str(
+        xParentEnv,
+        a64::Mem(xNewEnvPtr, offsetof(SHEnvironment, parentEnvironment)));
+    a.str(xTemp.w(), a64::Mem(xNewEnvPtr, offsetof(SHEnvironment, size)));
+  }
+
+  // Load undefined.
+  a.mov(xTemp, _sh_ljs_undefined().raw);
+
+  auto slotsToFill = size;
+  // Before we fill 4 at a time, make sure any excess slots are filled.
+  if (slotsToFill % 2) {
+    a.str(xTemp, a64::Mem(xNewEnvPtr, offsetof(SHEnvironment, slots)));
+    --slotsToFill;
+  }
+  if (slotsToFill % 4) {
+    auto slotOffs = sizeof(SHLegacyValue) * (size - slotsToFill);
+    a.stp(
+        xTemp,
+        xTemp,
+        a64::Mem(xNewEnvPtr, offsetof(SHEnvironment, slots) + slotOffs));
+    slotsToFill -= 2;
+  }
+
+  // The remaining number of slots must be a multiple of 4, which we can fill 4
+  // at a time.
+  assert((slotsToFill % 4) == 0 && "Remaining slots must be multiple of 4");
+  if (slotsToFill) {
+    // Copy the value into a vector register, so we can fill faster.
+    a.dup(vTemp.d2(), xTemp);
+
+    auto slotOffs = sizeof(SHLegacyValue) * (size - slotsToFill);
+    // Initialize the pointer to the slots.
+    a.add(xTemp, xNewEnvPtr, offsetof(SHEnvironment, slots) + slotOffs);
+
+    // Fill the slots with undefined 4 at a time.
+    for (; slotsToFill; slotsToFill -= 4)
+      a.stp(vTemp, vTemp, a64::Mem(xTemp).post(32));
+  }
+  assert(slotsToFill == 0 && "All slots must be filled");
+}
+
+/// \return true if i is a valid immediate offset to use in an stp instruction
+/// storing two GpX registers, false otherwise. Note that the limits are
+/// different if storing GpW registers, or vector registers.
+bool isStpGpXImm(int i) {
+  // These restrictions are from:
+  // https://developer.arm.com/documentation/ddi0602/2025-03/Base-Instructions/STP--Store-pair-of-registers-
+  return (i % 8 == 0) && i <= 504 && i >= -512;
 }
 
 class OurErrorHandler : public asmjit::ErrorHandler {
@@ -388,6 +1037,25 @@ class OurErrorHandler : public asmjit::ErrorHandler {
   }
 };
 
+/// Helper function to load a pointer to the builtin closure with index
+/// \p builtinIndex and place it in \p xRes.
+void emit_load_builtin_closure(
+    a64::Assembler &a,
+    const a64::GpX &xRes,
+    uint32_t builtinIndex) {
+  static_assert(
+      std::is_same_v<
+          TransparentOwningPtr<Callable *, llvh::FreeDeleter>,
+          RuntimeOffsets::BuiltinsType>,
+      "builtins_ is a list of Callable *");
+  static_assert(
+      offsetof(TransparentOwningPtr<Callable *>, ptr) == 0,
+      "TransparentOwningPtr must be transparent");
+
+  a.ldr(xRes, a64::Mem(xRuntime, RuntimeOffsets::builtins));
+  a.ldr(xRes, a64::Mem(xRes, builtinIndex * sizeof(Callable *)));
+}
+
 /// This macro is used to catch and handle low probability instructing encoding
 /// errors - i.e. when an immediate operand doesn't fit in the instruction
 /// encoding. It causes Asmjit to just return an error code instead of
@@ -405,15 +1073,39 @@ class OurErrorHandler : public asmjit::ErrorHandler {
     expectedError_ = asmjit::kErrorOk;        \
   } while (0)
 
+#ifndef ASMJIT_NO_LOGGING
 class OurLogger : public asmjit::Logger {
+ private:
+  a64::Assembler &a_;
+  PerfJitDump *perfJitDump_{nullptr};
+  bool dumpJitCode_{false};
+
+ public:
+  OurLogger(a64::Assembler &a, PerfJitDump *perfJitDump, bool dumpJitCode)
+      : a_(a), perfJitDump_(perfJitDump), dumpJitCode_(dumpJitCode) {}
+
   ASMJIT_API asmjit::Error _log(const char *data, size_t size) noexcept
       override {
-    llvh::outs()
-        << (size == SIZE_MAX ? llvh::StringRef(data)
-                             : llvh::StringRef(data, size));
+    auto str =
+        (size == SIZE_MAX ? llvh::StringRef(data)
+                          : llvh::StringRef(data, size));
+    if (str.empty())
+      return asmjit::kErrorOk;
+    if (dumpJitCode_)
+      llvh::outs() << str;
+    if (!perfJitDump_)
+      return asmjit::kErrorOk;
+
+    // Comments by default do not have indentation, except some pseudocode
+    // comments, which start with ';' after indentation.
+    auto trimmed = str.ltrim();
+    if (str.front() != ' ' || (!trimmed.empty() && trimmed.front() == ';')) {
+      perfJitDump_->addCodeComment(str, a_.offset());
+    }
     return asmjit::kErrorOk;
   }
 };
+#endif
 
 } // unnamed namespace
 
@@ -464,42 +1156,49 @@ static bool isCheapConst(uint64_t k) {
   } while (0)
 
 Emitter::Emitter(
-    asmjit::JitRuntime &jitRT,
+    Runtime &runtime,
+    JITContext::Impl &jitImpl,
     unsigned dumpJitCode,
     bool emitAsserts,
+    bool emitCounters,
+    PerfJitDump *perfJitDump,
     CodeBlock *codeBlock,
-    ReadPropertyCacheEntry *readPropertyCache,
-    WritePropertyCacheEntry *writePropertyCache,
-    uint32_t numFrameRegs,
     const std::function<void(std::string &&message)> &longjmpError)
-    : dumpJitCode_(dumpJitCode),
+    : runtime_(runtime),
+      jitImpl_(jitImpl),
+      dumpJitCode_(dumpJitCode),
       emitAsserts_(emitAsserts),
-      frameRegs_(numFrameRegs),
+      emitCounters_(emitCounters),
+      frameRegs_(codeBlock->getFrameSize()),
       codeBlock_(codeBlock) {
-  if (dumpJitCode_ & DumpJitCode::Code)
-    logger_ = std::unique_ptr<asmjit::Logger>(new OurLogger());
-  if (logger_) {
-    logger_->setIndentation(asmjit::FormatIndentationGroup::kCode, 4);
-    logger_->addFlags(asmjit::FormatFlags::kHexImms);
-  }
-
   errorHandler_ = std::unique_ptr<asmjit::ErrorHandler>(
       new OurErrorHandler(expectedError_, longjmpError));
 
-  code.init(jitRT.environment(), jitRT.cpuFeatures());
+  code.init(jitImpl.jr.environment(), jitImpl.jr.cpuFeatures());
   code.setErrorHandler(errorHandler_.get());
-  if (logger_)
+
+#ifndef ASMJIT_NO_LOGGING
+  if ((dumpJitCode_ & DumpJitCode::Code) || perfJitDump) {
+    logger_ = std::unique_ptr<asmjit::Logger>(
+        new OurLogger(a, perfJitDump, dumpJitCode_));
+    logger_->setIndentation(asmjit::FormatIndentationGroup::kCode, 4);
+    logger_->addFlags(asmjit::FormatFlags::kHexImms);
     code.setLogger(logger_.get());
+  }
+#endif
+
   code.attach(&a);
 
   roDataLabel_ = a.newNamedLabel("RO_DATA");
   returnLabel_ = a.newNamedLabel("leave");
 
   // Save read/write property cache addresses.
-  roOfsReadPropertyCachePtr_ =
-      uint64Const((uint64_t)readPropertyCache, "readPropertyCache");
-  roOfsWritePropertyCachePtr_ =
-      uint64Const((uint64_t)writePropertyCache, "writePropertyCache");
+  roOfsReadPropertyCachePtr_ = uint64Const(
+      (uint64_t)codeBlock->readPropertyCache(), "readPropertyCache");
+  roOfsWritePropertyCachePtr_ = uint64Const(
+      (uint64_t)codeBlock->writePropertyCache(), "writePropertyCache");
+  roOfsPrivateNameCachePtr_ =
+      uint64Const((uint64_t)codeBlock->privateNameCache(), "privateNameCache");
 }
 
 void Emitter::enter(uint32_t numCount, uint32_t npCount) {
@@ -552,7 +1251,7 @@ void Emitter::enter(uint32_t numCount, uint32_t npCount) {
 }
 
 void Emitter::comment(const char *fmt, ...) {
-  if (!logger_)
+  if (!hasLogger())
     return;
   va_list args;
   va_start(args, fmt);
@@ -823,15 +1522,15 @@ void Emitter::frameSetup(
   a.str(a64::x0, a64::Mem(xRuntime, RuntimeOffsets::stackPointer));
   a.str(xFrame, a64::Mem(xRuntime, RuntimeOffsets::currentFrame));
 
-  // Fill it with undefined.
-  a.mov(a64::x0, _sh_ljs_undefined().raw);
-  a.dup(a64::v0.d2(), a64::x0);
+  static_assert(
+      HERMESVALUE_VERSION == 2, "Raw zero value must be ignored by GC");
   // Initialize the pointer to the current set of registers.
   a.mov(a64::x0, xFrame);
   size_t regsToFill = totalRegsToAlloc;
-  // Fill the registers with undefined in groups of 4, then 2, then 1.
+  // Fill the registers with zero in groups of 4, then 2, then 1.
   // If there are more than 32 registers, start with a loop.
   if (regsToFill > 32) {
+    a.movi(a64::v0.d2(), 0);
     // We will fill 4 registers on each iteration.
     unsigned loopBytes = llvh::alignDown(regsToFill, 4) * sizeof(SHLegacyValue);
     // Initialize the loop limit in x1.
@@ -849,7 +1548,8 @@ void Emitter::frameSetup(
     a.b_lo(loop);
 
     regsToFill %= 4;
-  } else {
+  } else if (regsToFill >= 4) {
+    a.movi(a64::v0.d2(), 0);
     // If the number of registers is small, just fill them directly.
     while (regsToFill >= 4) {
       a.stp(a64::v0, a64::v0, a64::Mem(a64::x0).post(32));
@@ -858,12 +1558,12 @@ void Emitter::frameSetup(
   }
   // Fill any excess registers.
   if (regsToFill >= 2) {
-    a.str(a64::v0, a64::Mem(a64::x0).post(16));
+    a.stp(a64::xzr, a64::xzr, a64::Mem(a64::x0).post(16));
     regsToFill -= 2;
   }
   if (regsToFill > 0) {
     assert(regsToFill == 1 && "All regs must be filled");
-    a.str(a64::d0, a64::Mem(a64::x0));
+    a.str(a64::xzr, a64::Mem(a64::x0));
   }
 
   // Create the slow path for throwing a register stack overflow.
@@ -973,8 +1673,14 @@ void Emitter::leave(llvh::ArrayRef<const asmjit::Label *> exceptionHandlers) {
 }
 
 void Emitter::callThunk(void *fn, const char *name) {
-  //    comment("// call %s", name);
-  a.bl(registerThunk(fn, name));
+  // Using thunks leads to 0.27% more branch mispredicts and 2.8% performance
+  // regression on an important React benchmark. So, disable them for now.
+  if constexpr (false) {
+    comment("// call %s", name);
+    a.bl(registerThunk(fn, name));
+  } else {
+    callWithoutThunk(fn, name);
+  }
 }
 
 void Emitter::callThunkWithSavedIP(void *fn, const char *name) {
@@ -996,6 +1702,55 @@ void Emitter::callWithoutThunk(void *fn, const char *name) {
   comment("// call %s", name);
   loadBits64InGp(a64::x16, (uint64_t)fn, name);
   a.blr(a64::x16);
+}
+
+void Emitter::emitIncrementCounter(JitCounter counter) {
+  if (!emitCounters_)
+    return;
+  // Push some registers onto the stack so we can use them.
+  a.stp(a64::x0, a64::x1, a64::Mem(a64::sp).pre(-16));
+
+  // Increment the counter.
+  a.ldr(a64::x0, a64::Mem(xRuntime, RuntimeOffsets::runtimeJitCounters));
+  a.ldr(a64::x1, a64::Mem(a64::x0, (unsigned)counter * sizeof(uint64_t)));
+  a.add(a64::x1, a64::x1, 1);
+  a.str(a64::x1, a64::Mem(a64::x0, (unsigned)counter * sizeof(uint64_t)));
+
+  // Pop the saved values back off the stack.
+  a.ldp(a64::x0, a64::x1, a64::Mem(a64::sp).post(16));
+}
+
+uint16_t Emitter::initHCLazyIDMayAlloc(HiddenClass *hc) {
+  uint16_t id = hc->getLazyJITId();
+  // Assign a new ID to the HC if we have to.
+  if (id != 0)
+    return id;
+
+  // Too many IDs. Fail.
+  if (jitImpl_.prevHCId == JITContext::Impl::kHCIdOverflow)
+    return 0;
+
+  id = ++jitImpl_.prevHCId;
+  hc->setLazyJITId(id);
+
+  struct : Locals {
+    PinnedValue<HiddenClass> hc;
+  } lv;
+  LocalsRAII lraii{runtime_, &lv};
+  lv.hc = hc;
+
+  if (jitImpl_.usedHCs.isUndefined()) {
+    // We would like to use a long-lived object, but we can't, because
+    // ArrayStorage cannot be long-lived: it can be allocated that way
+    // initially, but when it grows, it is allocated "normally".
+    jitImpl_.usedHCs = runtime_.ignoreAllocationFailure(
+        ArrayStorageSmall::create(runtime_, 8));
+  }
+
+  auto mh = MutableHandle<ArrayStorageSmall>::vmcast(&jitImpl_.usedHCs);
+  ArrayStorageSmall::push_back(mh, runtime_, lv.hc);
+
+  return id;
 }
 
 void Emitter::loadFrameAddr(a64::GpX dst, FR frameReg) {
@@ -1210,53 +1965,70 @@ void Emitter::syncToFrame(FR fr) {
 }
 
 void Emitter::syncAllFRTempExcept(FR exceptFR) {
-  for (unsigned i = kGPTemp.first; i <= kGPTemp.second; ++i) {
-    HWReg hwReg(i, HWReg::GpX{});
-    FR fr = hwRegs_[hwReg.combinedIndex()].contains;
-    if (!fr.isValid() || fr == exceptFR)
+  for (unsigned i = 0, e = frameRegs_.size(); i < e; ++i) {
+    auto &state = frameRegs_[i];
+    FR fr{i};
+    if (fr == exceptFR)
       continue;
 
-    FRState &frState = frameRegs_[fr.index()];
-    assert(frState.localGpX == hwReg && "tmpreg not bound to FR localreg");
-    if (frState.globalReg) {
-      if (!frState.globalRegUpToDate) {
-        comment("    ; sync: x%u (r%u)", i, fr.index());
-        movHWFromHW<false>(frState.globalReg, hwReg);
-        frState.globalRegUpToDate = true;
+    // If there is a global reg, just sync to that if needed.
+    if (state.globalReg) {
+      if (state.globalRegUpToDate)
+        continue;
+      // Note that it is valid to have no local reg even if the global reg is
+      // not up to date, because the FR may be uninitialized.
+      if (state.localGpX) {
+        comment("    ; sync: x%u (r%u)", state.localGpX.indexInClass(), i);
+        movHWFromHW<false>(state.globalReg, HWReg{state.localGpX});
+        state.globalRegUpToDate = true;
+      } else if (state.localVecD) {
+        comment("    ; sync: d%u (r%u)", state.localVecD.indexInClass(), i);
+        movHWFromHW<false>(state.globalReg, HWReg{state.localVecD});
+        state.globalRegUpToDate = true;
       }
-    } else {
-      if (!frState.frameUpToDate) {
-        comment("    ; sync: x%u (r%u)", i, fr.index());
-        _storeHWToFrame(fr, hwReg);
-      }
+      continue;
     }
-  }
 
-  for (unsigned i = kVecTemp1.first; i <= kVecTemp2.second; ++i) {
-    if (i > kVecTemp1.second && i < kVecTemp2.first)
+    // There is no global reg, we must sync to the frame. If the frame is
+    // already up to date, we can skip this FR.
+    if (state.frameUpToDate)
       continue;
 
-    HWReg hwReg(i, HWReg::VecD{});
-    FR fr = hwRegs_[hwReg.combinedIndex()].contains;
-    if (!fr.isValid() || fr == exceptFR)
-      continue;
-
-    FRState &frState = frameRegs_[fr.index()];
-    assert(frState.localVecD == hwReg && "tmpreg not bound to FR localreg");
-    // If there is a local GpX, it already synced the value.
-    if (frState.localGpX)
-      continue;
-    if (frState.globalReg) {
-      if (!frState.globalRegUpToDate) {
-        comment("    ; sync d%u (r%u)", i, fr.index());
-        movHWFromHW<false>(frState.globalReg, hwReg);
-        frState.globalRegUpToDate = true;
+    // Note that it is valid to have no local reg even if the frame is not up to
+    // date, because the FR may be uninitialized.
+    if (state.localGpX) {
+      // Check if the next register is also a local gpx that is not up to date.
+      // If so, we can write them both together.
+      if (i < e - 1) {
+        auto &nextState = frameRegs_[i + 1];
+        // Compute the offset so we can check if it is a valid stp immediate.
+        auto ofs =
+            (i + hbc::StackFrameLayout::FirstLocal) * sizeof(SHLegacyValue);
+        // Check that the next register also needs to be stored.
+        if (!nextState.globalReg && !nextState.frameUpToDate &&
+            nextState.localGpX && isStpGpXImm(ofs)) {
+          comment(
+              "    ; sync: x%u, x%u (r%u, r%u)",
+              state.localGpX.indexInClass(),
+              nextState.localGpX.indexInClass(),
+              i,
+              i + 1);
+          // Store both registers together with stp.
+          a.stp(
+              state.localGpX.a64GpX(),
+              nextState.localGpX.a64GpX(),
+              frA64Mem(FR{i}));
+          state.frameUpToDate = true;
+          nextState.frameUpToDate = true;
+          ++i;
+          continue;
+        }
       }
-    } else {
-      if (!frState.frameUpToDate) {
-        comment("    ; sync d%u (r%u)", i, fr.index());
-        _storeHWToFrame(fr, hwReg);
-      }
+      comment("    ; sync: x%u (r%u)", state.localGpX.indexInClass(), i);
+      _storeHWToFrame(fr, state.localGpX);
+    } else if (state.localVecD) {
+      comment("    ; sync: d%u (r%u)", state.localVecD.indexInClass(), i);
+      _storeHWToFrame(fr, state.localVecD);
     }
   }
 }
@@ -1521,6 +2293,25 @@ void Emitter::profilePoint(uint16_t pointIndex) {
 #endif
 }
 
+void Emitter::directEval(FR frRes, FR frText, bool strictCaller) {
+  comment("// DirectEval r%u, r%u", frRes.index(), frText.index());
+  syncAllFRTempExcept({});
+  syncToFrame(frText);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frText);
+  a.mov(a64::w2, strictCaller);
+  EMIT_RUNTIME_CALL(
+      *this,
+      HermesValue(*)(Runtime &, PinnedHermesValue *, bool),
+      _jit_direct_eval);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<true>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
 void Emitter::catchInst(FR frRes) {
   comment("// Catch r%u", frRes.index());
 
@@ -1665,6 +2456,51 @@ void Emitter::loadBits64InGp(
   }
 }
 
+void Emitter::loadSmallHermesValueInGpX(
+    a64::GpX &dest,
+    SmallHermesValue shv,
+    const char *constName) {
+  if constexpr (sizeof(SmallHermesValue) == 4) {
+    a.mov(dest.w(), shv.getRaw());
+  } else {
+    loadBits64InGp(dest, shv.getRaw(), constName);
+  }
+}
+
+void Emitter::loadConstStringInGpX(
+    SymbolID id,
+    const a64::GpX &xOut,
+    const a64::GpX &xTemp) {
+  assert(xOut != xTemp);
+  static_assert(
+      std::is_same_v<
+          RuntimeOffsets::IdentifierTableLookupVectorType,
+          TransparentConservativeVector<
+              RuntimeOffsets::IdentifierTableLookupEntryType>>,
+      "lookupVector_ must be transparent");
+  a.ldr(
+      xOut,
+      a64::Mem(
+          xRuntime,
+          RuntimeOffsets::identifierTable +
+              RuntimeOffsets::identifierTableLookupVector +
+              TransparentConservativeVector<
+                  RuntimeOffsets::IdentifierTableLookupEntryType>::
+                  dataPointerOffset()));
+  // xOut = xOut[symID.index].strPrim_
+  size_t offset =
+      (id.unsafeGetIndex() * RuntimeOffsets::identifierTableLookupEntrySize) +
+      RuntimeOffsets::identifierTableLookupEntryStrPrim;
+  asmjit::Error err;
+  EXPECT_ERROR(
+      asmjit::kErrorInvalidDisplacement,
+      err = a.ldr(xOut, a64::Mem(xOut, offset)));
+  if (err) {
+    a.mov(xTemp, offset);
+    a.ldr(xOut, a64::Mem(xOut, xTemp));
+  }
+}
+
 void Emitter::loadConstBits64(
     FR frRes,
     uint64_t bits,
@@ -1687,20 +2523,19 @@ void Emitter::loadConstString(
     uint32_t stringID) {
   comment("// LoadConstString r%u, stringID %u", frRes.index(), stringID);
 
-  syncAllFRTempExcept(frRes);
-  freeAllFRTempExcept({});
+  Runtime &runtime = runtimeModule->getRuntime();
+  SymbolID symID = runtimeModule->getSymbolIDFromStringIDMayAllocate(stringID);
+  [[maybe_unused]] StringPrimitive *strPrim =
+      runtime.getStringPrimFromSymbolID(symID);
+  assert(strPrim && "must be allocated");
 
-  a.mov(a64::x0, xRuntime);
-  loadBits64InGp(a64::x1, (uint64_t)runtimeModule, "RuntimeModule");
-  a.mov(a64::w2, stringID);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHRuntimeModule *, uint32_t),
-      _sh_ljs_get_bytecode_string);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  HWReg hwTmp = allocTempGpX();
+  freeReg(hwTmp);
 
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<true>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  loadConstStringInGpX(symID, hwRes.a64GpX(), hwTmp.a64GpX());
+  emit_sh_ljs_string(a, hwRes.a64GpX());
 }
 
 void Emitter::loadConstBigInt(
@@ -1747,7 +2582,7 @@ void Emitter::toNumber(FR frRes, FR frInput) {
   // Since HermesValue is NaN-boxed we know that all non-number values will be
   // NaN. So we can conveniently test for non-number values by checking for NaN
   // (which does not compare equal to itself).
-  static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+  static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
   a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
   a.b_ne(slowPathLab);
   movHWFromHW<false>(hwRes, hwInput);
@@ -1800,7 +2635,7 @@ void Emitter::toNumeric(FR frRes, FR frInput) {
   // Since HermesValue is NaN-boxed we know that all non-number values will be
   // NaN. So we can conveniently test for non-number values by checking for NaN
   // (which does not compare equal to itself).
-  static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+  static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
   a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
   a.b_ne(slowPathLab);
   movHWFromHW<false>(hwRes, hwInput);
@@ -1939,34 +2774,596 @@ void Emitter::addEmptyString(FR frRes, FR frInput) {
        }});
 }
 
+void Emitter::bumpAllocAndUnpoison(
+    uint32_t sz,
+    const a64::GpX &xOut,
+    const a64::GpX &xTemp1,
+    const a64::GpX &xTemp2,
+    const asmjit::Label &slowPathLab) {
+#ifdef HERMESVM_GC_HADES
+  // Load the current YG level and end address.
+  a.ldr(xOut, a64::Mem(xRuntime, RuntimeOffsets::runtimeHadesYGLevel));
+  a.ldr(xTemp1, a64::Mem(xRuntime, RuntimeOffsets::runtimeHadesYGEnd));
+
+  // Try to increment the heap level by the size of the object.
+  if (a64::Utils::isAddSubImm(sz)) {
+    a.add(xTemp2, xOut, sz);
+  } else {
+    a.mov(xTemp2, sz);
+    a.add(xTemp2, xOut, xTemp2);
+  }
+  a.cmp(xTemp2, xTemp1);
+  a.b_hi(slowPathLab);
+
+#if LLVM_ADDRESS_SANITIZER_BUILD
+  // Save all the temporary registers in pairs.
+  static_assert((kGPTemp.second - kGPTemp.first + 1) % 2 == 0);
+  for (unsigned i = kGPTemp.first; i <= kGPTemp.second; i += 2)
+    a.stp(a64::x(i + 1), a64::x(i), a64::Mem(a64::sp).pre(-16));
+
+  a.mov(a64::x0, xOut);
+  a.mov(a64::x1, sz);
+  // Unpoison the newly allocated memory.
+  EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
+      *this,
+      void (*)(void const volatile *, size_t),
+      __asan_unpoison_memory_region);
+
+  // Restore the temporary registers.
+  for (int i = kGPTemp.second; i >= kGPTemp.first; i -= 2)
+    a.ldp(a64::x(i), a64::x(i - 1), a64::Mem(a64::sp).post(16));
+#endif
+
+  // Allocating succeeded, update the level.
+  a.str(xTemp2, a64::Mem(xRuntime, RuntimeOffsets::runtimeHadesYGLevel));
+#else
+  // MallocGC does not support inline allocation.
+  a.b(slowPathLab);
+#endif
+}
+
+void Emitter::initGCCell(
+    CellKind kind,
+    uint32_t sz,
+    const a64::GpX &xCell,
+    const a64::GpX &xTemp1) {
+  // Initialize the fields on GCCell.
+#ifndef NDEBUG
+  // cell->magic = GCCell::kMagic
+  a.mov(xTemp1, RuntimeOffsets::gcCellMagicValue);
+  static_assert(sizeof(SHGCCell::magic) == 2);
+  a.strh(xTemp1.w(), a64::Mem(xCell, offsetof(SHGCCell, magic)));
+
+  // cell->debugAllocationId = heap->debugAllocationCounter_++;
+  a.ldr(xTemp1, a64::Mem(xRuntime, RuntimeOffsets::runtimeDebugAllocCounter));
+  static_assert(sizeof(SHGCCell::debugAllocationId) == 4);
+  a.str(xTemp1.w(), a64::Mem(xCell, offsetof(SHGCCell, debugAllocationId)));
+  a.add(xTemp1, xTemp1, 1);
+  a.str(xTemp1, a64::Mem(xRuntime, RuntimeOffsets::runtimeDebugAllocCounter));
+#endif
+
+  // Load the KindAndSize into a register.
+  KindAndSize ks{kind, sz};
+  CompressedPointer::RawType rawKS;
+  static_assert(sizeof(ks) == sizeof(rawKS));
+  memcpy(&rawKS, &ks, sizeof(ks));
+  // Note that this is almost always a "cheap constant".
+  loadBits64InGp(xTemp1, rawKS, "KindAndSize");
+
+  // KindAndSize has the same size as a compressed pointer, so store it as one.
+  emit_store_cp(a, xTemp1, a64::Mem(xCell, offsetof(SHGCCell, kindAndSize)));
+}
+
+void Emitter::allocInYoung(
+    CellKind kind,
+    uint32_t sz,
+    const a64::GpX &xOut,
+    const a64::GpX &xTemp1,
+    const a64::GpX &xTemp2,
+    const asmjit::Label &slowPathLab) {
+  // Ensure the size is aligned as required.
+  sz = heapAlignSize(sz);
+  bumpAllocAndUnpoison(sz, xOut, xTemp1, xTemp2, slowPathLab);
+  initGCCell(kind, sz, xOut, xTemp1);
+}
+
+void Emitter::alloc2InYoung(
+    CellKind kind1,
+    uint32_t sz1,
+    CellKind kind2,
+    uint32_t sz2,
+    const a64::GpX &xOut1,
+    const a64::GpX &xOut2,
+    const a64::GpX &xTemp,
+    const asmjit::Label &slowPathLab) {
+  // Ensure the size is aligned as required.
+  sz1 = heapAlignSize(sz1);
+  sz2 = heapAlignSize(sz2);
+  bumpAllocAndUnpoison(
+      sz1 + sz2, xOut1, /* xTemp1 */ xOut2, /*xTemp2 */ xTemp, slowPathLab);
+
+  // Initialize first cell.
+  initGCCell(kind1, sz1, xOut1, xTemp);
+
+  // Place the pointer to the second cell in xTemp1 and initialize the GCCell.
+  if (a64::Utils::isAddSubImm(sz1)) {
+    a.add(xOut2, xOut1, sz1);
+  } else {
+    a.mov(xTemp, sz1);
+    a.add(xOut2, xOut1, xTemp);
+  }
+  initGCCell(kind2, sz2, xOut2, xTemp);
+}
+
 void Emitter::newObject(FR frRes) {
   comment("// NewObject r%u", frRes.index());
   syncAllFRTempExcept(frRes);
   freeAllFRTempExcept({});
-  a.mov(a64::x0, xRuntime);
-  EMIT_RUNTIME_CALL(*this, SHLegacyValue(*)(SHRuntime *), _sh_ljs_new_object);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+
+  // Allocate the result register.
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  auto xRes = hwRes.a64GpX();
+
+  // Allocate temporary registers, note that these must be different from the
+  // result as we will use all of them together.
+  HWReg hwTemp1 = allocTempGpX();
+  HWReg hwTemp2 = allocTempGpX();
+  auto xTemp1 = hwTemp1.a64GpX();
+  auto xTemp2 = hwTemp2.a64GpX();
+  freeReg(hwTemp1);
+  freeReg(hwTemp2);
+
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
+
+  // Allocate the object.
+  allocInYoung(
+      CellKind::JSObjectKind,
+      cellSize<JSObject>(),
+      xRes,
+      xTemp1,
+      xTemp2,
+      slowPathLab);
+
+  // Get the parent.
+  a.ldr(xTemp1, a64::Mem(xRuntime, offsetof(Runtime, objectPrototype)));
+  emit_sh_ljs_get_pointer(a, xTemp1, xTemp1);
+  emit_sh_cp_encode_non_null(a, xTemp1);
+
+  emit_jsobject_init(
+      a, xRes, /* xParent */ xTemp1, /* xTempOrPropStorageOpt */ xTemp2, false);
+
+  // Add the object tag to the result.
+  emit_sh_ljs_object(a, xRes);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .hwRes = hwRes,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment("// Slow path: NewObject r%u", sl.frRes.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         EMIT_RUNTIME_CALL(
+             em, SHLegacyValue(*)(SHRuntime *), _sh_ljs_new_object);
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::newObjectWithParent(FR frRes, FR frParent) {
   comment("// NewObjectWithParent r%u, r%u", frRes.index(), frParent.index());
   syncAllFRTempExcept(frRes != frParent ? frRes : FR());
   syncToFrame(frParent);
+  auto hwParent = getOrAllocFRInGpX(frParent, true);
+  auto hwNewObjPtr = allocTempGpX();
+  auto hwTemp1 = allocTempGpX();
+  auto hwTemp2 = allocTempGpX();
+  auto xParent = hwParent.a64GpX();
+  auto xNewObjPtr = hwNewObjPtr.a64GpX();
+  auto xTemp1 = hwTemp1.a64GpX();
+  auto xTemp2 = hwTemp2.a64GpX();
   freeAllFRTempExcept({});
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frParent);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *),
-      _sh_ljs_new_object_with_parent);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  freeReg(hwNewObjPtr);
+  freeReg(hwTemp1);
+  freeReg(hwTemp2);
+
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
+
+  allocInYoung(
+      CellKind::JSObjectKind,
+      cellSize<JSObject>(),
+      xNewObjPtr,
+      xTemp1,
+      xTemp2,
+      slowPathLab);
+
+  // Compute what the parent should be.
+  auto decodeObjParentLab = a.newLabel();
+  auto parentDoneLab = a.newLabel();
+
+  // Check if the parent is an object.
+  emit_sh_ljs_is_object(a, xTemp1, xParent);
+  a.b_eq(decodeObjParentLab);
+
+  // Check if the parent is null.
+  emit_sh_ljs_is_null(a, xTemp1, xParent);
+  // At this point, the parent is no longer useful, so we are free to overwrite
+  // it. Set it to zero so we store nullptr if the parent is JS null.
+  a.mov(xParent, 0);
+  a.b_eq(parentDoneLab);
+
+  // The parent is not an object or null, so get Object.prototype.
+  a.ldr(xParent, a64::Mem(xRuntime, offsetof(Runtime, objectPrototype)));
+
+  // Extract the parent object pointer from the HermesValue in xParent.
+  a.bind(decodeObjParentLab);
+  emit_sh_ljs_get_pointer(a, xParent, xParent);
+  emit_sh_cp_encode_non_null(a, xParent);
+
+  a.bind(parentDoneLab);
+
+  // Initialize the object.
+  emit_jsobject_init(a, xNewObjPtr, xParent, xTemp1, false);
+
+  auto hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+
+  // Move the object into the result register as a HermesValue.
+  emit_sh_ljs_object2(a, hwRes.a64GpX(), xNewObjPtr);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .frInput1 = frParent,
+       .hwRes = hwRes,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: NewObjectWithParent r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em.loadFrameAddr(a64::x1, sl.frInput1);
+
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *),
+             _sh_ljs_new_object_with_parent);
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::newObjectWithBuffer(
+    FR frRes,
+    uint32_t shapeTableIndex,
+    uint32_t valBufferOffset) {
+  ShapeTableEntry shapeInfo = codeBlock_->getRuntimeModule()
+                                  ->getBytecode()
+                                  ->getObjectShapeTable()[shapeTableIndex];
+
+  // If the object and the property storage can't be guaranteed to be in the
+  // young gen, bail.
+  // TODO: Fix this once we can inline write barriers.
+  if (shapeInfo.numProps > JSObject::maxYoungGenAllocationPropCount()) {
+    newObjectWithBufferSlow(frRes, shapeTableIndex, valBufferOffset);
+    return;
+  }
+
+  // Simple visitor to check if the fast path is possible.
+  struct {
+    void visitStringID(StringID) {}
+    void visitNumber(double d) {
+      // TODO: Implement fast loading for boxed double values.
+      if (!SmallHermesValue::canInlineDouble(d))
+        fast = false;
+    }
+    void visitNull() {}
+    void visitUndefined() {}
+    void visitBool(bool) {}
+    bool fast = true;
+  } fastPathCheckVisitor{};
+
+  SerializedLiteralParser::parse(
+      codeBlock_->getRuntimeModule()
+          ->getBytecode()
+          ->getLiteralValueBuffer()
+          .slice(valBufferOffset),
+      shapeInfo.numProps,
+      fastPathCheckVisitor);
+
+  // If we can't use the fast path, fall back to the slow path.
+  if (!fastPathCheckVisitor.fast) {
+    newObjectWithBufferSlow(frRes, shapeTableIndex, valBufferOffset);
+    return;
+  }
+
+  // Fast path: we can create the object directly.
+  comment(
+      "// NewObjectWithBuffer r%u, %u, %u",
+      frRes.index(),
+      shapeTableIndex,
+      valBufferOffset);
+
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
+
+  syncAllFRTempExcept(frRes);
+  freeAllFRTempExcept({});
+
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+
+  HWReg hwObj = allocTempGpX();
+  HWReg hwClazz = allocTempGpX();
+  HWReg hwTmp = allocTempGpX();
+  HWReg hwTmp2 = allocTempGpX();
+  a64::GpX xObj = hwObj.a64GpX();
+  a64::GpX xClazz = hwClazz.a64GpX();
+  a64::GpX xTmp = hwTmp.a64GpX();
+  a64::GpX xTmp2 = hwTmp2.a64GpX();
+  freeReg(hwObj);
+  freeReg(hwClazz);
+  freeReg(hwTmp);
+  freeReg(hwTmp2);
+
+  // Load the HiddenClass from the cache.
+#ifdef HERMESVM_GC_HADES
+  // First check the read barrier.
+  emit_load_from_base_offset<1, true>(
+      a, xTmp, xRuntime, xTmp2, RuntimeOffsets::runtimeHadesOGMarkingBarriers);
+  a.cbnz(xTmp.w(), slowPathLab);
+#endif
+  // Load the HC from the cache.
+  static_assert(
+      std::is_same_v<
+          TransparentConservativeVector<WeakRoot<HiddenClass>>,
+          RuntimeOffsets::RuntimeModuleObjectLiteralHiddenClassesType>,
+      "objectLiteralHiddenClasses_ must be transparent");
+  loadBits64InGp(
+      xClazz, (uint64_t)codeBlock_->getRuntimeModule(), "RuntimeModule");
+  a.ldr(
+      xClazz,
+      a64::Mem(
+          xClazz, RuntimeOffsets::runtimeModuleObjectLiteralHiddenClasses));
+  emit_load_cp(
+      a,
+      xClazz,
+      a64::Mem(xClazz, shapeTableIndex * sizeof(WeakRoot<HiddenClass>)));
+  // If the HC isn't cached, slow path.
+  a.cbz(xClazz, slowPathLab);
+
+  // Create the object.
+  const unsigned numIndirectSlots =
+      shapeInfo.numProps <= JSObject::DIRECT_PROPERTY_SLOTS
+      ? 0
+      : shapeInfo.numProps - JSObject::DIRECT_PROPERTY_SLOTS;
+  if (numIndirectSlots > 0) {
+    // Need indirect property storage, so allocate 2 cells.
+    // We know that both together should be able to fit in young gen if there's
+    // space due to the above checks.
+    // PropStorage will be in xTmp2.
+    alloc2InYoung(
+        CellKind::JSObjectKind,
+        cellSize<JSObject>(),
+        PropStorage::getCellKind(),
+        PropStorage::allocationSize(numIndirectSlots),
+        /* xOut1 */ xObj,
+        /* xOut2 */ xTmp2,
+        xTmp,
+        slowPathLab);
+  } else {
+    allocInYoung(
+        CellKind::JSObjectKind,
+        cellSize<JSObject>(),
+        xObj,
+        xTmp,
+        xTmp2,
+        slowPathLab);
+  }
+
+  // Get the parent.
+  a.ldr(xTmp, a64::Mem(xRuntime, offsetof(Runtime, objectPrototype)));
+  emit_sh_ljs_get_pointer(a, xTmp, xTmp);
+  emit_sh_cp_encode_non_null(a, xTmp);
+
+  // Initialize the JSObject to have the correct parent/HC.
+  emit_jsobject_init(
+      a,
+      xObj,
+      /* xParent */ xTmp,
+      /* xTempOrPropStorageOpt */ xTmp2,
+      numIndirectSlots > 0,
+      /* xClazz */ xClazz);
+
+  if (numIndirectSlots > 0) {
+    // The parent in xTmp is no longer needed.
+    // Populate the size.
+    a.mov(xTmp, numIndirectSlots);
+    a.str(
+        xTmp,
+        a64::Mem(
+            xObj,
+            heapAlignSize(cellSize<JSObject>()) +
+                offsetof(SHArrayStorageSmall, size)));
+  }
+
+  // Come back from the slow path with xObj having the JSObject pointer.
+  a.bind(contLab);
+
+  // Store the HermesValue encoded result and never update it again.
+  // From here on we'll just populate the values via a raw pointer to the
+  // JSObject in xObj.
+  emit_sh_ljs_object2(a, hwRes.a64GpX(), xObj);
+
+  // Store each of the values to the object at xObj.
+  // No write barrier required because the object and property storage were
+  // allocated in the young gen.
+  struct {
+    Emitter &em;
+    a64::GpX &xObj;
+    a64::GpX &xTmp;
+    a64::GpX &xTmp2;
+    /// Needed by the convenient EXPECT_ERROR macro, which expects to be able to
+    /// use the Emitter::expectedError_ field (using implicit 'this').
+    /// Reference it directly here so the macro keeps working.
+    asmjit::Error &expectedError_ = em.expectedError_;
+
+    /// Iteration counter.
+    /// Index of the next value to be inserted into the object.
+    size_t i = 0;
+
+    // \return the offset from xObj where we'll place the property.
+    //   xObj either points to the JSObject or to indirect property storage
+    //   depending on the value of \c i.
+    size_t currentOffset() const {
+      if (i < JSObject::DIRECT_PROPERTY_SLOTS) {
+        return offsetof(SHJSObjectAndDirectProps, directProps) +
+            i * sizeof(SHGCSmallHermesValue);
+      } else {
+        // If we're reading from indirect storage, offset by the number of
+        // direct property slots.
+        auto storageSlot = i - JSObject::DIRECT_PROPERTY_SLOTS;
+        return offsetof(SHArrayStorageSmall, storage) +
+            storageSlot * sizeof(SHGCSmallHermesValue);
+      }
+    }
+
+    /// Store a simple SmallHermesValue into the current offset in the object.
+    void storeVal(SmallHermesValue val) {
+      em.loadSmallHermesValueInGpX(xTmp, val, "object literal buffer val");
+      asmjit::Error err;
+      EXPECT_ERROR(
+          asmjit::kErrorInvalidDisplacement,
+          err = emit_store_shv(em.a, xTmp, a64::Mem(xObj, currentOffset())));
+      if (err) {
+        em.a.mov(xTmp2, currentOffset());
+        emit_store_shv(em.a, xTmp, a64::Mem(xObj, xTmp2));
+      }
+    }
+
+    /// Advance internal state to the next slot, updating the counter and any
+    /// registers so that they have the correct state for the next element.
+    void advance() {
+      ++i;
+
+      // xObj was set to the JSObject itself initially.
+      // If we are transitioning into indirect storage, switch xObj to point to
+      // the indirect property storage.
+      if (i == JSObject::DIRECT_PROPERTY_SLOTS) {
+        // We know alloc2InYoung succeded so we can just advance the pointer.
+#ifdef HERMESVM_GC_HADES
+        em.a.add(xObj, xObj, heapAlignSize(cellSize<JSObject>()));
+#else
+        emit_load_cp(
+            em.a, xObj, a64::Mem(xObj, offsetof(SHJSObject, propStorage)));
+        emit_sh_cp_decode_non_null(em.a, xObj);
+#endif
+      }
+    }
+
+    void visitStringID(StringID id) {
+      em.comment("    ; string");
+      RuntimeModule *runtimeModule = em.codeBlock_->getRuntimeModule();
+      Runtime &runtime = runtimeModule->getRuntime();
+      SymbolID symID = runtimeModule->getSymbolIDFromStringIDMayAllocate(id);
+
+      // Force allocation of the StringPrimitive at JIT time.
+      // StringPrimitive won't be freed because RuntimeModule keeps the symbols
+      // in stringIDMap_ alive and StringPrimitives with live symbols aren't
+      // freed.
+      [[maybe_unused]] StringPrimitive *strPrim =
+          runtime.getStringPrimFromSymbolID(symID);
+      assert(strPrim && "must be allocated");
+
+      // xTmp = identifierTable_.lookupVector_.ptr
+      em.loadConstStringInGpX(symID, xTmp, xTmp2);
+      // Encode compressed pointer and wrap with StringTag.
+      // We know it's not null because we allocated it at JIT compile time.
+      emit_sh_cp_encode_non_null(em.a, xTmp);
+      emit_shv_string(em.a, xTmp);
+      // Store to storage.
+      emit_store_shv(em.a, xTmp, a64::Mem(xObj, currentOffset()));
+
+      advance();
+    }
+    void visitNumber(double d) {
+      em.comment("    ; number: %lf", d);
+      assert(
+          SmallHermesValue::canInlineDouble(d) &&
+          "boxed doubles not supported in fast path");
+      storeVal(SmallHermesValue::encodeInlineDoubleValueUnsafe(d));
+      advance();
+    }
+    void visitNull() {
+      em.comment("    ; null");
+      storeVal(SmallHermesValue::encodeNullValue());
+      advance();
+    }
+    void visitUndefined() {
+      em.comment("    ; undefined");
+      storeVal(SmallHermesValue::encodeUndefinedValue());
+      advance();
+    }
+    void visitBool(bool b) {
+      em.comment("    ; bool: %d", b);
+      storeVal(SmallHermesValue::encodeBoolValue(b));
+      advance();
+    }
+  } emittingVisitor{*this, xObj, xTmp, xTmp2};
+
+  SerializedLiteralParser::parse(
+      codeBlock_->getRuntimeModule()
+          ->getBytecode()
+          ->getLiteralValueBuffer()
+          .slice(valBufferOffset),
+      shapeInfo.numProps,
+      emittingVisitor);
+
+  // This slow path only allocates the new object.
+  // Property population is always done in JIT-emitted code specialized for this
+  // shape table entry.
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .hwRes = hwObj,
+       .sizeOrIdx = shapeTableIndex,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: NewObjectWithBuffer r%u, %u, %u",
+             sl.frRes.index(),
+             sl.sizeOrIdx,
+             sl.sizeOrIdx2);
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em.loadBits64InGp(a64::x1, (uint64_t)em.codeBlock_, "CodeBlock");
+         em.a.mov(a64::w2, sl.sizeOrIdx);
+         em.loadFrameAddr(a64::x3, sl.frRes);
+         EMIT_RUNTIME_CALL(
+             em,
+             JSObject *
+                 (*)(Runtime &, CodeBlock *, uint32_t, PinnedHermesValue *),
+             _jit_new_empty_object_for_buffer);
+         // Move into xObj.
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
+}
+
+void Emitter::newObjectWithBufferSlow(
     FR frRes,
     uint32_t shapeTableIndex,
     uint32_t valBufferOffset) {
@@ -1986,6 +3383,38 @@ void Emitter::newObjectWithBuffer(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHCodeBlock *, uint32_t, uint32_t),
       _interpreter_create_object_from_buffer);
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
+void Emitter::newObjectWithBufferAndParent(
+    FR frRes,
+    FR frParent,
+    uint32_t shapeTableIndex,
+    uint32_t valBufferOffset) {
+  comment(
+      "// NewObjectWithBufferAndParent r%u, r%u, %u, %u",
+      frRes.index(),
+      frParent.index(),
+      shapeTableIndex,
+      valBufferOffset);
+
+  // We unconditionally skip frRes here because we handle frParent with the
+  // syncToFrame below.
+  syncAllFRTempExcept(frRes);
+  syncToFrame(frParent);
+  freeAllFRTempExcept({});
+  a.mov(a64::x0, xRuntime);
+  loadBits64InGp(a64::x1, (uint64_t)codeBlock_, "CodeBlock");
+  loadFrameAddr(a64::x2, frParent);
+  a.mov(a64::w3, shapeTableIndex);
+  a.mov(a64::w4, valBufferOffset);
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(
+          SHRuntime *, SHCodeBlock *, SHLegacyValue *, uint32_t, uint32_t),
+      _interpreter_create_object_from_buffer_with_parent);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -2059,10 +3488,11 @@ void Emitter::fastArrayLength(FR frRes, FR frArr) {
 #ifdef HERMESVM_BOXED_DOUBLES
   // If boxed doubles are enabled, load the size from the ArrayStorage, where it
   // is stored as an integer.
-  emit_load_and_sh_cp_decode_non_null(
+  emit_load_cp(
       a,
       temp.a64GpX(),
       a64::Mem(temp.a64GpX(), offsetof(SHFastArray, indexedStorage)));
+  emit_sh_cp_decode_non_null(a, temp.a64GpX());
   a.ldr(
       temp.a64GpX().w(),
       a64::Mem(temp.a64GpX(), offsetof(SHArrayStorage, size)));
@@ -2268,18 +3698,76 @@ void Emitter::createFunctionEnvironment(FR frRes, uint32_t size) {
   syncAllFRTempExcept({});
   freeAllFRTempExcept({});
 
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, xFrame);
-  a.mov(a64::w2, size);
+  // Allocate the result register.
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  auto xRes = hwRes.a64GpX();
 
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _sh_ljs_create_function_environment);
+  // Allocate some temporaries.
+  HWReg hwTemp1 = allocTempGpX();
+  HWReg hwTemp2 = allocTempGpX();
+  auto hwTempV = allocTempVecD();
+  auto xTemp1 = hwTemp1.a64GpX();
+  auto xTemp2 = hwTemp2.a64GpX();
+  auto vTemp = hwTempV.a64VecD().v();
+  freeReg(hwTemp1);
+  freeReg(hwTemp2);
+  freeReg(hwTempV);
 
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
+
+  // Try to allocate the new environment cell.
+  allocInYoung(
+      CellKind::EnvironmentKind,
+      Environment::allocationSize(size),
+      xRes,
+      xTemp1,
+      xTemp2,
+      slowPathLab);
+
+  // Get the current closure pointer.
+  a.ldur(
+      xTemp1,
+      a64::Mem(
+          xFrame,
+          (int)StackFrameLayout::CalleeClosureOrCB *
+              (int)sizeof(SHLegacyValue)));
+  emit_sh_ljs_get_pointer(a, xTemp1, xTemp1);
+
+  // xTemp1 = closure->environment
+  emit_load_cp(a, xTemp1, a64::Mem(xTemp1, offsetof(SHCallable, environment)));
+
+  // Initialize the environment cell.
+  emit_environment_init(a, xRes, /* xParentEnv */ xTemp1, xTemp2, vTemp, size);
+
+  // Encode the cell as a HermesValue.
+  emit_sh_ljs_object(a, xRes);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .hwRes = hwRes,
+       .sizeOrIdx = size,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: CreateFunctionEnvironment r%u", sl.frRes.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em.a.mov(a64::x1, xFrame);
+         em.a.mov(a64::w2, sl.sizeOrIdx);
+
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
+             _sh_ljs_create_function_environment);
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::createEnvironment(FR frRes, FR frParent, uint32_t size) {
@@ -2291,52 +3779,126 @@ void Emitter::createEnvironment(FR frRes, FR frParent, uint32_t size) {
 
   syncAllFRTempExcept(frRes != frParent ? frRes : FR{});
   syncToFrame(frParent);
+  auto hwParent = getOrAllocFRInGpX(frParent, true);
+  auto hwTemp1 = allocTempGpX();
+  auto hwTemp2 = allocTempGpX();
+  auto hwNewEnvPtr = allocTempGpX();
+  auto hwTempV = allocTempVecD();
+
+  auto xTemp1 = hwTemp1.a64GpX();
+  auto xTemp2 = hwTemp2.a64GpX();
+  auto xNewEnvPtr = hwNewEnvPtr.a64GpX();
+  auto vTemp = hwTempV.a64VecD().v();
+
+  freeReg(hwTemp1);
+  freeReg(hwTemp2);
+  freeReg(hwNewEnvPtr);
+  freeReg(hwTempV);
+
   freeAllFRTempExcept({});
 
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frParent);
-  a.mov(a64::w2, size);
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
 
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *, uint32_t),
-      _sh_ljs_create_environment);
+  allocInYoung(
+      CellKind::EnvironmentKind,
+      Environment::allocationSize(size),
+      xNewEnvPtr,
+      xTemp1,
+      xTemp2,
+      slowPathLab);
 
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  // Load a compressed pointer to the parent environment in xTemp1.
+  emit_sh_ljs_get_pointer(a, xTemp1, hwParent.a64GpX());
+  emit_sh_cp_encode_non_null(a, xTemp1);
+
+  emit_environment_init(
+      a, xNewEnvPtr, /* xParentEnv */ xTemp1, xTemp2, vTemp, size);
+
+  // Finally, allocate the result register.
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+
+  emit_sh_ljs_object2(a, hwRes.a64GpX(), xNewEnvPtr);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .frInput1 = frParent,
+       .hwRes = hwRes,
+       .sizeOrIdx = size,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: CreateEnvironment r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+
+         em.a.mov(a64::x0, xRuntime);
+         em.loadFrameAddr(a64::x1, sl.frInput1);
+         em.a.mov(a64::w2, sl.sizeOrIdx);
+
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *, uint32_t),
+             _sh_ljs_create_environment);
+
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::getParentEnvironment(FR frRes, uint32_t level) {
   comment("// GetParentEnvironment r%u, %u", frRes.index(), level);
 
-  HWReg hwTmp1 = allocTempGpX();
-  a64::GpX xTmp1 = hwTmp1.a64GpX();
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+  a64::GpX xRes = hwRes.a64GpX();
+  frUpdatedWithHW(frRes, hwRes);
 
   // Get current closure.
   a.ldur(
-      xTmp1,
+      xRes,
       a64::Mem(
           xFrame,
           (int)StackFrameLayout::CalleeClosureOrCB *
               (int)sizeof(SHLegacyValue)));
   // get pointer.
-  emit_sh_ljs_get_pointer(a, xTmp1, xTmp1);
-  // xTmp1 = closure->environment
-  emit_load_and_sh_cp_decode_non_null(
-      a, xTmp1, a64::Mem(xTmp1, offsetof(SHCallable, environment)));
+  emit_sh_ljs_get_pointer(a, xRes, xRes);
+  // xRes = closure->environment
+  emit_load_cp(a, xRes, a64::Mem(xRes, offsetof(SHCallable, environment)));
+  emit_sh_cp_decode_non_null(a, xRes);
   for (; level; --level) {
-    // xTmp1 = env->parent.
-    emit_load_and_sh_cp_decode_non_null(
-        a, xTmp1, a64::Mem(xTmp1, offsetof(SHEnvironment, parentEnvironment)));
+    // xRes = env->parent.
+    emit_load_cp(
+        a, xRes, a64::Mem(xRes, offsetof(SHEnvironment, parentEnvironment)));
+    emit_sh_cp_decode_non_null(a, xRes);
   }
   // encode object.
-  emit_sh_ljs_object(a, xTmp1);
+  emit_sh_ljs_object(a, xRes);
+}
 
-  freeReg(hwTmp1);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, hwTmp1);
-  movHWFromHW<false>(hwRes, hwTmp1);
+void Emitter::getEnvironment(FR frRes, FR frSource, uint32_t level) {
+  comment(
+      "// GetEnvironment r%u, r%u, %u", frRes.index(), frSource.index(), level);
+
+  HWReg hwSource = getOrAllocFRInGpX(frSource, true);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
   frUpdatedWithHW(frRes, hwRes);
+  a64::GpX xRes = hwRes.a64GpX();
+
+  emit_sh_ljs_get_pointer(a, xRes, hwSource.a64GpX());
+  for (; level; --level) {
+    // xRes = env->parent.
+    emit_load_cp(
+        a, xRes, a64::Mem(xRes, offsetof(SHEnvironment, parentEnvironment)));
+    emit_sh_cp_decode_non_null(a, xRes);
+  }
+  // encode object.
+  emit_sh_ljs_object(a, xRes);
 }
 
 void Emitter::getClosureEnvironment(FR frRes, FR frClosure) {
@@ -2348,8 +3910,8 @@ void Emitter::getClosureEnvironment(FR frRes, FR frClosure) {
   auto hwRes = getOrAllocFRInGpX(frRes, false);
   // Use the result register as a scratch register for computing the address.
   emit_sh_ljs_get_pointer(a, hwRes.a64GpX(), hwClosure.a64GpX());
-  emit_load_and_sh_cp_decode_non_null(
-      a, hwRes.a64GpX(), a64::Mem(hwRes.a64GpX(), ofs));
+  emit_load_cp(a, hwRes.a64GpX(), a64::Mem(hwRes.a64GpX(), ofs));
+  emit_sh_cp_decode_non_null(a, hwRes.a64GpX());
   // The result is a pointer, so add the object tag.
   emit_sh_ljs_object(a, hwRes.a64GpX());
   frUpdatedWithHW(frRes, hwRes);
@@ -2563,14 +4125,14 @@ void Emitter::getArgumentsLength(FR frRes, FR frLazyReg) {
   freeReg(hwTemp);
   // Avoid an extra mov by using the temp register for the result if possible.
   HWReg hwRes = getOrAllocFRInVecD(frRes, false);
-  frUpdatedWithHW(frRes, hwRes, FRType::Number);
+  frUpdatedWithHW(frRes, hwRes);
 
   emit_sh_ljs_is_object(a, hwTemp.a64GpX(), hwLazyReg.a64GpX());
   a.b_eq(slowPathLab);
 
   // Fast path: if it's not an object, read from the frame.
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "NativeUint32 is stored as the lower 32 bits of the raw HermesValue");
   a.ldur(
       hwTemp.a64GpX().w(),
@@ -2878,8 +4440,12 @@ void Emitter::throwInst(FR frInput) {
   EMIT_RUNTIME_CALL(*this, void (*)(SHRuntime *, SHLegacyValue), _sh_throw);
 }
 
-void Emitter::throwIfEmpty(FR frRes, FR frInput) {
-  comment("// ThrowIfEmpty r%u, r%u", frRes.index(), frInput.index());
+void Emitter::throwIfEmptyUndefinedImpl(FR frRes, FR frInput, bool empty) {
+  comment(
+      "// %s r%u, r%u",
+      empty ? "ThrowIfEmpty" : "ThrowIfUndefined",
+      frRes.index(),
+      frInput.index());
 
   asmjit::Label slowPathLab = newSlowPathLabel();
 
@@ -2893,7 +4459,10 @@ void Emitter::throwIfEmpty(FR frRes, FR frInput) {
     freeAllFRTempExcept({});
   freeReg(hwTemp);
 
-  emit_sh_ljs_is_empty(a, hwTemp.a64GpX(), hwInput.a64GpX());
+  if (empty)
+    emit_sh_ljs_is_empty(a, hwTemp.a64GpX(), hwInput.a64GpX());
+  else
+    emit_sh_ljs_is_undefined(a, hwTemp.a64GpX(), hwInput.a64GpX());
   a.b_eq(slowPathLab);
 
   HWReg hwRes = getOrAllocFRInGpX(frRes, false);
@@ -2902,12 +4471,14 @@ void Emitter::throwIfEmpty(FR frRes, FR frInput) {
 
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
+       .name = empty ? "ThrowIfEmpty" : "ThrowIfUndefined",
        .frRes = frRes,
        .frInput1 = frInput,
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// Slow path: ThrowIfEmpty r%u, r%u",
+             "// Slow path: %s r%u, r%u",
+             sl.name,
              sl.frRes.index(),
              sl.frInput1.index());
          em.a.bind(sl.slowPathLab);
@@ -2983,8 +4554,8 @@ void Emitter::loadParentNoTraps(FR frRes, FR frObj) {
   a64::GpX xRes = hwRes.a64GpX();
   emit_sh_ljs_get_pointer(a, xTmp, hwObj.a64GpX());
   // xTmp contains the unencoded pointer value.
-  emit_load_and_sh_cp_decode(
-      a, xTmp, a64::Mem(xTmp, offsetof(SHJSObject, parent)));
+  emit_load_cp(a, xTmp, a64::Mem(xTmp, offsetof(SHJSObject, parent)));
+  emit_sh_cp_decode(a, xTmp);
   // Check whether it is nullptr and set flags.
   // TODO: Combine this null check with the one in emit_load_and_sh_cp_decode.
   a.cmp(xTmp, 0);
@@ -3005,28 +4576,11 @@ void Emitter::typedLoadParent(FR frRes, FR frObj) {
   HWReg hwRes = getOrAllocFRInGpX(frRes, false);
   a64::GpX xRes = hwRes.a64GpX();
   emit_sh_ljs_get_pointer(a, xRes, hwObj.a64GpX());
-  emit_load_and_sh_cp_decode_non_null(
-      a, xRes, a64::Mem(xRes, offsetof(SHJSObject, parent)));
+  emit_load_cp(a, xRes, a64::Mem(xRes, offsetof(SHJSObject, parent)));
+  emit_sh_cp_decode_non_null(a, xRes);
   emit_sh_ljs_object(a, xRes);
 
   frUpdatedWithHW(frRes, hwRes);
-}
-
-void Emitter::typedStoreParent(FR frStoredValue, FR frObj) {
-  comment("// TypedStoreParent r%u, r%u", frStoredValue.index(), frObj.index());
-
-  syncAllFRTempExcept({});
-  syncToFrame(frStoredValue);
-  syncToFrame(frObj);
-  freeAllFRTempExcept({});
-
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frStoredValue);
-  loadFrameAddr(a64::x2, frObj);
-  EMIT_RUNTIME_CALL(
-      *this,
-      void (*)(SHRuntime *, const SHLegacyValue *, const SHLegacyValue *),
-      _sh_typed_store_parent);
 }
 
 void Emitter::putByValImpl(
@@ -3132,6 +4686,457 @@ void Emitter::delByVal(FR frRes, FR frTarget, FR frKey, bool strict) {
   frUpdatedWithHW(frRes, hwRes);
 }
 
+void Emitter::addOwnPrivateBySym(FR frTarget, FR frKey, FR frValue) {
+  comment(
+      "// AddOwnPrivateBySym r%u, r%u, r%u",
+      frTarget.index(),
+      frKey.index(),
+      frValue.index());
+
+  syncAllFRTempExcept({});
+  syncToFrame(frTarget);
+  syncToFrame(frKey);
+  syncToFrame(frValue);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frTarget);
+  loadFrameAddr(a64::x2, frKey);
+  loadFrameAddr(a64::x3, frValue);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *, SHLegacyValue *),
+      _sh_ljs_add_own_private_by_sym);
+}
+
+void Emitter::getOwnPrivateBySym(
+    FR frRes,
+    FR frTarget,
+    FR frKey,
+    uint8_t cacheIdx) {
+  comment(
+      "// GetOwnPrivateBySym r%u, r%u, r%u, cache %u",
+      frRes.index(),
+      frTarget.index(),
+      frKey.index(),
+      cacheIdx);
+
+  syncAllFRTempExcept(frRes != frTarget && frRes != frKey ? frRes : FR());
+  syncToFrame(frTarget);
+  syncToFrame(frKey);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frTarget);
+  loadFrameAddr(a64::x2, frKey);
+
+  if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
+    a.mov(a64::x3, 0);
+  } else {
+    a.ldr(a64::x3, a64::Mem(roDataLabel_, roOfsPrivateNameCachePtr_));
+    if (cacheIdx != 0)
+      a.add(a64::x3, a64::x3, sizeof(SHPrivateNameCacheEntry) * cacheIdx);
+  }
+
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(
+          SHRuntime *,
+          const SHLegacyValue *,
+          const SHLegacyValue *,
+          SHPrivateNameCacheEntry *),
+      _sh_ljs_get_own_private_by_sym);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+void Emitter::putOwnPrivateBySym(
+    FR frTarget,
+    FR frKey,
+    FR frValue,
+    uint8_t cacheIdx) {
+  comment(
+      "// PutOwnPrivateBySym r%u, r%u, r%u, cache %u",
+      frTarget.index(),
+      frKey.index(),
+      frValue.index(),
+      cacheIdx);
+
+  syncAllFRTempExcept({});
+  syncToFrame(frTarget);
+  syncToFrame(frKey);
+  syncToFrame(frValue);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frTarget);
+  loadFrameAddr(a64::x2, frKey);
+  loadFrameAddr(a64::x3, frValue);
+
+  if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
+    a.mov(a64::x4, 0);
+  } else {
+    a.ldr(a64::x4, a64::Mem(roDataLabel_, roOfsPrivateNameCachePtr_));
+    if (cacheIdx != 0)
+      a.add(a64::x4, a64::x4, sizeof(SHPrivateNameCacheEntry) * cacheIdx);
+  }
+
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(
+          SHRuntime *,
+          SHLegacyValue *,
+          SHLegacyValue *,
+          SHLegacyValue *,
+          SHPrivateNameCacheEntry *),
+      _sh_ljs_put_own_private_by_sym);
+}
+
+class HERMES_ATTRIBUTE_INTERNAL_LINKAGE Emitter::GetByIdImpl {
+  Emitter &_;
+  a64::Assembler &a;
+
+  FR frRes;
+  SHSymbolID symID;
+  FR frSource;
+  uint8_t cacheIdx;
+  const char *name;
+  SHLegacyValue (*shImpl)(
+      SHRuntime *shr,
+      const SHLegacyValue *source,
+      SHSymbolID symID,
+      SHReadPropertyCacheEntry *propCacheEntry);
+  const char *shImplName;
+
+  asmjit::Label contLab;
+  asmjit::Label slowPathLab;
+  HWReg hwRes;
+  a64::GpX xTemp1;
+  a64::GpX xTemp2;
+  a64::GpX xTemp3;
+  a64::GpX xTemp4;
+
+ public:
+  GetByIdImpl(
+      Emitter &emitter,
+      FR frRes,
+      SHSymbolID symID,
+      FR frSource,
+      uint8_t cacheIdx,
+      const char *name,
+      SHLegacyValue (*shImpl)(
+          SHRuntime *shr,
+          const SHLegacyValue *source,
+          SHSymbolID symID,
+          SHReadPropertyCacheEntry *propCacheEntry),
+      const char *shImplName)
+      : _(emitter),
+        a(emitter.a),
+        frRes(frRes),
+        symID(symID),
+        frSource(frSource),
+        cacheIdx(cacheIdx),
+        name(name),
+        shImpl(shImpl),
+        shImplName(shImplName) {}
+
+  void run() {
+    _.comment(
+        "// %s r%u, r%u, cache %u, symID %u",
+        name,
+        frRes.index(),
+        frSource.index(),
+        cacheIdx,
+        symID);
+
+    // All temporaries will potentially be clobbered by the slow path.
+    _.syncAllFRTempExcept(frRes != frSource ? frRes : FR{});
+    // Ensure the source register is in memory for the slow path.
+    _.syncToFrame(frSource);
+
+    if (cacheIdx != hbc::PROPERTY_CACHING_DISABLED) {
+      slowPathLab = a.newLabel();
+      contLab = a.newLabel();
+      emitFastPath();
+      a.bind(slowPathLab);
+    } else {
+      // All temporaries will be clobbered.
+      _.freeAllFRTempExcept({});
+
+      // Remember the result register.
+      hwRes = _.getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+    }
+
+    a.mov(a64::x0, xRuntime);
+    _.loadFrameAddr(a64::x1, frSource);
+    a.mov(a64::w2, symID);
+    if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
+      a.mov(a64::x3, 0);
+    } else {
+      a.ldr(a64::x3, a64::Mem(_.roDataLabel_, _.roOfsReadPropertyCachePtr_));
+      if (cacheIdx != 0)
+        a.add(a64::x3, a64::x3, sizeof(SHReadPropertyCacheEntry) * cacheIdx);
+    }
+    _.callThunkWithSavedIP((void *)shImpl, shImplName);
+
+    _.movHWFromHW<false>(hwRes, HWReg::gpX(0));
+    _.frUpdatedWithHW(frRes, hwRes);
+
+    if (contLab.isValid())
+      a.bind(contLab);
+  }
+
+ private:
+  /// Load a SHV from a given slot in an object.
+  ///
+  /// \param resReg The register to load the SHV into.
+  /// \param objReg The register containing the object pointer.
+  /// \param tmpReg A temporary register which might be needed if the slot is
+  ///   too large to fit in an immediate load. It must not be the same as
+  ///   \p objReg, but can be the same as \p resReg.
+  /// \param slot The slot index to load from the object.
+  void emitLoadFromSlot(
+      const a64::GpX &resReg,
+      const a64::GpX &objReg,
+      const a64::GpX &tmpReg,
+      SlotIndex slot) {
+    assert(tmpReg != objReg && "tmpReg and objReg must be different");
+    if (slot < HERMESVM_DIRECT_PROPERTY_SLOTS) {
+      emit_load_from_base_offset<sizeof(SHGCSmallHermesValue), true>(
+          a,
+          resReg,
+          objReg,
+          {},
+          offsetof(SHJSObjectAndDirectProps, directProps) +
+              slot * sizeof(SHGCSmallHermesValue));
+    } else {
+      emit_load_cp(
+          a, objReg, a64::Mem(objReg, offsetof(SHJSObject, propStorage)));
+      emit_sh_cp_decode_non_null(a, objReg);
+      emit_load_from_base_offset<sizeof(SmallHermesValue), false>(
+          a,
+          resReg,
+          objReg,
+          tmpReg,
+          offsetof(SHArrayStorageSmall, storage) +
+              (slot - HERMESVM_DIRECT_PROPERTY_SLOTS) *
+                  sizeof(SHGCSmallHermesValue));
+    }
+  }
+
+  void emitFastPath() {
+    // Label for indirect property access.
+    asmjit::Label indirectLab = a.newLabel();
+
+    // We don't need the other temporaries.
+    _.freeAllFRTempExcept(frSource);
+
+    // We need the source in a GPx register.
+    HWReg hwSourceGpx = _.getOrAllocFRInGpX(frSource, true);
+
+    // Here we start allocating and freeing registers. It is important to
+    // realize that this doesn't generate any code, it only updates
+    // metadata, marking registers as used or free. So, we have to perform a
+    // series of register allocs and frees, ahead of time, based on our
+    // understanding of how the live ranges of these registers overlap. Then
+    // we just use the recorded registers at the right time.
+
+    // xTemp1 will contain the input object.
+    HWReg hwTemp1Gpx = _.allocTempGpX();
+    xTemp1 = hwTemp1Gpx.a64GpX();
+    // Free frSource before allocating more temporaries, because we won't
+    // need it at the same time as them.
+    _.freeFRTemp(frSource);
+
+    // Get register assignments for the rest of the temporaries.
+    HWReg hwTemp2Gpx = _.allocTempGpX();
+    HWReg hwTemp3Gpx = _.allocTempGpX();
+    HWReg hwTemp4Gpx = _.allocTempGpX();
+    xTemp2 = hwTemp2Gpx.a64GpX();
+    xTemp3 = hwTemp3Gpx.a64GpX();
+    xTemp4 = hwTemp4Gpx.a64GpX();
+
+    // Now that we have recorded their registers, mark all temp registers as
+    // free.
+    _.freeReg(hwTemp1Gpx);
+    _.freeReg(hwTemp2Gpx);
+    _.freeReg(hwTemp3Gpx);
+    _.freeReg(hwTemp4Gpx);
+
+    // Allocate the result register. Note that it can overlap the temps we
+    // just freed.
+    hwRes = _.getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+
+    // Finally we begin code generation for the fast path.
+
+    // Is the input an object.
+    emit_sh_ljs_is_object(a, xTemp1, hwSourceGpx.a64GpX());
+    a.b_ne(slowPathLab);
+    // xTemp1 is the pointer to the object.
+    emit_sh_ljs_get_pointer(a, xTemp1, hwSourceGpx.a64GpX());
+
+    // xTemp2 is the hidden class.
+    emit_load_cp(a, xTemp2, a64::Mem(xTemp1, offsetof(SHJSObject, clazz)));
+
+    Emit_sh_shv_decode shvDecode(a, hwRes.a64GpX(), contLab);
+
+    // Optionally emit a very fast path specialized for the cache entry, if the
+    // entry had exactly one successful match.
+    if (ReadPropertyCacheEntry *cacheEntry =
+            _.codeBlock_->getReadCacheEntry(cacheIdx);
+        cacheEntry->numGoodChanges == 1) {
+      if (cacheEntry->clazz.getNoBarrierUnsafe() &&
+          !cacheEntry->negMatchClazz.getNoBarrierUnsafe()) {
+        ++JITNumGetByIdSpec;
+        emitObjectSpecialization(shvDecode, cacheEntry);
+      } else if (
+          cacheEntry->clazz.getNoBarrierUnsafe() &&
+          cacheEntry->negMatchClazz.getNoBarrierUnsafe()) {
+        ++JITNumGetByIdSpec;
+        emitParentSpecialization(shvDecode, cacheEntry);
+        // We don't try other things after parent specialization.
+        return;
+      }
+    }
+
+    _.comment("// Read property cache");
+
+    // xTemp3 points to the start of read property cache.
+    a.ldr(xTemp3, a64::Mem(_.roDataLabel_, _.roOfsReadPropertyCachePtr_));
+    // xTemp4 = cacheEntry->clazz.
+    emit_load_cp(
+        a,
+        xTemp4,
+        a64::Mem(
+            xTemp3,
+            sizeof(SHReadPropertyCacheEntry) * cacheIdx +
+                offsetof(SHReadPropertyCacheEntry, clazz)));
+
+    // Compare hidden classes.
+    a.cmp(xTemp2, xTemp4);
+    a.b_ne(slowPathLab);
+
+    // Hidden class matches. Fetch the slot in xTemp4
+    emit_load_slot16(a, xTemp4, xTemp3, cacheIdx);
+
+    // Is it an indirect slot?
+    a.cmp(xTemp4.w(), HERMESVM_DIRECT_PROPERTY_SLOTS);
+    a.b_hs(indirectLab);
+
+    // Shift by 2 or 3 bits depending on whether properties are 4 or 8
+    // bytes.
+    constexpr size_t kPropShiftAmt = sizeof(SHGCSmallHermesValue) == 4 ? 2 : 3;
+    // Load from a direct slot.
+    a.add(xTemp3, xTemp1, offsetof(SHJSObjectAndDirectProps, directProps));
+    emit_load_shv(
+        a,
+        hwRes.a64GpX(),
+        a64::Mem(
+            xTemp3, xTemp4, a64::Shift(a64::ShiftOp::kLSL, kPropShiftAmt)));
+    shvDecode.emitFirstCase(a);
+    a.b(contLab);
+
+    a.bind(indirectLab);
+    // Load from an in-direct slot.
+    // xTemp1 is the object
+    // xTemp4 is the slot
+
+    // xTemp1 = xTemp1->propStorage
+    emit_load_cp(
+        a, xTemp1, a64::Mem(xTemp1, offsetof(SHJSObject, propStorage)));
+    emit_sh_cp_decode_non_null(a, xTemp1);
+    constexpr ssize_t ofs = offsetof(SHArrayStorageSmall, storage) -
+        HERMESVM_DIRECT_PROPERTY_SLOTS * sizeof(SHGCSmallHermesValue);
+    if constexpr (ofs < 0)
+      a.sub(xTemp1, xTemp1, -ofs);
+    else
+      a.add(xTemp1, xTemp1, ofs);
+    emit_load_shv(
+        a,
+        hwRes.a64GpX(),
+        a64::Mem(
+            xTemp1, xTemp4, a64::Shift(a64::ShiftOp::kLSL, kPropShiftAmt)));
+    shvDecode.emitAll(a);
+    a.b(contLab);
+  }
+
+  /// Emit a specialization for accessing a property on the object.
+  void emitObjectSpecialization(
+      Emit_sh_shv_decode &shvDecode,
+      ReadPropertyCacheEntry *cacheEntry) {
+    // Obtain the HC ID.
+    auto clazzID = _.initHCLazyIDMayAlloc(
+        cacheEntry->clazz.get(_.runtime_, _.runtime_.getHeap()));
+    if (!clazzID)
+      return;
+
+    _.comment("// Get from object specialization");
+
+    asmjit::Label failSpecLab = a.newLabel();
+
+    // Decode the HC compressed pointer.
+    const auto &xReg =
+        emit_sh_cp_decode_non_null_preserve_input(a, xTemp3, xTemp2);
+    // xTemp3 = hc->lazyJITId
+    a.ldrh(xTemp3.w(), a64::Mem(xReg, RuntimeOffsets::hiddenClassLazyJITId));
+
+    emit_cmp_imm32(a, xTemp3.w(), clazzID, xTemp4.w());
+    a.b_ne(failSpecLab);
+    // A match. Just load the property directly.
+    emitLoadFromSlot(hwRes.a64GpX(), xTemp1, xTemp4, cacheEntry->getSlot());
+    shvDecode.emitFirstCase(a);
+    a.b(contLab);
+    a.bind(failSpecLab);
+  }
+
+  /// Emit a specialization for accessing a property on the parent.
+  /// Does not preserve temps. Assumes no fast path runs after it.
+  void emitParentSpecialization(
+      Emit_sh_shv_decode &shvDecode,
+      ReadPropertyCacheEntry *cacheEntry) {
+    // Obtain the HC IDs for the object's class and the parent class.
+    auto clazzID = _.initHCLazyIDMayAlloc(
+        cacheEntry->negMatchClazz.get(_.runtime_, _.runtime_.getHeap()));
+    if (!clazzID)
+      return;
+    auto parentClsID = _.initHCLazyIDMayAlloc(
+        cacheEntry->clazz.get(_.runtime_, _.runtime_.getHeap()));
+    if (!parentClsID)
+      return;
+
+    _.comment("// Get from parent specialization");
+
+    asmjit::Label failSpecLab = a.newLabel();
+
+    emit_sh_cp_decode_non_null(a, xTemp2);
+    // xTemp2 = hc->lazyJITId
+    a.ldrh(xTemp2.w(), a64::Mem(xTemp2, RuntimeOffsets::hiddenClassLazyJITId));
+    // if object class mismatch, fail.
+    emit_cmp_imm32(a, xTemp2.w(), clazzID, xTemp4.w());
+    a.b_ne(failSpecLab);
+
+    // Get the parent.
+    emit_load_cp(a, xTemp1, a64::Mem(xTemp1, offsetof(SHJSObject, parent)));
+    // If no parent, fail.
+    a.cbz(xTemp1, failSpecLab);
+    emit_sh_cp_decode_non_null(a, xTemp1);
+    // Get the parent's hidden class.
+    emit_load_cp(a, xTemp2, a64::Mem(xTemp1, offsetof(SHJSObject, clazz)));
+    emit_sh_cp_decode_non_null(a, xTemp2);
+    // xTemp2 = hc->lazyJITId
+    a.ldrh(xTemp2.w(), a64::Mem(xTemp2, RuntimeOffsets::hiddenClassLazyJITId));
+    // if parent class mismatch, fail.
+    emit_cmp_imm32(a, xTemp2.w(), parentClsID, xTemp4.w());
+    a.b_ne(failSpecLab);
+    // A match. Just load the property directly.
+    emitLoadFromSlot(hwRes.a64GpX(), xTemp1, xTemp4, cacheEntry->getSlot());
+    shvDecode.emitAll(a);
+    a.b(contLab);
+    a.bind(failSpecLab);
+  }
+};
+
 void Emitter::getByIdImpl(
     FR frRes,
     SHSymbolID symID,
@@ -3144,172 +5149,8 @@ void Emitter::getByIdImpl(
         SHSymbolID symID,
         SHReadPropertyCacheEntry *propCacheEntry),
     const char *shImplName) {
-  comment(
-      "// %s r%u, r%u, cache %u, symID %u",
-      name,
-      frRes.index(),
-      frSource.index(),
-      cacheIdx,
-      symID);
-
-  asmjit::Label slowPathLab;
-  asmjit::Label contLab;
-  HWReg hwRes;
-
-  // All temporaries will potentially be clobbered by the slow path.
-  syncAllFRTempExcept(frRes != frSource ? frRes : FR{});
-
-  constexpr bool canHaveFastPath =
-#if defined(HERMESVM_COMPRESSED_POINTERS) || defined(HERMESVM_BOXED_DOUBLES)
-      false;
-#else
-      true;
-#endif
-
-  if (canHaveFastPath && cacheIdx != hbc::PROPERTY_CACHING_DISABLED) {
-    // Label for indirect property access.
-    asmjit::Label indirectLab = a.newLabel();
-    slowPathLab = a.newLabel();
-    contLab = a.newLabel();
-
-    // We don't need the other temporaries.
-    freeAllFRTempExcept(frSource);
-
-    // We need the source in a GPx register.
-    HWReg hwSourceGpx = getOrAllocFRInGpX(frSource, true);
-
-    // Here we start allocating and freeing registers. It is important to
-    // realize that this doesn't generate any code, it only updates metadata,
-    // marking registers as used or free. So, we have to perform a series of
-    // register allocs and frees, ahead of time, based on our understanding of
-    // how the live ranges of these registers overlap. Then we just use the
-    // recorded registers at the right time.
-
-    // xTemp1 will contain the input object.
-    HWReg hwTemp1Gpx = allocTempGpX();
-    auto xTemp1 = hwTemp1Gpx.a64GpX();
-    // Free frSource before allocating more temporaries, because we won't need
-    // it at the same time as them.
-    freeFRTemp(frSource);
-
-    // Get register assignments for the rest of the temporaries.
-    HWReg hwTemp2Gpx = allocTempGpX();
-    HWReg hwTemp3Gpx = allocTempGpX();
-    HWReg hwTemp4Gpx = allocTempGpX();
-    auto xTemp2 = hwTemp2Gpx.a64GpX();
-    auto xTemp3 = hwTemp3Gpx.a64GpX();
-    auto xTemp4 = hwTemp4Gpx.a64GpX();
-
-    // Now that we have recorded their registers, mark all temp registers as
-    // free.
-    freeReg(hwTemp1Gpx);
-    freeReg(hwTemp2Gpx);
-    freeReg(hwTemp3Gpx);
-    freeReg(hwTemp4Gpx);
-
-    // Allocate the result register. Note that it can overlap the temps we just
-    // freed.
-    hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-
-    // Finally we begin code generation for the fast path.
-
-    // Is the input an object.
-    emit_sh_ljs_is_object(a, xTemp1, hwSourceGpx.a64GpX());
-    a.b_ne(slowPathLab);
-    // xTemp1 is the pointer to the object.
-    emit_sh_ljs_get_pointer(a, xTemp1, hwSourceGpx.a64GpX());
-
-    // xTemp2 is the hidden class.
-    a.ldr(xTemp2, a64::Mem(xTemp1, offsetof(SHJSObject, clazz)));
-
-    // xTemp3 points to the start of read property cache.
-    a.ldr(xTemp3, a64::Mem(roDataLabel_, roOfsReadPropertyCachePtr_));
-    // xTemp4 = cacheEntry->clazz.
-    a.ldr(
-        xTemp4,
-        a64::Mem(
-            xTemp3,
-            sizeof(SHReadPropertyCacheEntry) * cacheIdx +
-                offsetof(SHReadPropertyCacheEntry, clazz)));
-
-    // Compare hidden classes.
-    a.cmp(xTemp2, xTemp4);
-    a.b_ne(slowPathLab);
-
-    // Hidden class matches. Fetch the slot in xTemp4
-    a.ldr(
-        xTemp4.w(),
-        a64::Mem(
-            xTemp3,
-            sizeof(SHReadPropertyCacheEntry) * cacheIdx +
-                offsetof(SHReadPropertyCacheEntry, slot)));
-
-    // Is it an indirect slot?
-    a.cmp(xTemp4.w(), HERMESVM_DIRECT_PROPERTY_SLOTS);
-    a.b_hs(indirectLab);
-
-    // Load from a direct slot.
-    a.add(xTemp3, xTemp1, offsetof(SHJSObjectAndDirectProps, directProps));
-    a.ldr(
-        hwRes.a64GpX(),
-        a64::Mem(xTemp3, xTemp4, a64::Shift(a64::ShiftOp::kLSL, 3)));
-
-    a.b(contLab);
-
-    a.bind(indirectLab);
-    // Load from an in-direct slot.
-    // xTemp1 is the object
-    // xTemp4 is the slot
-
-    // xTemp1 = xTemp1->propStorage
-    a.ldr(xTemp1, a64::Mem(xTemp1, offsetof(SHJSObject, propStorage)));
-    constexpr ssize_t ofs = offsetof(SHArrayStorageSmall, storage) -
-        HERMESVM_DIRECT_PROPERTY_SLOTS * sizeof(SHGCSmallHermesValue);
-    if constexpr (ofs < 0)
-      a.sub(xTemp1, xTemp1, -ofs);
-    else
-      a.add(xTemp1, xTemp1, ofs);
-    a.ldr(
-        hwRes.a64GpX(),
-        a64::Mem(xTemp1, xTemp4, a64::Shift(a64::ShiftOp::kLSL, 3)));
-    a.b(contLab);
-
-    a.bind(slowPathLab);
-
-    // Ensure the frSource is in memory for the fast path. Note that we haven't
-    // done it before.
-    // Note that this is the reason we can't use a regular slow path at the
-    // end of the function. We need syncToFrame() to execute in the slow path,
-    // but by then the state is gone.
-    syncToFrame(frSource);
-  } else {
-    // We arrive here if there is no fast path. Ensure that frSource is in
-    // memory.
-    syncToFrame(frSource);
-    // All temporaries will be clobbered.
-    freeAllFRTempExcept({});
-
-    // Remember the result register.
-    hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  }
-
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frSource);
-  a.mov(a64::w2, symID);
-  if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
-    a.mov(a64::x3, 0);
-  } else {
-    a.ldr(a64::x3, a64::Mem(roDataLabel_, roOfsReadPropertyCachePtr_));
-    if (cacheIdx != 0)
-      a.add(a64::x3, a64::x3, sizeof(SHReadPropertyCacheEntry) * cacheIdx);
-  }
-  callThunkWithSavedIP((void *)shImpl, shImplName);
-
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
-
-  if (contLab.isValid())
-    a.bind(contLab);
+  GetByIdImpl(*this, frRes, symID, frSource, cacheIdx, name, shImpl, shImplName)
+      .run();
 }
 
 void Emitter::getByIdWithReceiver(
@@ -3503,7 +5344,7 @@ void Emitter::jmpTypeOfIs(
   if (typesToCheck.hasNumber()) {
     --numRemainingTypes;
     static_assert(
-        HERMESVALUE_VERSION == 1,
+        HERMESVALUE_VERSION == 2,
         "HVTag_First must be the first after double limit");
     loadBits64InGp(
         xTemp, ((uint64_t)HVTag_First << kHV_NumDataBits), "doubleLim");
@@ -3523,7 +5364,7 @@ void Emitter::jmpTypeOfIs(
     else
       a.b_ne(target);
     emit_sh_ljs_get_pointer(a, hwTemp.a64GpX(), hwInput.a64GpX());
-    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_gccell_get_kind(a, xTemp, xTemp);
     emit_cellkind_in_range(
         a,
         wTemp,
@@ -3544,7 +5385,7 @@ void Emitter::jmpTypeOfIs(
     else
       a.b_ne(target);
     emit_sh_ljs_get_pointer(a, xTemp, xInput);
-    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_gccell_get_kind(a, xTemp, xTemp);
     emit_cellkind_in_range(
         a,
         wTemp,
@@ -3672,7 +5513,7 @@ void Emitter::typeOfIs(FR frRes, FR frInput, TypeOfIsTypes origTypes) {
   }
   if (typesToCheck.hasNumber()) {
     static_assert(
-        HERMESVALUE_VERSION == 1,
+        HERMESVALUE_VERSION == 2,
         "HVTag_First must be the first after double limit");
     loadBits64InGp(
         xTemp, ((uint64_t)HVTag_First << kHV_NumDataBits), "doubleLim");
@@ -3692,7 +5533,7 @@ void Emitter::typeOfIs(FR frRes, FR frInput, TypeOfIsTypes origTypes) {
       a.b_ne(objectDoneLab);
     }
     emit_sh_ljs_get_pointer(a, xTemp, xInputTemp);
-    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_gccell_get_kind(a, xTemp, xTemp);
     emit_cellkind_in_range(
         a,
         wTemp,
@@ -3715,7 +5556,7 @@ void Emitter::typeOfIs(FR frRes, FR frInput, TypeOfIsTypes origTypes) {
       a.b_ne(functionDoneLab);
     }
     emit_sh_ljs_get_pointer(a, xTemp, xInputTemp);
-    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_gccell_get_kind(a, xTemp, xTemp);
     emit_cellkind_in_range(
         a,
         wTemp,
@@ -3738,13 +5579,14 @@ void Emitter::typeOfIs(FR frRes, FR frInput, TypeOfIsTypes origTypes) {
   emit_sh_ljs_bool(a, xRes);
 }
 
-void Emitter::switchImm(
+void Emitter::uintSwitchImm(
     FR frInput,
     const asmjit::Label &defaultLabel,
     llvh::ArrayRef<const asmjit::Label *> labels,
     uint32_t minVal,
     uint32_t maxVal) {
-  comment("// switchImm r%u, min %u, max %u", frInput.index(), minVal, maxVal);
+  comment(
+      "// uintSwitchImm r%u, min %u, max %u", frInput.index(), minVal, maxVal);
 
   asmjit::Error err;
 
@@ -3833,6 +5675,32 @@ void Emitter::switchImm(
   freeAllFRTempExcept({});
 }
 
+void Emitter::stringSwitchImm(
+    FR frInput,
+    const StringSwitchDenseMap &table,
+    const asmjit::Label &defaultLabel,
+    llvh::ArrayRef<StringSwitchCase> cases) {
+  comment("// stringSwitchImm r%u, size %zu", frInput.index(), cases.size());
+
+  // End of the basic block.
+  syncAllFRTempExcept({});
+
+  a.mov(a64::x0, &table);
+  loadFrameAddr(a64::x1, frInput);
+
+  EMIT_RUNTIME_CALL_WITHOUT_SAVED_IP(
+      *this,
+      void *(*)(StringSwitchDenseMap *, SHLegacyValue *),
+      _jit_string_switch_imm_table_lookup);
+
+  a.cbz(a64::x0, defaultLabel);
+  // Otherwise, branch to the address that was returned.
+  a.br(a64::x0);
+
+  // Do this always, since this could be the end of the BB.
+  freeAllFRTempExcept({});
+}
+
 void Emitter::getByVal(FR frRes, FR frSource, FR frKey) {
   comment(
       "// getByVal r%u, r%u, r%u",
@@ -3883,17 +5751,68 @@ void Emitter::putByIdImpl(
     SHSymbolID symID,
     FR frValue,
     uint8_t cacheIdx,
-    const char *name,
-    void (*shImpl)(
-        SHRuntime *shr,
-        SHLegacyValue *target,
-        SHSymbolID symID,
-        SHLegacyValue *value,
-        SHWritePropertyCacheEntry *propCacheEntry),
-    const char *shImplName) {
+    bool strictMode,
+    bool tryProp) {
   comment(
-      "// %s r%u, r%u, cache %u, symID %u",
-      name,
+      "// %sPutById%s r%u, r%u, cache %u, symID %u",
+      tryProp ? "Try" : "",
+      strictMode ? "Strict" : "Loose",
+      frTarget.index(),
+      frValue.index(),
+      cacheIdx,
+      symID);
+
+  // New non-dictionary objects must not have their propStorage_ capacity
+  // stored out of line, because we want to be able to quickly get property
+  // storage capacity for JIT's cached add property fast path.
+  // Ensure this by making sure that objects will be turned into dictionary
+  // mode before leaving the single young gen segment.
+  // TODO: Actually implement the fast path. This assert just keeps it possible.
+  static_assert(
+      HiddenClass::kDictionaryThreshold <
+          JSObject::maxYoungGenAllocationPropCount(),
+      "dictionary objects must be allocated in a single segment in young gen");
+
+  syncAllFRTempExcept({});
+  syncToFrame(frTarget);
+  syncToFrame(frValue);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadBits64InGp(a64::x1, (uint64_t)codeBlock_, "CodeBlock");
+  loadFrameAddr(a64::x2, frTarget);
+  loadFrameAddr(a64::x3, frValue);
+  a.mov(a64::w4, cacheIdx);
+  a.mov(a64::w5, symID);
+  a.mov(a64::w6, strictMode);
+  a.mov(a64::w7, tryProp);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(
+          SHRuntime *shr,
+          SHCodeBlock *codeBlock,
+          SHLegacyValue *base,
+          SHLegacyValue *value,
+          uint8_t cacheIdx,
+          SHSymbolID symID,
+          bool strictMode,
+          bool tryProp),
+      _jit_put_by_id);
+}
+
+asmjit::Label Emitter::newPrefLabel(const char *pref, size_t index) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%s%lu", pref, index);
+  return a.newNamedLabel(buf);
+}
+
+void Emitter::defineOwnById(
+    FR frTarget,
+    SHSymbolID symID,
+    FR frValue,
+    uint8_t cacheIdx) {
+  comment(
+      "// defineOwnById r%u, r%u, cache %u, symID %u",
       frTarget.index(),
       frValue.index(),
       cacheIdx,
@@ -3915,13 +5834,37 @@ void Emitter::putByIdImpl(
     if (cacheIdx != 0)
       a.add(a64::x4, a64::x4, sizeof(SHWritePropertyCacheEntry) * cacheIdx);
   }
-  callThunkWithSavedIP((void *)shImpl, shImplName);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(
+          SHRuntime *shr,
+          SHLegacyValue *target,
+          SHSymbolID key,
+          SHLegacyValue *value,
+          SHWritePropertyCacheEntry *cacheEntrySHRuntime),
+      _sh_ljs_define_own_by_id);
 }
 
-asmjit::Label Emitter::newPrefLabel(const char *pref, size_t index) {
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%s%lu", pref, index);
-  return a.newNamedLabel(buf);
+void Emitter::defineOwnInDenseArray(FR frArray, FR frProp, uint32_t idx) {
+  comment(
+      "// DefineOwnInDenseArray r%u, r%u, %u",
+      frArray.index(),
+      frProp.index(),
+      idx);
+
+  syncAllFRTempExcept({});
+  syncToFrame(frArray);
+  syncToFrame(frProp);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frArray);
+  loadFrameAddr(a64::x2, frProp);
+  a.mov(a64::w3, idx);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *, uint32_t),
+      _sh_ljs_define_own_in_dense_array);
 }
 
 void Emitter::defineOwnByIndex(FR frTarget, FR frValue, uint32_t key) {
@@ -3940,7 +5883,7 @@ void Emitter::defineOwnByIndex(FR frTarget, FR frValue, uint32_t key) {
   EMIT_RUNTIME_CALL(
       *this,
       void (*)(SHRuntime *, SHLegacyValue *, uint32_t, SHLegacyValue *),
-      _sh_ljs_put_own_by_index);
+      _sh_ljs_define_own_by_index);
 }
 
 void Emitter::defineOwnByVal(
@@ -3969,13 +5912,13 @@ void Emitter::defineOwnByVal(
         *this,
         void (*)(
             SHRuntime *, SHLegacyValue *, SHLegacyValue *, SHLegacyValue *),
-        _sh_ljs_put_own_by_val);
+        _sh_ljs_define_own_by_val);
   } else {
     EMIT_RUNTIME_CALL(
         *this,
         void (*)(
             SHRuntime *, SHLegacyValue *, SHLegacyValue *, SHLegacyValue *),
-        _sh_ljs_put_own_ne_by_val);
+        _sh_ljs_define_own_ne_by_val);
   }
 }
 
@@ -4016,49 +5959,7 @@ void Emitter::defineOwnGetterSetterByVal(
           SHLegacyValue *getter,
           SHLegacyValue *setter,
           bool enumerable),
-      _sh_ljs_put_own_getter_setter_by_val);
-}
-
-void Emitter::putNewOwnById(
-    FR frTarget,
-    FR frValue,
-    SHSymbolID key,
-    bool enumerable) {
-  comment(
-      "// PutNewOwn%sById r%u, r%u, %u",
-      enumerable ? "NE" : "",
-      frTarget.index(),
-      frValue.index(),
-      key);
-
-  syncAllFRTempExcept({});
-  syncToFrame(frTarget);
-  syncToFrame(frValue);
-  freeAllFRTempExcept({});
-
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frTarget);
-  a.mov(a64::w2, key);
-  loadFrameAddr(a64::x3, frValue);
-  if (enumerable) {
-    EMIT_RUNTIME_CALL(
-        *this,
-        void (*)(
-            SHRuntime *shr,
-            SHLegacyValue *target,
-            SHSymbolID key,
-            SHLegacyValue *value),
-        _sh_ljs_put_new_own_by_id);
-  } else {
-    EMIT_RUNTIME_CALL(
-        *this,
-        void (*)(
-            SHRuntime *shr,
-            SHLegacyValue *target,
-            SHSymbolID key,
-            SHLegacyValue *value),
-        _sh_ljs_put_new_own_ne_by_id);
-  }
+      _sh_ljs_define_own_getter_setter_by_val);
 }
 
 void Emitter::getOwnBySlotIdx(FR frRes, FR frTarget, uint32_t slotIdx) {
@@ -4068,58 +5969,29 @@ void Emitter::getOwnBySlotIdx(FR frRes, FR frTarget, uint32_t slotIdx) {
       frTarget.index(),
       slotIdx);
 
-#ifndef HERMESVM_BOXED_DOUBLES
-  if (slotIdx < JSObject::DIRECT_PROPERTY_SLOTS) {
-    // If the slot is in the direct property slots, we can just load it
-    // directly.
-    auto ofs = offsetof(SHJSObjectAndDirectProps, directProps) +
-        slotIdx * sizeof(SHLegacyValue);
-    // We allocate a temporary register to compute the address instead of using
-    // the result register in case the result has a VecD allocated for it.
-    HWReg temp = allocTempGpX();
-    movHWFromFR(temp, frTarget);
-    emit_sh_ljs_get_pointer(a, temp.a64GpX(), temp.a64GpX());
-    // Free the temporary register before allocating the result so it can be
-    // reused.
-    freeReg(temp);
-    HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
-    movHWFromMem(hwRes, a64::Mem(temp.a64GpX(), ofs));
-    frUpdatedWithHW(frRes, hwRes);
-    return;
-  }
-#endif
-
-  // Free x1 first, such that if frTarget is in any register (except from x1),
-  // we can mov it in before we free all the registers.
-  syncAndFreeTempReg(HWReg::gpX(1));
-  movHWFromFR(HWReg::gpX(1), frTarget);
-
-  syncAllFRTempExcept({});
-  freeAllFRTempExcept({});
-
-  a.mov(a64::x0, xRuntime);
-  // For indirect loads, 0 is the first indirect index.
-  a.mov(
-      a64::w2,
-      slotIdx < JSObject::DIRECT_PROPERTY_SLOTS
-          ? slotIdx
-          : slotIdx - JSObject::DIRECT_PROPERTY_SLOTS);
-
-  if (slotIdx < JSObject::DIRECT_PROPERTY_SLOTS) {
-    EMIT_RUNTIME_CALL(
-        *this,
-        SHLegacyValue(*)(SHRuntime *, SHLegacyValue, uint32_t),
-        _sh_prload_direct);
-  } else {
-    EMIT_RUNTIME_CALL(
-        *this,
-        SHLegacyValue(*)(SHRuntime *, SHLegacyValue, uint32_t),
-        _sh_prload_indirect);
-  }
-
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  HWReg hwTarget = getOrAllocFRInGpX(frTarget, true);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
   frUpdatedWithHW(frRes, hwRes);
+  a64::GpX xRes = hwRes.a64GpX();
+
+  size_t ofs;
+  emit_sh_ljs_get_pointer(a, xRes, hwTarget.a64GpX());
+  if (slotIdx < JSObject::DIRECT_PROPERTY_SLOTS) {
+    // If the slot is in the direct property slots, load it directly.
+    ofs = offsetof(SHJSObjectAndDirectProps, directProps) +
+        slotIdx * sizeof(SHGCSmallHermesValue);
+  } else {
+    // If the slot is in indirect storage, retrieve the pointer to that storage.
+    emit_load_cp(a, xRes, a64::Mem(xRes, offsetof(SHJSObject, propStorage)));
+    emit_sh_cp_decode_non_null(a, xRes);
+    auto storageSlot = slotIdx - JSObject::DIRECT_PROPERTY_SLOTS;
+    ofs = offsetof(SHArrayStorageSmall, storage) +
+        storageSlot * sizeof(SHGCSmallHermesValue);
+  }
+  emit_load_shv(a, xRes, a64::Mem(xRes, ofs));
+  auto doneLab = a.newLabel();
+  emit_sh_shv_decode(a, xRes, doneLab);
+  a.bind(doneLab);
 }
 
 void Emitter::putOwnBySlotIdx(FR frTarget, FR frValue, uint32_t slotIdx) {
@@ -4204,6 +6076,50 @@ void Emitter::isIn(FR frRes, FR frLeft, FR frRight) {
   frUpdatedWithHW(frRes, hwRes);
 }
 
+void Emitter::privateIsIn(
+    FR frRes,
+    FR frPrivateName,
+    FR frTarget,
+    uint8_t cacheIdx) {
+  comment(
+      "// PrivateIsIn r%u, r%u, r%u, cache %u",
+      frRes.index(),
+      frPrivateName.index(),
+      frTarget.index(),
+      cacheIdx);
+
+  syncAllFRTempExcept(
+      frRes != frPrivateName && frRes != frTarget ? frRes : FR());
+  syncToFrame(frPrivateName);
+  syncToFrame(frTarget);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frPrivateName);
+  loadFrameAddr(a64::x2, frTarget);
+
+  if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
+    a.mov(a64::x3, 0);
+  } else {
+    a.ldr(a64::x3, a64::Mem(roDataLabel_, roOfsPrivateNameCachePtr_));
+    if (cacheIdx != 0)
+      a.add(a64::x3, a64::x3, sizeof(SHPrivateNameCacheEntry) * cacheIdx);
+  }
+
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(
+          SHRuntime *,
+          SHLegacyValue *,
+          SHLegacyValue *,
+          SHPrivateNameCacheEntry *),
+      _sh_ljs_private_is_in_rjs);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
 int32_t Emitter::reserveData(
     int32_t dsize,
     size_t align,
@@ -4219,7 +6135,7 @@ int32_t Emitter::reserveData(
   roData_.resize(dataOfs + dsize);
 
   // If logging is enabled, generate data descriptors.
-  if (logger_) {
+  if (hasLogger()) {
     // Optional padding descriptor.
     if (dataOfs != oldSize) {
       int32_t gap = (int32_t)(dataOfs - oldSize);
@@ -4321,7 +6237,7 @@ void Emitter::emitThunks() {
 
 void Emitter::emitROData() {
   a.bind(roDataLabel_);
-  if (!logger_) {
+  if (!hasLogger()) {
     a.embed(roData_.data(), roData_.size());
   } else {
     int32_t ofs = 0;
@@ -4337,6 +6253,7 @@ void Emitter::emitROData() {
 void Emitter::callImpl(FR frRes, FR frCallee) {
   uint32_t nRegs = frameRegs_.size();
 
+  emitIncrementCounter(JitCounter::NumCall);
   FR calleeFrameArg{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
 
   // Store the callee to the right location in the frame, if it isn't already
@@ -4351,7 +6268,7 @@ void Emitter::callImpl(FR frRes, FR frCallee) {
   }
 
   static_assert(
-      HERMESVALUE_VERSION == 1,
+      HERMESVALUE_VERSION == 2,
       "Native pointers must be encoded without modification");
 
   FR previousFrameArg{nRegs + hbc::StackFrameLayout::PreviousFrame};
@@ -4400,37 +6317,56 @@ void Emitter::callImpl(FR frRes, FR frCallee) {
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
 
+  // If we have not already created a slow path for non-object calls, do so now.
+  if (!nonObjCallLabel_.isValid()) {
+    nonObjCallLabel_ = newSlowPathLabel();
+    slowPaths_.push_back(
+        {.slowPathLab = nonObjCallLabel_,
+         .emit = [](Emitter &em, SlowPath &sl) {
+           em.comment("// Throw on non-object call");
+           em.a.bind(sl.slowPathLab);
+           em.a.mov(a64::x0, xRuntime);
+           // The IP is already saved by the call setup, no need to save it
+           // again.
+           EMIT_RUNTIME_CALL_WITHOUT_SAVED_IP(
+               em, void (*)(SHRuntime *), _jit_throw_non_object_call);
+           // The call does not return.
+         }});
+  }
+
   auto slowPathLab = newSlowPathLabel();
   auto contLab = newContLabel();
 
   // Check if the callee is a JSFunction we have already JITted.
   emit_sh_ljs_is_object(a, xTemp, hwCallee.a64GpX());
-  a.b_ne(slowPathLab);
+  a.b_ne(nonObjCallLabel_);
 
   // We can now use any temp registers we want, because everything has been
-  // sync'd and we are done with hwCallee.
-  emit_sh_ljs_get_pointer(a, a64::x0, hwCallee.a64GpX());
-  emit_gccell_get_kind(a, a64::w1, a64::x0);
+  // sync'd and we are done with hwCallee. We keep the callee in x1 so that we
+  // don't have to move it in the slow path.
+  emit_sh_ljs_get_pointer(a, a64::x1, hwCallee.a64GpX());
+  emit_gccell_get_kind(a, a64::x0, a64::x1);
 
   // Check if it is a JSFunction.
   emit_cellkind_in_range(
       a,
-      a64::w1,
-      a64::w1,
+      /* wTemp */ a64::w2,
+      /* wInput */ a64::w0,
       CellKind::CodeBlockFunctionKind_first,
       CellKind::CodeBlockFunctionKind_last);
   a.b_hi(slowPathLab);
 
   // Check if the JSFunction has already been JIT compiled.
-  a.ldr(a64::x1, a64::Mem(a64::x0, RuntimeOffsets::jsFunctionCodeBlock));
-  a.ldr(a64::x1, a64::Mem(a64::x1, RuntimeOffsets::codeBlockJitPtr));
-  a.cbz(a64::x1, slowPathLab);
+  a.ldr(a64::x2, a64::Mem(a64::x1, RuntimeOffsets::jsFunctionCodeBlock));
+  a.ldr(a64::x2, a64::Mem(a64::x2, RuntimeOffsets::codeBlockJitPtr));
+  a.cbz(a64::x2, slowPathLab);
 
   // We have a JIT compiled function, call it.
-  a.mov(a64::x0, xRuntime);
-  a.blr(a64::x1);
   a.bind(contLab);
-  // NOTE: this does the move for both the slow and fast paths.
+  // Both the fast and slow paths have prepared any arguments except the first
+  // one, which is Runtime, and placed the callee in x2. Call it.
+  a.mov(a64::x0, xRuntime);
+  a.blr(a64::x2);
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
 
   slowPaths_.push_back(
@@ -4444,15 +6380,15 @@ void Emitter::callImpl(FR frRes, FR frCallee) {
              sl.frRes.index(),
              sl.frInput1.index());
          em.a.bind(sl.slowPathLab);
-         em.a.mov(a64::x0, xRuntime);
-         em.loadFrameAddr(
-             a64::x1,
-             FR(em.frameRegs_.size() +
-                hbc::StackFrameLayout::CalleeClosureOrCB));
-         EMIT_RUNTIME_CALL_WITHOUT_SAVED_IP(
-             em,
-             SHLegacyValue(*)(SHRuntime *, SHLegacyValue *),
-             _jit_dispatch_call);
+         em.emitIncrementCounter(JitCounter::NumCallSlow);
+         em.loadBits64InGp(
+             a64::x2, (uint64_t)&VTable::jitCallArray, "VTable::jitCallArray");
+         // Load the jitCall function. x0 still contains the callee CellKind
+         // from the fast path.
+         em.a.ldr(
+             a64::x2,
+             a64::Mem(a64::x2, a64::x0, a64::Shift(a64::ShiftOp::kLSL, 3)));
+         // x1 already contains the Callable* from the fast path.
          em.a.b(sl.contLab);
        }});
 }
@@ -4467,7 +6403,7 @@ void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
       ntFrameArg, _sh_ljs_undefined().raw, FRType::UnknownNonPtr, "undefined");
 
   FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
-  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  static_assert(HERMESVALUE_VERSION == 2, "Native u32 must not need encoding");
   // The bytecode arg count includes "this", but the frame one does not, so
   // subtract 1.
   loadConstBits64(argcFrameArg, argc - 1, FRType::OtherNonPtr, "argCount");
@@ -4515,7 +6451,7 @@ void Emitter::callN(FR frRes, FR frCallee, llvh::ArrayRef<FR> args) {
   syncToFrame(ntFrameArg);
 
   FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
-  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  static_assert(HERMESVALUE_VERSION == 2, "Native u32 must not need encoding");
   // The bytecode arg count includes "this", but the frame one does not, so
   // subtract 1.
   loadConstBits64(
@@ -4552,12 +6488,10 @@ void Emitter::callBuiltin(FR frRes, uint32_t builtinIndex, uint32_t argc) {
   // subtract 1.
   a.mov(a64::w2, argc - 1);
   a.mov(a64::w3, builtinIndex);
-  // NOTE: _sh_ljs_call_builtin does not itself populate the SavedIP field, but
-  // it will be populated by NativeFunction::_nativeCall.
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t, uint32_t),
-      _sh_ljs_call_builtin);
+      _jit_call_builtin);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -4588,7 +6522,7 @@ void Emitter::callWithNewTarget(
   }
 
   FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
-  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  static_assert(HERMESVALUE_VERSION == 2, "Native u32 must not need encoding");
   // The bytecode arg count includes "this", but the frame one does not, so
   // subtract 1.
   loadConstBits64(argcFrameArg, argc - 1, FRType::OtherNonPtr, "argCount");
@@ -4635,7 +6569,7 @@ void Emitter::callWithNewTargetLong(
   HWReg hwArgcArg = getOrAllocFRInGpX(argcFrameArg, false);
   frUpdatedWithHW(argcFrameArg, hwArgcArg, FRType::OtherNonPtr);
 
-  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  static_assert(HERMESVALUE_VERSION == 2, "Native u32 must not need encoding");
   a.fcvtzu(hwArgcArg.a64GpX(), hwArgc.a64VecD());
   // The bytecode arg count includes "this", but the frame one does not, so
   // subtract 1.
@@ -4680,18 +6614,11 @@ void Emitter::getBuiltinClosure(FR frRes, uint32_t builtinIndex) {
       "// GetBuiltinClosure r%u, %s",
       frRes.index(),
       getBuiltinMethodName(builtinIndex));
-  syncAllFRTempExcept(frRes);
-  freeAllFRTempExcept(frRes);
-
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::w1, builtinIndex);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, uint32_t),
-      _sh_ljs_get_builtin_closure);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  auto hwRes = getOrAllocFRInGpX(frRes, false);
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  // Load the closure pointer and add the object tag.
+  emit_load_builtin_closure(a, hwRes.a64GpX(), builtinIndex);
+  emit_sh_ljs_object(a, hwRes.a64GpX());
 }
 
 void Emitter::arithUnop(
@@ -4730,7 +6657,7 @@ void Emitter::arithUnop(
     // Since HermesValue is NaN-boxed we know that all non-number values will be
     // NaN. So we can conveniently test for non-number values by checking for
     // NaN (which does not compare equal to itself).
-    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
     a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
     a.b_ne(slowPathLab);
   }
@@ -4967,6 +6894,23 @@ void Emitter::toPropertyKey(FR frRes, FR frVal) {
   frUpdatedWithHW(frRes, hwRes);
 }
 
+void Emitter::createPrivateName(FR frRes, SHSymbolID symID) {
+  comment("// CreatePrivateName r%u, %u", frRes.index(), symID);
+  syncAllFRTempExcept(frRes);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  a.mov(a64::w1, symID);
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(SHRuntime *, SHSymbolID),
+      _sh_ljs_create_private_name);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
 void Emitter::addS(FR frRes, FR frLeft, FR frRight) {
   comment(
       "// AddS r%u, r%u, r%u", frRes.index(), frLeft.index(), frRight.index());
@@ -5029,7 +6973,7 @@ void Emitter::mod(bool forceNumber, FR frRes, FR frLeft, FR frRight) {
     // NaN. So we can conveniently test for non-number values by checking for
     // NaN. We can do that with the VS condition code, which is set if either
     // operand to fcmp is NaN.
-    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
     a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
     a.b_vs(slowPathLab);
   }
@@ -5134,7 +7078,7 @@ void Emitter::arithBinOp(
     // NaN. So we can conveniently test for non-number values by checking for
     // NaN. We can do that with the VS condition code, which is set if either
     // operand to fcmp is NaN.
-    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
     a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
     a.b_vs(slowPathLab);
   }
@@ -5302,12 +7246,10 @@ void Emitter::jmpTrueFalse(
     a64::GpX xInput = hwInput.a64GpX();
 
     static_assert(
-        HERMESVALUE_VERSION == 1,
-        "bool is encoded as 32-bit value in the low bits");
-    if (onTrue)
-      a.cbnz(xInput.w(), target);
-    else
-      a.cbz(xInput.w(), target);
+        HERMESVALUE_VERSION == 2, "bool is encoded as a bit at kHV_BoolBitIdx");
+    // We don't use tbz/tbnz here because they have a very restricted range.
+    a.tst(xInput, 1ull << kHV_BoolBitIdx);
+    a.b(onTrue ? a64::CondCode::kNotZero : a64::CondCode::kZero, target);
   } else {
     // TODO: we should inline all of it.
     syncAllFRTempExcept({});
@@ -5371,18 +7313,7 @@ void Emitter::jmpBuiltinIs(
   freeAllFRTempExcept({});
 
   // Load builtin pointer.
-  static_assert(
-      std::is_same_v<
-          TransparentOwningPtr<Callable *, llvh::FreeDeleter>,
-          decltype(Runtime::builtins_)>,
-      "builtins_ is a list of Callable *");
-  static_assert(
-      offsetof(TransparentOwningPtr<Callable *>, ptr) == 0,
-      "TransparentOwningPtr must be transparent");
-  a.ldr(hwBuiltin.a64GpX(), a64::Mem(xRuntime, RuntimeOffsets::builtins));
-  a.ldr(
-      hwBuiltin.a64GpX(),
-      a64::Mem(hwBuiltin.a64GpX(), builtinIndex * sizeof(Callable *)));
+  emit_load_builtin_closure(a, hwBuiltin.a64GpX(), builtinIndex);
 
   // Encode an object HermesValue.
   emit_sh_ljs_object(a, hwBuiltin.a64GpX());
@@ -5454,7 +7385,7 @@ void Emitter::jCond(
     // NaN. So we can conveniently test for non-number values by checking for
     // NaN. We can do that with the VS condition code, which is set if either
     // operand to fcmp is NaN.
-    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
     a.b_vs(slowPathLab);
   }
 
@@ -5509,6 +7440,361 @@ void Emitter::jCond(
        }});
 }
 
+void Emitter::jStrictEqual(
+    bool invert,
+    const asmjit::Label &target,
+    FR frLeft,
+    FR frRight) {
+  comment(
+      "// JStrict%sEq Lx, r%u, r%u",
+      invert ? "Not" : "",
+      frLeft.index(),
+      frRight.index());
+
+  // Fast path for raw-only comparison. One of the operands is a non-number
+  // non-pointer value, meaning we can compare bits directly.
+  if (isFRKnownBool(frLeft) || isFRKnownBool(frRight) ||
+      isFRKnownOtherNonPtr(frLeft) || isFRKnownOtherNonPtr(frRight)) {
+    // Do this always, since this could be the end of the BB.
+    syncAllFRTempExcept({});
+    HWReg hwLeft = getOrAllocFRInGpX(frLeft, true);
+    HWReg hwRight = getOrAllocFRInGpX(frRight, true);
+    freeAllFRTempExcept({});
+
+    a.cmp(hwLeft.a64GpX(), hwRight.a64GpX());
+    a.b(!invert ? a64::CondCode::kEQ : a64::CondCode::kNE, target);
+    return;
+  }
+
+  // Fast path for number (double) comparison.
+  // One of the operands is a number, so there's two cases:
+  // * It's NaN: it'll fcmp false against everything which is what we want.
+  // * It's not NaN: It won't have NaN tag bits so it'll compare false against
+  //   all non-double HVs and correctly fcmp true against the same number.
+  if (isFRKnownNumber(frLeft) || isFRKnownNumber(frRight)) {
+    // Do this always, since this could be the end of the BB.
+    syncAllFRTempExcept(FR());
+    HWReg hwLeftD = getOrAllocFRInVecD(frLeft, true);
+    HWReg hwRightD = getOrAllocFRInVecD(frRight, true);
+    freeAllFRTempExcept({});
+    a.fcmp(hwLeftD.a64VecD(), hwRightD.a64VecD());
+    a.b(!invert ? a64::CondCode::kEQ : a64::CondCode::kNE, target);
+    return;
+  }
+
+  // Do this always, since this could be the end of the BB.
+  syncAllFRTempExcept(FR());
+
+  HWReg hwLeftD = getOrAllocFRInVecD(frLeft, true);
+  HWReg hwRightD = getOrAllocFRInVecD(frRight, true);
+
+  HWReg hwTmpLeft = allocTempGpX();
+  a64::GpX xTmpLeft = hwTmpLeft.a64GpX();
+  HWReg hwTmpRight = allocTempGpX();
+  a64::GpX xTmpRight = hwTmpRight.a64GpX();
+  HWReg hwLeft = getOrAllocFRInGpX(frLeft, true);
+  HWReg hwRight = getOrAllocFRInGpX(frRight, true);
+  freeReg(hwTmpLeft);
+  freeReg(hwTmpRight);
+
+  // Label for non-number comparisons.
+  auto nonNumberLab = a.newLabel();
+
+  // Set up slow path.
+  auto slowPathLab = newSlowPathLabel();
+  auto contLab = newContLabel();
+  syncToFrame(frLeft);
+  syncToFrame(frRight);
+  freeAllFRTempExcept(FR());
+
+  a.fcmp(hwLeftD.a64VecD(), hwRightD.a64VecD());
+  // If not inverted then equality here is real equality.
+  // If the equality check fails, we don't know anything.
+  if (!invert)
+    a.b_eq(target);
+  // Since HermesValue is NaN-boxed we know that all non-number values will be
+  // NaN. So we can conveniently test for non-number values by checking for
+  // NaN. We can do that with the VS condition code, which is set if either
+  // operand to fcmp is NaN.
+  static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
+  a.b_vs(nonNumberLab);
+  // If neither number is NaN, then we can just jump to the correct endpoint.
+  // We already checked equality above for the non-inverted case,
+  // so just check the inverted case here to know if the values are not equal.
+  // If all that fails, then the branch failed and we go to contLab.
+  if (invert)
+    a.b_ne(target);
+  a.b(contLab);
+
+  // Convenience labels so we don't have to think too hard about inverted logic
+  // below.
+  const asmjit::Label &equalLab = !invert ? target : contLab;
+  const asmjit::Label &notEqualLab = !invert ? contLab : target;
+
+  a.bind(nonNumberLab);
+  emit_sh_ljs_is_double(a, hwLeft.a64GpX(), xTmpLeft);
+  // Left is actually the JS NaN, which is never equal to anything.
+  // No need to check RHS for JS NaN, because it won't cause false positive
+  // on the raw bit check below.
+  a.b_lo(notEqualLab);
+
+  // Compare bits directly.
+  // If they match exactly, the two values are equal.
+  a.cmp(hwLeft.a64GpX(), hwRight.a64GpX());
+  a.b_eq(equalLab);
+
+  // First compare the tags. If they don't match, the two values are NOT equal.
+  emit_sh_ljs_get_tag(a, xTmpLeft, hwLeft.a64GpX());
+  emit_sh_ljs_get_tag(a, xTmpRight, hwRight.a64GpX());
+  a.cmp(xTmpLeft, xTmpRight);
+  a.b_ne(notEqualLab);
+
+  // If the LHS is either a non-pointer or an object, we can compare raw values
+  // only. We've already checked and we know that the raw values are not the
+  // same, so if this is a non-pointer or an object, then the two values are NOT
+  // strictly equal.
+  emit_sh_ljs_tag_is_pointer(a, xTmpLeft);
+  a.b_lo(notEqualLab);
+  emit_sh_ljs_tag_is_object(a, xTmpLeft);
+  a.b_eq(notEqualLab);
+
+  // Now we know that the LHS is a non-object pointer.
+
+  // Fast string path: string inequality can be easily determined by checking
+  // the lengths. If the LHS isn't a string, go to slow path.
+  emit_sh_ljs_tag_is_string(a, xTmpLeft);
+  a.b_ne(slowPathLab);
+
+  emit_stringprim_get_length_and_flags(a, xTmpLeft, hwLeft.a64GpX());
+  emit_stringprim_get_length_and_flags(a, xTmpRight, hwRight.a64GpX());
+  // XOR the lengths together and mask the result.
+  // xTmpLeft will be nonzero if the lengths don't match.
+  a.eor(xTmpLeft, xTmpLeft, xTmpRight);
+  a.and_(xTmpLeft, xTmpLeft, RuntimeOffsets::stringPrimitiveLengthMask);
+  // Length mismatch means we're done, the two values are NOT equal.
+  a.cbnz(xTmpLeft, notEqualLab);
+  a.b(slowPathLab);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .target = target,
+       .name = invert ? "j_strict_not_eq" : "j_strict_eq",
+       .frInput1 = frLeft,
+       .frInput2 = frRight,
+       .invert = invert,
+       .slowCall = (void *)_sh_ljs_strict_equal,
+       .slowCallName = "_sh_ljs_strict_equal",
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: %s Lx, r%u, r%u",
+             sl.name,
+             sl.frInput1.index(),
+             sl.frInput2.index());
+         em.a.bind(sl.slowPathLab);
+         em._loadFrame(HWReg::gpX(0), sl.frInput1);
+         em._loadFrame(HWReg::gpX(1), sl.frInput2);
+         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+         if (!sl.invert)
+           em.a.cbnz(a64::w0, sl.target);
+         else
+           em.a.cbz(a64::w0, sl.target);
+         em.a.b(sl.contLab);
+       }});
+}
+
+void Emitter::strictEqualImpl(bool invert, FR frRes, FR frLeft, FR frRight) {
+  comment(
+      "// %s r%u, r%u, r%u",
+      !invert ? "StrictEq" : "StrictNEq",
+      frRes.index(),
+      frLeft.index(),
+      frRight.index());
+
+  // Fast path for raw-only comparison. One of the operands is a non-number
+  // non-pointer value, meaning we can compare bits directly.
+  if (isFRKnownBool(frLeft) || isFRKnownBool(frRight) ||
+      isFRKnownOtherNonPtr(frLeft) || isFRKnownOtherNonPtr(frRight)) {
+    HWReg hwLeft = getOrAllocFRInGpX(frLeft, true);
+    HWReg hwRight = getOrAllocFRInGpX(frRight, true);
+    HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+    frUpdatedWithHW(frRes, hwRes, FRType::Bool);
+
+    a.cmp(hwLeft.a64GpX(), hwRight.a64GpX());
+    a.cset(hwRes.a64GpX(), !invert ? a64::CondCode::kEQ : a64::CondCode::kNE);
+    emit_sh_ljs_bool(a, hwRes.a64GpX());
+    return;
+  }
+
+  // Fast path for number (double) comparison.
+  // One of the operands is a number, so there's two cases:
+  // * It's NaN: it'll fcmp false against everything which is what we want.
+  // * It's not NaN: It won't have NaN tag bits so it'll compare false against
+  //   all non-double HVs and correctly fcmp true against the same number.
+  if (isFRKnownNumber(frLeft) || isFRKnownNumber(frRight)) {
+    // Do this always, since this could be the end of the BB.
+    HWReg hwLeftD = getOrAllocFRInVecD(frLeft, true);
+    HWReg hwRightD = getOrAllocFRInVecD(frRight, true);
+    HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+    frUpdatedWithHW(frRes, hwRes, FRType::Bool);
+
+    a.fcmp(hwLeftD.a64VecD(), hwRightD.a64VecD());
+    a.cset(hwRes.a64GpX(), !invert ? a64::CondCode::kEQ : a64::CondCode::kNE);
+    emit_sh_ljs_bool(a, hwRes.a64GpX());
+    return;
+  }
+
+  HWReg hwLeftD = getOrAllocFRInVecD(frLeft, true);
+  HWReg hwRightD = getOrAllocFRInVecD(frRight, true);
+
+  // Allocate registers used for non-number comparisons.
+  HWReg hwLeft = getOrAllocFRInGpX(frLeft, true);
+  HWReg hwRight = getOrAllocFRInGpX(frRight, true);
+  HWReg hwTmpLeft = allocTempGpX();
+  HWReg hwTmpRight = allocTempGpX();
+  a64::GpX xTmpLeft = hwTmpLeft.a64GpX();
+  a64::GpX xTmpRight = hwTmpRight.a64GpX();
+  freeReg(hwTmpLeft);
+  freeReg(hwTmpRight);
+
+  // Labels for non-number comparisons.
+  auto nonNumberLab = a.newLabel();
+  auto equalLab = a.newLabel();
+  auto notEqualLab = a.newLabel();
+
+  // Set up slow path.
+  auto slowPathLab = newSlowPathLabel();
+  auto contLab = newContLabel();
+  syncAllFRTempExcept(frRes != frLeft && frRes != frRight ? frRes : FR());
+  syncToFrame(frLeft);
+  syncToFrame(frRight);
+  freeAllFRTempExcept({});
+
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes, FRType::Bool);
+  a64::GpX xRes = hwRes.a64GpX();
+
+  // Start by comparing doubles with fcmp.
+  a.fcmp(hwLeftD.a64VecD(), hwRightD.a64VecD());
+
+  // Since HermesValue is NaN-boxed we know that all non-number values will be
+  // NaN. So we can conveniently test for non-number values by checking for
+  // NaN. We can do that with the VS condition code, which is set if either
+  // operand to fcmp is NaN.
+  static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
+  a.b_vs(nonNumberLab);
+
+  // Store the result of the comparison in the lowest bit of tmpCmpRes.
+  // asmjit will convert CondCode to the correct encoding for use in the opcode.
+  a.cset(xRes, invert ? a64::CondCode::kNE : a64::CondCode::kEQ);
+  emit_sh_ljs_bool(a, xRes);
+
+  a.b(contLab);
+
+  // May be JS NaN (not a number, but really it is a number).
+  a.bind(nonNumberLab);
+  emit_sh_ljs_is_double(a, hwLeft.a64GpX(), xTmpLeft);
+  // Left is actually the JS NaN, which is never equal to anything.
+  // No need to check RHS for JS NaN, because it won't cause false positive
+  // on the raw bit check below.
+  a.b_lo(notEqualLab);
+
+  // Compare bits directly.
+  // If they match exactly, the two values are equal.
+  a.cmp(hwLeft.a64GpX(), hwRight.a64GpX());
+  a.b_eq(equalLab);
+
+  // First compare the tags. If they don't match, the two values are NOT equal.
+  emit_sh_ljs_get_tag(a, xTmpLeft, hwLeft.a64GpX());
+  emit_sh_ljs_get_tag(a, xTmpRight, hwRight.a64GpX());
+  a.cmp(xTmpLeft, xTmpRight);
+  a.b_ne(notEqualLab);
+
+  // If the LHS is either a non-pointer or an object, we can compare raw values
+  // only. We've already checked and we know that the raw values are not the
+  // same, so if this is a non-pointer or an object, then the two values are NOT
+  // strictly equal.
+  emit_sh_ljs_tag_is_pointer(a, xTmpLeft);
+  a.b_lo(notEqualLab);
+  emit_sh_ljs_tag_is_object(a, xTmpLeft);
+  a.b_eq(notEqualLab);
+
+  // Now we know that the LHS is a non-object pointer.
+
+  // Fast string path: string inequality can be easily determined by checking
+  // the lengths. If the LHS isn't a string, go to slow path.
+  emit_sh_ljs_tag_is_string(a, xTmpLeft);
+  a.b_ne(slowPathLab);
+
+  emit_stringprim_get_length_and_flags(a, xTmpLeft, hwLeft.a64GpX());
+  emit_stringprim_get_length_and_flags(a, xTmpRight, hwRight.a64GpX());
+  // XOR the lengths together and mask the result.
+  // xTmpLeft will be nonzero if the lengths don't match.
+  a.eor(xTmpLeft, xTmpLeft, xTmpRight);
+  a.and_(xTmpLeft, xTmpLeft, RuntimeOffsets::stringPrimitiveLengthMask);
+  // Length mismatch means we're done, the two values are NOT equal.
+  a.cbnz(xTmpLeft, notEqualLab);
+  a.b(slowPathLab);
+
+  // Jump here if the result should be "equal".
+  // Returns true if not inverted, false if inverted.
+  a.bind(equalLab);
+  emit_sh_ljs_bool_const(a, xRes, !invert);
+  a.b(contLab);
+
+  // Jump here if the result should be "not equal".
+  // Returns false if not inverted, true if inverted.
+  a.bind(notEqualLab);
+  emit_sh_ljs_bool_const(a, xRes, invert);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .name = !invert ? "StrictEq" : "StrictNEq",
+       .frRes = frRes,
+       .frInput1 = frLeft,
+       .frInput2 = frRight,
+       .hwRes = hwRes,
+       .invert = invert,
+       .passArgsByVal = true,
+       .slowCall = (void *)_sh_ljs_strict_equal,
+       .slowCallName = "_sh_ljs_strict_equal",
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: %s r%u, r%u, r%u",
+             sl.name,
+             sl.frRes.index(),
+             sl.frInput1.index(),
+             sl.frInput2.index());
+         em.a.bind(sl.slowPathLab);
+         if (sl.passArgsByVal) {
+           em._loadFrame(HWReg::gpX(0), sl.frInput1);
+           em._loadFrame(HWReg::gpX(1), sl.frInput2);
+         } else {
+           em.a.mov(a64::x0, xRuntime);
+           em.loadFrameAddr(a64::x1, sl.frInput1);
+           em.loadFrameAddr(a64::x2, sl.frInput2);
+         }
+         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+
+         // Invert the slow path result if needed.
+         if (sl.invert)
+           em.a.eor(sl.hwRes.a64GpX(), a64::x0, 1);
+         else
+           em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+
+         // Comparison functions return bool, so encode it.
+         emit_sh_ljs_bool(em.a, sl.hwRes.a64GpX());
+         em.a.b(sl.contLab);
+       }});
+}
+
 void Emitter::compareImpl(
     FR frRes,
     FR frLeft,
@@ -5555,7 +7841,7 @@ void Emitter::compareImpl(
     // NaN. So we can conveniently test for non-number values by checking for
     // NaN. We can do that with the VS condition code, which is set if either
     // operand to fcmp is NaN.
-    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    static_assert(HERMESVALUE_VERSION == 2, "Non-numbers must be NaN");
     a.b_vs(slowPathLab);
   }
 

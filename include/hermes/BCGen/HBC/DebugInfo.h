@@ -33,6 +33,80 @@ namespace hbc {
 /// Represent an invalid sourceMappingUrl index.
 constexpr uint32_t kInvalidSourceMappingUrlId = 0;
 
+/// Holds the required state to restore the environment information needed to
+/// perform an eval from the debugger.
+class DebugScopingInfo {
+  friend class OptValue<DebugScopingInfo>;
+
+  /// We use int64_t to represent all the possible locations the environment can
+  /// reside. There are 2 possible cases for what EnvLocationDescriptor means.
+  /// >=0: a register in the current function.
+  /// <0: this represents a spilled env, which can be found at a slot in the
+  /// parent environment.
+  /// The description of where to find the current scope-producing instruction.
+  int64_t envLocation_;
+  /// The idx of a sema::LexicalScope.
+  uint32_t lexicalScopeIdxInParentFunction_;
+
+  static constexpr int64_t kFirstRegLocation = 0;
+
+  DebugScopingInfo() = default;
+  DebugScopingInfo(int64_t envLocation, uint32_t lexicalScope)
+      : envLocation_(envLocation),
+        lexicalScopeIdxInParentFunction_(lexicalScope) {}
+
+ public:
+  /// Construct and \return a DebugScopingInfo encoding the given register \p
+  /// regNum as the environment location.
+  static DebugScopingInfo forRegister(uint32_t regNum, uint32_t lexicalScope) {
+    assert(regNum < UINT32_MAX);
+    return {kFirstRegLocation + static_cast<uint32_t>(regNum), lexicalScope};
+  }
+  /// \return EnvLocationDescriptor for the given spilled parent slot location.
+  /// Construct and \return a DebugScopingInfo encoding the given slot \p
+  /// slotInParentEnv as the environment location. \p slotInParentEnv cannot be
+  /// UINT32_MAX.
+  static DebugScopingInfo forSpilledSlot(
+      uint32_t slotInParentEnv,
+      uint32_t lexicalScope) {
+    assert(slotInParentEnv < UINT32_MAX);
+    return {-static_cast<int64_t>(slotInParentEnv + 1), lexicalScope};
+  }
+
+  /// \return true if the environment location is in a register.
+  bool isRegister() const {
+    return envLocation_ >= kFirstRegLocation;
+  }
+  /// \return the register number that \p envLocDesc describes.
+  uint32_t getRegister() const {
+    return static_cast<uint32_t>(envLocation_ - kFirstRegLocation);
+  }
+
+  /// \return true if the environment location is spilled into the parent
+  /// environment.
+  bool isSpilledSlot() const {
+    return envLocation_ < 0;
+  }
+  /// \return the slot in the parent that \p envLocDesc describes.
+  uint32_t getSpilledSlot() const {
+    assert(isSpilledSlot());
+    return static_cast<uint32_t>((-envLocation_) - 1);
+  }
+
+  /// \return the lexical scope idx.
+  uint32_t lexicalScopeIdxInParentFunction() const {
+    return lexicalScopeIdxInParentFunction_;
+  }
+
+  /// Friendly representation of this DebugScopingInfo for use in maps as a key.
+  using MapKeyTy = std::pair<int64_t, uint32_t>;
+
+  /// \return the contents of this DebugScopingInfo as a std::pair.
+  MapKeyTy asKey() const {
+    return {envLocation_, lexicalScopeIdxInParentFunction_};
+  }
+};
+
 /// The file name, line and column associated with a bytecode address.
 struct DebugSourceLocation {
   // The bytecode offset of this debug info.
@@ -51,6 +125,9 @@ struct DebugSourceLocation {
   // Initialized to 0, to show that no statements have been generated yet.
   // Thus, we can see which instructions aren't part of any user-written code.
   uint32_t statement{0};
+  // 1 based index into a side table owned by DebugInfo. The side table is a
+  // list DebugScopingInfo entries. 0 indicates no env info.
+  uint32_t envIdx{0};
 
   DebugSourceLocation() {}
 
@@ -82,16 +159,12 @@ struct DebugOffsets {
   /// (DebugSourceLocation).
   uint32_t sourceLocations = NO_OFFSET;
 
-  /// Offset into the lexical data section of the debugging data.
-  uint32_t lexicalData = NO_OFFSET;
-
   /// Sentinel value indicating no offset.
   static constexpr uint32_t NO_OFFSET = UINT32_MAX;
 
   /// Constructors.
   DebugOffsets() = default;
-  DebugOffsets(uint32_t src, uint32_t lex)
-      : sourceLocations(src), lexicalData(lex) {}
+  DebugOffsets(uint32_t src) : sourceLocations(src) {}
 };
 
 /// A result of a search for a bytecode offset for where a line/column fall.
@@ -132,6 +205,10 @@ class DebugInfo {
 
   DebugFileRegionList files_{};
   StreamVector<uint8_t> data_{};
+  /// Side table holding all debug scoping information.
+  std::vector<DebugScopingInfo> scopingInfoTable_{};
+  /// Cache used to de-duplicte entries in the above table.
+  llvh::DenseMap<DebugScopingInfo::MapKeyTy, uint32_t> scopingInfoCache_{};
 
   /// Get source filename as string id.
   OptValue<uint32_t> getFilenameForAddress(uint32_t debugOffset) const;
@@ -143,7 +220,6 @@ class DebugInfo {
   explicit DebugInfo(
       UniquingFilenameTable &&filenameTable,
       DebugFileRegionList &&files,
-      uint32_t lexicalDataOffset,
       StreamVector<uint8_t> &&data)
       : filenameTable_(std::move(filenameTable)),
         files_(std::move(files)),
@@ -153,7 +229,6 @@ class DebugInfo {
       std::vector<StringTableEntry> &&filenameStrings,
       std::vector<unsigned char> &&filenameStorage,
       DebugFileRegionList &&files,
-      uint32_t lexicalDataOffset,
       StreamVector<uint8_t> &&data)
       : filenameTable_(ConsecutiveStringStorage{
             std::move(filenameStrings),
@@ -162,6 +237,19 @@ class DebugInfo {
         data_(std::move(data)) {}
 
   DebugInfo &operator=(DebugInfo &&that) = default;
+
+  llvh::DenseMap<DebugScopingInfo::MapKeyTy, uint32_t> &getScopingInfoCache() {
+    return scopingInfoCache_;
+  }
+  std::vector<DebugScopingInfo> &getScopingInfoTable() {
+    return scopingInfoTable_;
+  }
+  /// \return the element in the scoping info side table for \p envIdx, which is
+  /// 1-based.
+  DebugScopingInfo getScopingInfoAt(uint32_t envIdx) const {
+    assert(envIdx > 0 && "envIdx of 0 does not represent an element");
+    return scopingInfoTable_[envIdx - 1];
+  }
 
   DebugFileRegionList &getFilesMut() {
     return files_;
@@ -299,6 +387,10 @@ class DebugInfoGenerator {
       const DebugSourceLocation &start,
       uint32_t functionIndex,
       llvh::ArrayRef<DebugSourceLocation> offsets);
+
+  /// Add \p scopingInfo to a maintained list of DebugScopingInfo, and return a
+  /// 1-based index to find \p scopingInfo in that list.
+  uint32_t addScopingInfo(const DebugScopingInfo &scopingInfo);
 
   // Finish generating the debug info.
   void generate() &&;

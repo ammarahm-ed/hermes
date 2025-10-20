@@ -15,10 +15,13 @@
 #include "hermes/BCGen/MovElimination.h"
 #include "hermes/BCGen/RegAlloc.h"
 #include "hermes/IR/IRUtils.h"
+#include "hermes/Support/Statistic.h"
 
 #include "llvh/ADT/SetVector.h"
 
 #define DEBUG_TYPE "hbc-backend"
+
+STATISTIC(StringSwitchImmInstrs, "Number of StringSwitchImm instructions");
 
 namespace hermes {
 namespace hbc {
@@ -57,16 +60,16 @@ llvh::SmallVector<Instruction *, 4> getInsertionPointsAfter(
 } // namespace
 
 bool LoadConstants::operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
-  // HBCLoadConstInst is meant to load a constant
-  if (llvh::isa<HBCLoadConstInst>(Inst))
+  // LIRLoadConstInst is meant to load a constant
+  if (llvh::isa<LIRLoadConstInst>(Inst))
     return true;
 
   // The operand of LoadParamInst is a literal index.
   if (llvh::isa<LoadParamInst>(Inst))
     return true;
 
-  if (llvh::isa<HBCAllocObjectFromBufferInst>(Inst))
-    return true;
+  if (llvh::isa<LIRAllocObjectFromBufferInst>(Inst))
+    return opIndex >= LIRAllocObjectFromBufferInst::FirstKeyIdx;
 
   // All operands of AllocArrayInst are literals.
   if (llvh::isa<AllocArrayInst>(Inst))
@@ -84,20 +87,20 @@ bool LoadConstants::operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
   if (llvh::isa<SwitchInst>(Inst) && opIndex > 0)
     return true;
 
-  // DefineOwnPropertyInst and DefineNewOwnPropertyInst.
-  if (auto *SOP = llvh::dyn_cast<BaseDefineOwnPropertyInst>(Inst)) {
+  if (auto *SOP = llvh::dyn_cast<DefineOwnPropertyInst>(Inst)) {
     if (opIndex == DefineOwnPropertyInst::PropertyIdx) {
-      if (llvh::isa<DefineNewOwnPropertyInst>(Inst)) {
-        // In DefineNewOwnPropertyInst the property name must be a literal.
-        return true;
-      }
-
       // If the propery is a LiteralNumber, the property is enumerable, and it
       // is a valid array index, it is coming from an array initialization and
       // we will emit it as DefineOwnByIndex.
       if (auto *LN = llvh::dyn_cast<LiteralNumber>(Inst->getOperand(opIndex))) {
         if (SOP->getIsEnumerable() && LN->convertToArrayIndex().hasValue())
           return true;
+      }
+
+      // LiteralStrings are optimized, when they are enumerable.
+      if (llvh::isa<LiteralString>(Inst->getOperand(opIndex)) &&
+          SOP->getIsEnumerable()) {
+        return true;
       }
     }
 
@@ -106,6 +109,16 @@ bool LoadConstants::operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
       return true;
 
     return false;
+  }
+
+  // DefineOwnInDenseArrayInst's arrayIndex operand must remain as a literal.
+  if (llvh::isa<DefineOwnInDenseArrayInst>(Inst) &&
+      opIndex == DefineOwnInDenseArrayInst::ArrayIndexIdx) {
+    return true;
+  }
+
+  if (llvh::isa<CreatePrivateNameInst>(Inst)) {
+    return opIndex == CreatePrivateNameInst::PropertyIdx;
   }
 
   // If StorePropertyInst's property ID is a LiteralString, we will keep it
@@ -139,10 +152,14 @@ bool LoadConstants::operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
   if (llvh::isa<CreateRegExpInst>(Inst))
     return true;
 
-  if (llvh::isa<SwitchImmInst>(Inst) &&
-      (opIndex == SwitchImmInst::MinValueIdx ||
-       opIndex == SwitchImmInst::SizeIdx ||
-       opIndex >= SwitchImmInst::FirstCaseIdx))
+  if (auto *baseSwitchImm = llvh::dyn_cast<BaseSwitchImmInst>(Inst)) {
+    if (opIndex == BaseSwitchImmInst::SizeIdx ||
+        opIndex >= baseSwitchImm->getFirstCaseIdx())
+      return true;
+  }
+
+  if (llvh::isa<UIntSwitchImmInst>(Inst) &&
+      opIndex == UIntSwitchImmInst::MinValueIdx)
     return true;
 
   /// CallBuiltin's callee, new.target, "this" should always be literals.
@@ -276,8 +293,8 @@ bool LoadConstants::runOnFunction(Function *F) {
   auto createLoadLiteral = [&builder](Literal *literal, Instruction *where) {
     builder.setInsertionPoint(where);
     return llvh::isa<GlobalObject>(literal)
-        ? cast<Instruction>(builder.createHBCGetGlobalObjectInst())
-        : cast<Instruction>(builder.createHBCLoadConstInst(literal));
+        ? cast<Instruction>(builder.createLIRGetGlobalObjectInst())
+        : cast<Instruction>(builder.createLIRLoadConstInst(literal));
   };
 
   for (BasicBlock &BB : *F) {
@@ -375,7 +392,7 @@ bool LowerArgumentsArray::runOnFunction(Function *F) {
       auto *propertyString = llvh::dyn_cast<LiteralString>(load->getProperty());
       if (propertyString && propertyString->getValue().str() == "length") {
         // For `arguments.length`, get the length.
-        auto *length = builder.createHBCGetArgumentsLengthInst(
+        auto *length = builder.createLIRGetArgumentsLengthInst(
             builder.createLoadStackInst(lazyReg));
         load->replaceAllUsesWith(length);
         load->eraseFromParent();
@@ -383,10 +400,10 @@ bool LowerArgumentsArray::runOnFunction(Function *F) {
         // For all other property loads, get by index.
         HBCGetArgumentsPropByValInst *get;
         if (isStrict)
-          get = builder.createHBCGetArgumentsPropByValStrictInst(
+          get = builder.createLIRGetArgumentsPropByValStrictInst(
               load->getProperty(), lazyReg);
         else
-          get = builder.createHBCGetArgumentsPropByValLooseInst(
+          get = builder.createLIRGetArgumentsPropByValLooseInst(
               load->getProperty(), lazyReg);
         load->replaceAllUsesWith(get);
         load->eraseFromParent();
@@ -411,9 +428,9 @@ bool LowerArgumentsArray::runOnFunction(Function *F) {
         auto *newBlock = builder.createBasicBlock(F);
         builder.setInsertionBlock(newBlock);
         if (isStrict)
-          builder.createHBCReifyArgumentsStrictInst(lazyReg);
+          builder.createLIRReifyArgumentsStrictInst(lazyReg);
         else
-          builder.createHBCReifyArgumentsLooseInst(lazyReg);
+          builder.createLIRReifyArgumentsLooseInst(lazyReg);
         auto *reifiedValue = builder.createUnionNarrowTrustedInst(
             builder.createLoadStackInst(lazyReg), Type::createObject());
         builder.createBranchInst(thisBlock);
@@ -434,9 +451,9 @@ bool LowerArgumentsArray::runOnFunction(Function *F) {
       builder.setInsertionPoint(user);
       builder.setLocation(user->getLocation());
       if (isStrict)
-        builder.createHBCReifyArgumentsStrictInst(lazyReg);
+        builder.createLIRReifyArgumentsStrictInst(lazyReg);
       else
-        builder.createHBCReifyArgumentsLooseInst(lazyReg);
+        builder.createLIRReifyArgumentsLooseInst(lazyReg);
       auto *array = builder.createUnionNarrowTrustedInst(
           builder.createLoadStackInst(lazyReg), Type::createObject());
       for (int i = 0, n = user->getNumOperands(); i < n; i++) {
@@ -562,7 +579,7 @@ bool RecreateCheapValues::runOnFunction(Function *F) {
       auto *mov = llvh::dyn_cast<MovInst>(&I);
       if (!mov)
         continue;
-      auto *load = llvh::dyn_cast<HBCLoadConstInst>(mov->getSingleOperand());
+      auto *load = llvh::dyn_cast<LIRLoadConstInst>(mov->getSingleOperand());
       if (!load)
         continue;
       Literal *literal = load->getConst();
@@ -582,7 +599,7 @@ bool RecreateCheapValues::runOnFunction(Function *F) {
       }
 
       builder.setInsertionPoint(mov);
-      auto *recreation = builder.createHBCLoadConstInst(literal);
+      auto *recreation = builder.createLIRLoadConstInst(literal);
       RA_.updateRegister(recreation, RA_.getRegister(mov));
       mov->replaceAllUsesWith(recreation);
       destroyer.add(mov);
@@ -609,16 +626,16 @@ bool LoadConstantValueNumbering::runOnFunction(Function *F) {
   for (auto &BB : *F) {
     IRBuilder::InstructionDestroyer destroyer;
     // Maps a register to the instruction that last modified it.
-    // Every Instruction is either an HBCLoadConstInst or a Mov whose
-    // operand is a HBCLoadConstInst
+    // Every Instruction is either an LIRLoadConstInst or a Mov whose
+    // operand is a LIRLoadConstInst
     llvh::DenseMap<Register, Instruction *> regToInstMap{};
     for (auto &I : BB) {
-      HBCLoadConstInst *loadI{nullptr};
+      LIRLoadConstInst *loadI{nullptr};
       // Value numbering currently only tracks the values of registers that
       // have a constant in them, or that have had a constant moved in them.
-      if (!(loadI = llvh::dyn_cast<HBCLoadConstInst>(&I))) {
+      if (!(loadI = llvh::dyn_cast<LIRLoadConstInst>(&I))) {
         if (auto *movI = llvh::dyn_cast<MovInst>(&I)) {
-          loadI = llvh::dyn_cast<HBCLoadConstInst>(movI->getSingleOperand());
+          loadI = llvh::dyn_cast<LIRLoadConstInst>(movI->getSingleOperand());
         }
       }
 
@@ -628,11 +645,11 @@ bool LoadConstantValueNumbering::runOnFunction(Function *F) {
           auto it = regToInstMap.find(reg);
           if (it != regToInstMap.end()) {
             auto prevI = it->second;
-            HBCLoadConstInst *prevLoad{nullptr};
+            LIRLoadConstInst *prevLoad{nullptr};
             // If the key is found, the instruction must be either an
-            // HBCLoadConstInst, or a Mov whose operand is an HBCLoadConstInst.
-            if (!(prevLoad = llvh::dyn_cast<HBCLoadConstInst>(prevI))) {
-              prevLoad = llvh::dyn_cast<HBCLoadConstInst>(prevI->getOperand(0));
+            // LIRLoadConstInst, or a Mov whose operand is an LIRLoadConstInst.
+            if (!(prevLoad = llvh::dyn_cast<LIRLoadConstInst>(prevI))) {
+              prevLoad = llvh::dyn_cast<LIRLoadConstInst>(prevI->getOperand(0));
             }
             if (prevLoad->isIdenticalTo(loadI)) {
               I.replaceAllUsesWith(prevI);
@@ -677,7 +694,7 @@ bool SpillRegisters::requiresShortOutput(Instruction *I) {
 
   switch (I->getKind()) {
     // Some instructions become Movs or other opcodes with long variants:
-    case ValueKind::HBCSpillMovInstKind:
+    case ValueKind::LIRSpillMovInstKind:
     case ValueKind::LoadStackInstKind:
     case ValueKind::MovInstKind:
     case ValueKind::PhiInstKind:
@@ -696,7 +713,7 @@ bool SpillRegisters::requiresShortOperand(Instruction *I, int op) {
   switch (I->getKind()) {
     case ValueKind::PhiInstKind:
     case ValueKind::MovInstKind:
-    case ValueKind::HBCSpillMovInstKind:
+    case ValueKind::LIRSpillMovInstKind:
     case ValueKind::LoadStackInstKind:
     case ValueKind::StoreStackInstKind:
     case ValueKind::ImplicitMovInstKind:
@@ -776,7 +793,7 @@ bool SpillRegisters::runOnFunction(Function *F) {
           auto temp = getReserved(tempReg++);
 
           builder.setInsertionPoint(&inst);
-          auto *load = builder.createHBCSpillMovInst(op);
+          auto *load = builder.createLIRSpillMovInst(op);
           RA_.updateRegister(load, temp);
           inst.setOperand(load, i);
 
@@ -799,7 +816,7 @@ bool SpillRegisters::runOnFunction(Function *F) {
         for (auto *point : spillPoints) {
           builder.setInsertionPoint(point);
           for (auto store : toSpill) {
-            auto *storeInst = builder.createHBCSpillMovInst(store.first);
+            auto *storeInst = builder.createLIRSpillMovInst(store.first);
             RA_.updateRegister(storeInst, store.second);
 
             if (!replaceWithFirstSpill)
@@ -846,58 +863,104 @@ bool LowerSwitchIntoJumpTables::lowerIntoJumpTable(SwitchInst *switchInst) {
   uint32_t minValue = 0;
   uint32_t maxValue = 0;
 
-  llvh::SmallVector<LiteralNumber *, 8> values;
+  bool allUInt32 = true;
+  llvh::SmallVector<LiteralNumber *, 8> uint32Values;
+  bool allString = true;
+  llvh::SmallVector<LiteralString *, 8> stringValues;
   llvh::SmallVector<BasicBlock *, 8> blocks;
 
   for (unsigned i = 0; i != numCases; ++i) {
     auto casePair = switchInst->getCasePair(i);
     auto *lit = casePair.first;
-    auto *num = llvh::dyn_cast<LiteralNumber>(lit);
-    if (!num)
-      return false;
+    if (allUInt32) {
+      auto *num = llvh::dyn_cast<LiteralNumber>(lit);
+      if (num) {
+        // Check whether it is representable as uint32.
+        if (auto ival = num->isIntTypeRepresentible<uint32_t>()) {
+          uint32Values.push_back(num);
+          blocks.push_back(casePair.second);
 
-    // Check whether it is representable as uint32.
-    if (auto ival = num->isIntTypeRepresentible<uint32_t>()) {
-      values.push_back(num);
-      blocks.push_back(casePair.second);
-
-      if (i == 0) {
-        minValue = maxValue = ival.getValue();
+          if (i == 0) {
+            minValue = maxValue = ival.getValue();
+          } else {
+            minValue = std::min(minValue, ival.getValue());
+            maxValue = std::max(maxValue, ival.getValue());
+          }
+        } else {
+          allUInt32 = false;
+        }
       } else {
-        minValue = std::min(minValue, ival.getValue());
-        maxValue = std::max(maxValue, ival.getValue());
+        allUInt32 = false;
       }
-    } else {
+    }
+
+    if (allString) {
+      if (auto *str = llvh::dyn_cast<LiteralString>(lit)) {
+        stringValues.push_back(str);
+        blocks.push_back(casePair.second);
+      } else {
+        allString = false;
+      }
+    }
+
+    if (!allString && !allUInt32) {
       return false;
     }
   }
+  assert(
+      (allString ^ allUInt32) &&
+      "Should be exactly one of all-string or all-uint32");
 
-  assert(minValue <= maxValue && "Minimum cannot exceed maximum");
-  uint32_t range = maxValue - minValue;
-  // We can't generate a table for a zero-sized range.
-  if (range == 0)
-    return false;
+  if (allUInt32) {
+    assert(minValue <= maxValue && "Minimum cannot exceed maximum");
+    uint32_t range = maxValue - minValue;
+    // We can't generate a table for a zero-sized range.
+    if (range == 0)
+      return false;
 
-  // The number of cases is range + 1, which must fit in a uint32.
-  if (range == std::numeric_limits<uint32_t>::max())
-    return false;
+    // The number of cases is range + 1, which must fit in a uint32.
+    if (range == std::numeric_limits<uint32_t>::max())
+      return false;
 
-  // Check the "denseness" of the cases.
-  // Don't convert small switches.
-  if (range / numCases > 5 || numCases < 10)
-    return false;
+    // Check the "denseness" of the cases.
+    // Don't convert small switches.
+    if (range / numCases > 5 || numCases < 10)
+      return false;
 
-  builder.setInsertionPoint(switchInst);
-  auto *switchImmInst = builder.createSwitchImmInst(
-      switchInst->getInputValue(),
-      switchInst->getDefaultDestination(),
-      builder.getLiteralNumber(minValue),
-      builder.getLiteralNumber(range + 1),
-      values,
-      blocks);
+    builder.setInsertionPoint(switchInst);
+    auto *uintSwitchImmInst = builder.createUIntSwitchImmInst(
+        switchInst->getInputValue(),
+        switchInst->getDefaultDestination(),
+        builder.getLiteralNumber(minValue),
+        builder.getLiteralNumber(range + 1),
+        uint32Values,
+        blocks);
 
-  switchInst->replaceAllUsesWith(switchImmInst);
-  switchInst->eraseFromParent();
+    switchInst->replaceAllUsesWith(uintSwitchImmInst);
+    switchInst->eraseFromParent();
+  } else {
+    // For now, generation of StringSwitchImm is gated by a flag.
+    // This will be removed in the next diff, which implements the
+    // bytecode instruction in the runtime.
+    assert(allString && "See above -- must be one of the choices.");
+
+    // Don't convert small switches.
+    if (stringValues.size() < 10)
+      return false;
+
+    builder.setInsertionPoint(switchInst);
+    auto *strSwitchImmInst = builder.createStringSwitchImmInst(
+        switchInst->getInputValue(),
+        switchInst->getDefaultDestination(),
+        builder.getLiteralNumber(stringValues.size()),
+        stringValues,
+        blocks);
+
+    StringSwitchImmInstrs++;
+
+    switchInst->replaceAllUsesWith(strSwitchImmInst);
+    switchInst->eraseFromParent();
+  }
   return true;
 }
 

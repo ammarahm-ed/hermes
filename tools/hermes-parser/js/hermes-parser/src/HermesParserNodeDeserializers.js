@@ -56,7 +56,6 @@ function deserializeArrowFunctionExpression() {
   return {
     type: 'ArrowFunctionExpression',
     loc: this.addEmptyLoc(),
-    id: this.deserializeNode(),
     params: this.deserializeNodeList(),
     body: this.deserializeNode(),
     typeParameters: this.deserializeNode(),
@@ -182,8 +181,10 @@ function deserializeBlockStatement() {
     type: 'BlockStatement',
     loc: this.addEmptyLoc(),
     body: this.deserializeNodeList(),
+    implicit: this.deserializeBoolean(),
   };
 }
+
 function deserializeStaticBlock() {
   return {
     type: 'StaticBlock',
@@ -376,7 +377,7 @@ function deserializeImportExpression() {
     type: 'ImportExpression',
     loc: this.addEmptyLoc(),
     source: this.deserializeNode(),
-    attributes: this.deserializeNode(),
+    options: this.deserializeNode(),
   };
 }
 function deserializeCallExpressionLikeFirst() {
@@ -1110,6 +1111,15 @@ function deserializeBigIntTypeAnnotation() {
 function deserializeVoidTypeAnnotation() {
   return {type: 'VoidTypeAnnotation', loc: this.addEmptyLoc()};
 }
+function deserializeNeverTypeAnnotation() {
+  return {type: 'NeverTypeAnnotation', loc: this.addEmptyLoc()};
+}
+function deserializeUnknownTypeAnnotation() {
+  return {type: 'UnknownTypeAnnotation', loc: this.addEmptyLoc()};
+}
+function deserializeUndefinedTypeAnnotation() {
+  return {type: 'UndefinedTypeAnnotation', loc: this.addEmptyLoc()};
+}
 function deserializeFunctionTypeAnnotation() {
   return {
     type: 'FunctionTypeAnnotation',
@@ -1210,7 +1220,7 @@ function deserializeTupleTypeAnnotation() {
   return {
     type: 'TupleTypeAnnotation',
     loc: this.addEmptyLoc(),
-    types: this.deserializeNodeList(),
+    elementTypes: this.deserializeNodeList(),
     inexact: this.deserializeBoolean(),
   };
 }
@@ -1328,6 +1338,8 @@ function deserializeOpaqueType() {
     id: this.deserializeNode(),
     typeParameters: this.deserializeNode(),
     impltype: this.deserializeNode(),
+    lowerBound: this.deserializeNode(),
+    upperBound: this.deserializeNode(),
     supertype: this.deserializeNode(),
   };
 }
@@ -1357,6 +1369,8 @@ function deserializeDeclareOpaqueType() {
     id: this.deserializeNode(),
     typeParameters: this.deserializeNode(),
     impltype: this.deserializeNode(),
+    lowerBound: this.deserializeNode(),
+    upperBound: this.deserializeNode(),
     supertype: this.deserializeNode(),
   };
 }
@@ -2130,6 +2144,7 @@ module.exports = [
   deserializeDebuggerStatement,
   deserializeEmptyStatement,
   deserializeBlockStatement,
+
   deserializeStaticBlock,
   deserializeBreakStatement,
   deserializeContinueStatement,
@@ -2271,6 +2286,9 @@ module.exports = [
   deserializeMixedTypeAnnotation,
   deserializeBigIntTypeAnnotation,
   deserializeVoidTypeAnnotation,
+  deserializeNeverTypeAnnotation,
+  deserializeUnknownTypeAnnotation,
+  deserializeUndefinedTypeAnnotation,
   deserializeFunctionTypeAnnotation,
   deserializeHookTypeAnnotation,
   deserializeFunctionTypeParam,

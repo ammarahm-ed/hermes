@@ -22,12 +22,12 @@ using namespace facebook::jsi;
 using namespace facebook::hermes;
 
 struct HermesTestHelper {
-  static size_t rootsListLength(const HermesRuntime &rt) {
+  static size_t rootsListLength(const IHermesTestHelpers &rt) {
     return rt.rootsListLengthForTests();
   }
 
   static int64_t calculateRootsListChange(
-      const HermesRuntime &rt,
+      const IHermesTestHelpers &rt,
       std::function<void(void)> f) {
     auto before = rootsListLength(rt);
     f();
@@ -39,14 +39,14 @@ namespace {
 
 class HermesRuntimeTestBase {
  public:
-  HermesRuntimeTestBase(std::unique_ptr<Runtime> rt) : rt(std::move(rt)) {}
+  HermesRuntimeTestBase(std::shared_ptr<Runtime> rt) : rt(std::move(rt)) {}
 
  protected:
   Value eval(const char *code) {
     return rt->global().getPropertyAsFunction(*rt, "eval").call(*rt, code);
   }
 
-  std::unique_ptr<Runtime> rt;
+  std::shared_ptr<Runtime> rt;
 };
 
 /// TODO: Run these tests against all jsi::Runtimes implemented on top of
@@ -96,6 +96,12 @@ TEST_P(HermesRuntimeTest, StrictHostFunctionBindTest) {
                    "  return coolify.bind(undefined)();"
                    "})()")
                   .getBool());
+}
+
+TEST_P(HermesRuntimeTest, ResetTimezoneCache) {
+  if (auto *hrt = castInterface<IHermes>(rt.get())) {
+    EXPECT_NO_THROW({ hrt->resetTimezoneCache(); });
+  }
 }
 
 TEST_P(HermesRuntimeTest, DescriptionTest) {
@@ -205,22 +211,23 @@ TEST_F(HermesRuntimeTestMethodsTest, DetachedArrayBuffer) {
 }
 
 TEST_P(HermesRuntimeTest, BytecodeTest) {
+  auto *api = castInterface<IHermesRootAPI>(makeHermesRootAPI());
   const uint8_t shortBytes[] = {1, 2, 3};
-  EXPECT_FALSE(HermesRuntime::isHermesBytecode(shortBytes, 0));
-  EXPECT_FALSE(HermesRuntime::isHermesBytecode(shortBytes, sizeof(shortBytes)));
+  EXPECT_FALSE(api->isHermesBytecode(shortBytes, 0));
+  EXPECT_FALSE(api->isHermesBytecode(shortBytes, sizeof(shortBytes)));
   uint8_t longBytes[1024];
   memset(longBytes, 'H', sizeof(longBytes));
-  EXPECT_FALSE(HermesRuntime::isHermesBytecode(longBytes, sizeof(longBytes)));
+  EXPECT_FALSE(api->isHermesBytecode(longBytes, sizeof(longBytes)));
 
   std::string bytecode;
   ASSERT_TRUE(hermes::compileJS("x = 1", bytecode));
-  EXPECT_TRUE(HermesRuntime::isHermesBytecode(
+  EXPECT_TRUE(api->isHermesBytecode(
       reinterpret_cast<const uint8_t *>(bytecode.data()), bytecode.size()));
   evaluateSourceOrBytecode(
       std::unique_ptr<StringBuffer>(new StringBuffer(bytecode)), "");
   EXPECT_EQ(rt->global().getProperty(*rt, "x").getNumber(), 1);
 
-  EXPECT_EQ(HermesRuntime::getBytecodeVersion(), hermes::hbc::BYTECODE_VERSION);
+  EXPECT_EQ(api->getBytecodeVersion(), hermes::hbc::BYTECODE_VERSION);
 }
 
 TEST(HermesRuntimePreparedJavaScriptTest, BytecodeTest) {
@@ -274,6 +281,7 @@ c.doSomething(a, 15);
     "mappings": ";AAAA,IAAM,CAAC,GAAW,EAAE,CAAC;AACrB;IAEI,iBAAY,GAAW;QACnB,IAAI,CAAC,GAAG,GAAG,GAAG,CAAC;IACnB,CAAC;IACD,6BAAW,GAAX,UAAY,CAAS,EAAE,CAAS;QAC5B,UAAU,CAAC,GAAG,GAAG,CAAC,GAAG,CAAC,GAAG,IAAI,CAAC,GAAG,CAAC;IACtC,CAAC;IACL,cAAC;AAAD,CAAC,AARD,IAQC;AACD,IAAM,CAAC,GAAG,IAAI,OAAO,CAAC,CAAC,CAAC,CAAC;AACzB,CAAC,CAAC,WAAW,CAAC,CAAC,EAAE,EAAE,CAAC,CAAC"
   })#";
 
+  auto *api = castInterface<IHermesRootAPI>(makeHermesRootAPI());
   std::string bytecode;
   ASSERT_TRUE(hermes::compileJS(
       TestSource,
@@ -283,7 +291,7 @@ c.doSomething(a, 15);
       true,
       nullptr,
       std::optional<std::string_view>(TestSourceMap)));
-  EXPECT_TRUE(HermesRuntime::isHermesBytecode(
+  EXPECT_TRUE(api->isHermesBytecode(
       reinterpret_cast<const uint8_t *>(bytecode.data()), bytecode.size()));
   try {
     evaluateSourceOrBytecode(
@@ -371,28 +379,31 @@ TEST(HermesRuntimeDeathTest, ValueTest) {
 #endif
 
 TEST(HermesRootsTest, DontGrowWhenMoveObjectOutOfValue) {
-  auto rt = makeHermesRuntime();
+  std::shared_ptr<HermesRuntime> rt = makeHermesRuntime();
   Value val = Object(*rt);
   // Keep the object alive during measurement.
   std::unique_ptr<Object> obj;
-  auto rootsDelta = HermesTestHelper::calculateRootsListChange(*rt, [&]() {
-    obj = std::make_unique<Object>(std::move(val).getObject(*rt));
-  });
+  auto helperRt = dynamicInterfaceCast<IHermesTestHelpers>(rt);
+  auto rootsDelta = HermesTestHelper::calculateRootsListChange(
+      *helperRt,
+      [&]() { obj = std::make_unique<Object>(std::move(val).getObject(*rt)); });
   EXPECT_EQ(rootsDelta, 0);
 }
 
 TEST(HermesRootsTest, DontGrowWhenCloneObject) {
-  auto rt = makeHermesRuntime();
+  std::shared_ptr<HermesRuntime> rt = makeHermesRuntime();
   Value val = Object(*rt);
   constexpr int kCloneCount = 1000;
   // Keep the objects alive during measurement.
   std::vector<Object> objects;
   objects.reserve(kCloneCount);
-  auto rootsDelta = HermesTestHelper::calculateRootsListChange(*rt, [&]() {
-    for (size_t i = 0; i < kCloneCount; i++) {
-      objects.push_back(val.getObject(*rt));
-    }
-  });
+  auto helperRt = dynamicInterfaceCast<IHermesTestHelpers>(rt);
+  auto rootsDelta =
+      HermesTestHelper::calculateRootsListChange(*helperRt, [&]() {
+        for (size_t i = 0; i < kCloneCount; i++) {
+          objects.push_back(val.getObject(*rt));
+        }
+      });
   EXPECT_EQ(rootsDelta, 0);
 }
 
@@ -1239,6 +1250,25 @@ globalThis.Error = function (){
 )#");
   EXPECT_THROW(throw JSError(*rt, "Foo"), ::hermes::vm::JSOutOfMemoryError);
 }
+
+TEST_F(HermesRuntimeTestSmallHeap, InterpreterUnwindOOM) {
+  // Test that the interpreter does not attempt to restore the IP in the runtime
+  // during exception unwinding. This would be a unnecessary, and causes
+  // assertion failures because the register stack is not unwound.
+  // It is important in order to reliably test this that the function where the
+  // OOM occurs does not make any calls, or contain any numbers in registers, so
+  // that we reliably get a crash if the interpreter tries to access the SavedIP
+  // slot during unwinding.
+  const char *src = R"#(
+function foo(){
+  let obj = {};
+  let i = "a";
+  while(true) obj[ i += "a" ] = ["a", "b", "c", "d", "e", "f"];
+}
+foo();
+)#";
+  EXPECT_THROW(eval(src), ::hermes::vm::JSOutOfMemoryError);
+}
 #endif
 
 TEST_P(HermesRuntimeTest, NativeExceptionDoesNotUseGlobalError) {
@@ -1440,6 +1470,138 @@ TEST_P(HermesRuntimeTest, CreateObjectWithPrototype) {
 
   // Throw when prototype is neither an Object nor null
   EXPECT_THROW(Object::create(*rt, Value(1)), JSError);
+}
+
+TEST_P(HermesRuntimeTest, SetRuntimeData) {
+  UUID uuid1{0xe67ab3d6, 0x09a0, 0x11f0, 0xa641, 0x325096b39f47};
+  auto str = std::make_shared<std::string>("hello world");
+  rt->setRuntimeData(uuid1, str);
+
+  UUID uuid2{0xa12f99fc, 0x09a2, 0x11f0, 0x84de, 0x325096b39f47};
+  auto obj1 = std::make_shared<Object>(*rt);
+  rt->setRuntimeData(uuid2, obj1);
+
+  auto storedStr =
+      std::static_pointer_cast<std::string>(rt->getRuntimeData(uuid1));
+  auto storedObj = std::static_pointer_cast<Object>(rt->getRuntimeData(uuid2));
+  EXPECT_EQ(storedStr, str);
+  EXPECT_EQ(storedObj, obj1);
+
+  // Override the existing value at uuid1
+  auto weakOldStr = std::weak_ptr<std::string>(str);
+  str = std::make_shared<std::string>("goodbye world");
+  rt->setRuntimeData(uuid1, str);
+  storedStr = std::static_pointer_cast<std::string>(rt->getRuntimeData(uuid1));
+  EXPECT_EQ(str, storedStr);
+  // Verify that the old data was not held on after it was deleted
+  EXPECT_EQ(weakOldStr.use_count(), 0);
+
+  auto rt2 = makeHermesRuntime();
+  UUID uuid3{0x16f55892, 0x1034, 0x11f0, 0x8f65, 0x325096b39f47};
+  auto obj2 = std::make_shared<Object>(*rt2);
+  rt2->setRuntimeData(uuid3, obj2);
+
+  auto storedObj2 =
+      std::static_pointer_cast<Object>(rt2->getRuntimeData(uuid3));
+  EXPECT_EQ(storedObj2, obj2);
+
+  // UUID 1 is for data in the first hermes runtime, so we expect nullptr here
+  EXPECT_FALSE(rt2->getRuntimeData(uuid1));
+
+  // Verify that when the runtime gets destroyed, the custom data is also
+  // released.
+  auto weakObj2 = std::weak_ptr<Object>(obj2);
+  obj2.reset();
+  storedObj2.reset();
+  rt2.reset();
+  EXPECT_EQ(weakObj2.use_count(), 0);
+}
+
+TEST_P(HermesRuntimeTest, DeleteProperty) {
+  eval("var obj = {1:2, foo: 'bar', 3:4, salt: 'pepper'}");
+  auto obj = rt->global().getPropertyAsObject(*rt, "obj");
+
+  auto prop = PropNameID::forAscii(*rt, "1");
+  obj.deleteProperty(*rt, prop);
+  auto hasRes = obj.hasProperty(*rt, prop);
+  EXPECT_FALSE(hasRes);
+
+  auto str = String::createFromAscii(*rt, "foo");
+  obj.deleteProperty(*rt, str);
+  hasRes = obj.hasProperty(*rt, str);
+  EXPECT_FALSE(hasRes);
+
+  auto valProp = Value(3);
+  obj.deleteProperty(*rt, valProp);
+  auto getRes = obj.getProperty(*rt, "3");
+  EXPECT_TRUE(getRes.isUndefined());
+
+  hasRes = obj.hasProperty(*rt, "salt");
+  EXPECT_TRUE(hasRes);
+  obj.deleteProperty(*rt, "salt");
+  hasRes = obj.hasProperty(*rt, "salt");
+  EXPECT_FALSE(hasRes);
+
+  obj = eval(
+            "const obj = {};"
+            "Object.defineProperty(obj, 'prop', {"
+            "value: 10,"
+            "configurable: false,"
+            "}); obj;")
+            .getObject(*rt);
+  prop = PropNameID::forAscii(*rt, "prop");
+  EXPECT_THROW(obj.deleteProperty(*rt, prop), JSError);
+  hasRes = obj.hasProperty(*rt, "prop");
+  EXPECT_TRUE(hasRes);
+}
+
+TEST_P(HermesRuntimeTest, ObjectTest) {
+  eval("var obj = {1:2, 3:4}");
+  auto obj = rt->global().getPropertyAsObject(*rt, "obj");
+
+  auto propVal = Value(1);
+  // Check for and get existing properties
+  auto hasRes = obj.hasProperty(*rt, propVal);
+  EXPECT_TRUE(hasRes);
+  auto getRes = obj.getProperty(*rt, propVal);
+  EXPECT_EQ(getRes.getNumber(), 2);
+  // Overwrite existing property
+  obj.setProperty(*rt, propVal, 3);
+  getRes = obj.getProperty(*rt, propVal);
+  EXPECT_EQ(getRes.getNumber(), 3);
+
+  // Tests for non-existing properties
+  propVal = Value(5);
+  hasRes = obj.hasProperty(*rt, propVal);
+  EXPECT_FALSE(hasRes);
+  getRes = obj.getProperty(*rt, propVal);
+  EXPECT_TRUE(getRes.isUndefined());
+
+  // Add new property
+  obj.setProperty(*rt, propVal, "bar");
+  hasRes = obj.hasProperty(*rt, propVal);
+  EXPECT_TRUE(hasRes);
+  getRes = obj.getProperty(*rt, propVal);
+  EXPECT_EQ(getRes.getString(*rt).utf8(*rt), "bar");
+
+  obj = eval(
+            "Object.defineProperty(obj, '456', {"
+            "  value: 10,"
+            "  writable: false,});")
+            .getObject(*rt);
+  auto unwritableProp = Value(456);
+  EXPECT_THROW(obj.setProperty(*rt, unwritableProp, 1), JSError);
+
+  auto badObjKey = eval(
+      "var badObj = {"
+      "    toString: function() {"
+      "        throw new Error('something went wrong');"
+      "    }"
+      "};"
+      "badObj;");
+  EXPECT_THROW(obj.setProperty(*rt, badObjKey, 123), JSError);
+  EXPECT_THROW(obj.hasProperty(*rt, badObjKey), JSError);
+  EXPECT_THROW(obj.getProperty(*rt, badObjKey), JSError);
 }
 
 INSTANTIATE_TEST_CASE_P(

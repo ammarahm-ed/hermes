@@ -7,6 +7,7 @@
 
 #define DEBUG_TYPE "vm"
 #include "JSLib/JSLibInternal.h"
+#include "hermes/BCGen/SerializedLiteralParser.h"
 #include "hermes/Support/Statistic.h"
 #include "hermes/VM/BigIntPrimitive.h"
 #include "hermes/VM/Callable.h"
@@ -16,8 +17,10 @@
 #include "hermes/VM/PropertyAccessor.h"
 #include "hermes/VM/Runtime-inline.h"
 #include "hermes/VM/RuntimeModule-inline.h"
+#include "hermes/VM/SerializedLiteralOperations.h"
 #include "hermes/VM/StackFrame-inline.h"
 #include "hermes/VM/StringPrimitive.h"
+#include "hermes/VM/StringPrimitiveValueDenseMapInfo-inline.h"
 
 #include "Interpreter-internal.h"
 
@@ -44,6 +47,10 @@ HERMES_SLOW_STATISTIC(
     "NumGetByIdSlow: Number of property 'read by id' slow path");
 
 HERMES_SLOW_STATISTIC(
+    NumGetByValStr,
+    "NumGetByValStr: Number of GetByVal _,StringPrimitive,_");
+
+HERMES_SLOW_STATISTIC(
     NumPutByIdCacheEvicts,
     "NumPutByIdCacheEvicts: Number of property 'write by id' cache evictions");
 HERMES_SLOW_STATISTIC(
@@ -52,6 +59,8 @@ HERMES_SLOW_STATISTIC(
 HERMES_SLOW_STATISTIC(
     NumPutByIdTransient,
     "NumPutByIdTransient: Number of property 'write by id' to non-objects");
+
+HERMES_SLOW_STATISTIC(NumPutByVal, "NumPutByVal: Number of PutByVal");
 
 namespace hermes {
 namespace vm {
@@ -92,11 +101,8 @@ ExecutionStatus Interpreter::caseCreateClass(
   auto classRes = createClass(
       runtime,
       funcIdxAndSuper.second,
-      [&runtime,
-       frameRegs,
-       ip,
-       funcIdx = funcIdxAndSuper.first,
-       super = funcIdxAndSuper.second](Handle<JSObject> ctorParent) {
+      [&runtime, frameRegs, ip, funcIdx = funcIdxAndSuper.first](
+          Handle<JSObject> ctorParent) {
         CodeBlock *curCodeBlock =
             runtime.getCurrentFrame().getCalleeCodeBlock();
         auto *runtimeModule = curCodeBlock->getRuntimeModule();
@@ -104,22 +110,13 @@ ExecutionStatus Interpreter::caseCreateClass(
         auto envHandle = O3REG(CreateBaseClass).isUndefined()
             ? Runtime::makeNullHandle<Environment>()
             : Handle<Environment>::vmcast(&O3REG(CreateBaseClass));
-        // Derived classes get their own special CellKind.
-        return super->isEmpty()
-            ? JSFunction::create(
-                  runtime,
-                  runtimeModule->getDomain(runtime),
-                  ctorParent,
-                  envHandle,
-                  runtimeModule->getCodeBlockMayAllocate(funcIdx))
-                  .get()
-            : JSDerivedClass::create(
-                  runtime,
-                  runtimeModule->getDomain(runtime),
-                  ctorParent,
-                  envHandle,
-                  runtimeModule->getCodeBlockMayAllocate(funcIdx))
-                  .get();
+        return JSClass::create(
+                   runtime,
+                   runtimeModule->getDomain(runtime),
+                   ctorParent,
+                   envHandle,
+                   runtimeModule->getCodeBlockMayAllocate(funcIdx))
+            .get();
       });
   if (LLVM_UNLIKELY(classRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
@@ -128,6 +125,63 @@ ExecutionStatus Interpreter::caseCreateClass(
   O2REG(CreateBaseClass) = HermesValue::encodeObjectValue(classRes->second);
   // Write the result last in case it is the same register as the prototype.
   O1REG(CreateBaseClass) = HermesValue::encodeObjectValue(classRes->first);
+  return ExecutionStatus::RETURNED;
+}
+
+ExecutionStatus Interpreter::caseCreatePrivateName(
+    Runtime &runtime,
+    PinnedHermesValue *frameRegs,
+    const Inst *ip) {
+  CodeBlock *curCodeBlock = runtime.getCurrentFrame().getCalleeCodeBlock();
+  auto *descStr = runtime.getIdentifierTable().getStringPrim(
+      runtime, ID(ip->iCreatePrivateName.op2));
+  struct : public Locals {
+    PinnedValue<StringPrimitive> desc;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
+  lv.desc = descStr;
+  auto symbolRes =
+      runtime.getIdentifierTable().createNotUniquedSymbol(runtime, lv.desc);
+  if (LLVM_UNLIKELY(symbolRes == ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+  O1REG(CreatePrivateName) = HermesValue::encodeSymbolValue(*symbolRes);
+  return ExecutionStatus::RETURNED;
+}
+
+ExecutionStatus Interpreter::casePrivateIsIn(
+    Runtime &runtime,
+    PinnedHermesValue *frameRegs,
+    CodeBlock *curCodeBlock,
+    const Inst *ip) {
+  if (!LLVM_LIKELY(O3REG(PrivateIsIn).isObject())) {
+    return runtime.raiseTypeError("right operand of 'in' is not an object");
+  }
+  NamedPropertyDescriptor desc;
+  auto res = JSObject::getOwnNamedDescriptor(
+      Handle<JSObject>::vmcast(&O3REG(PrivateIsIn)),
+      runtime,
+      O2REG(PrivateIsIn).getSymbol(),
+      desc);
+  assert(
+      !res ||
+      desc.flags.privateName &&
+          "if a property exists here it should be a private property.");
+  auto *obj = vmcast<JSObject>(O3REG(PrivateIsIn));
+  auto cacheIdx = ip->iPrivateIsIn.op4;
+  // We want to be able to cache negative results here, as in cache the answer
+  // that an object with a given HC does not contain a property. However, in
+  // dictionary mode the HC wouldn't change even if the object subsequently gets
+  // the private property added to it. So we must disable caching when the HC is
+  // a dictionary.
+  if (cacheIdx != hbc::PROPERTY_CACHING_DISABLED &&
+      !obj->getClass(runtime)->isDictionary()) {
+    auto *cacheEntry = curCodeBlock->getPrivateNameCacheEntry(cacheIdx);
+    cacheEntry->clazz = obj->getClassGCPtr();
+    SymbolID nameSym = O2REG(PrivateIsIn).getSymbol();
+    cacheEntry->nameVal = nameSym;
+    cacheEntry->slot = res;
+  }
+  O1REG(PrivateIsIn) = HermesValue::encodeBoolValue(res);
   return ExecutionStatus::RETURNED;
 }
 
@@ -156,6 +210,59 @@ ExecutionStatus Interpreter::caseDirectEval(
     return ExecutionStatus::EXCEPTION;
 
   *result = *cr;
+  return ExecutionStatus::RETURNED;
+}
+
+ExecutionStatus Interpreter::defineOwnByIdSlowPath(
+    Runtime &runtime,
+    SmallHermesValue valueToStore,
+    CodeBlock *curCodeBlock,
+    PinnedHermesValue *frameRegs,
+    const inst::Inst *ip) {
+  uint32_t idVal;
+  if (ip->opCode == inst::OpCode::DefineOwnByIdLong) {
+    idVal = ip->iDefineOwnByIdLong.op4;
+  } else {
+    assert(
+        ip->opCode == inst::OpCode::DefineOwnById &&
+        "unrecognized opcode in defineOwnById slow path");
+    idVal = ip->iDefineOwnById.op4;
+  }
+  auto *obj = vmcast<JSObject>(O1REG(DefineOwnById));
+  auto cacheIdx = ip->iDefineOwnById.op3;
+  auto *cacheEntry = curCodeBlock->getWriteCacheEntry(cacheIdx);
+  CompressedPointer clazzPtr{obj->getClassGCPtr()};
+  auto id = ID(idVal);
+  NamedPropertyDescriptor desc;
+  OptValue<bool> hasOwnProp =
+      JSObject::tryGetOwnNamedDescriptorFast(obj, runtime, id, desc);
+  if (LLVM_LIKELY(hasOwnProp.hasValue() && hasOwnProp.getValue()) &&
+      !desc.flags.accessor && desc.flags.writable &&
+      !desc.flags.internalSetter) {
+    // We can only cache if this is not a dictionary and we have an
+    // enabled cache index.
+    HiddenClass *clazz = vmcast<HiddenClass>(clazzPtr.getNonNull(runtime));
+    if (LLVM_LIKELY(!clazz->isDictionaryNoCache()) &&
+        LLVM_LIKELY(cacheIdx != hbc::PROPERTY_CACHING_DISABLED) &&
+        LLVM_LIKELY(desc.slot <= WritePropertyCacheEntry::kMaxSlot)) {
+      cacheEntry->clazz = clazzPtr;
+      cacheEntry->setSlot(desc.slot);
+    }
+    // This must be valid because an own property was already found.
+    JSObject::setNamedSlotValueUnsafe(obj, runtime, desc.slot, valueToStore);
+    return ExecutionStatus::RETURNED;
+  }
+
+  auto putRes = JSObject::defineOwnProperty(
+      Handle<JSObject>::vmcast(&O1REG(PutByIdLoose)),
+      runtime,
+      id,
+      DefinePropertyFlags::getDefaultNewPropertyFlags(),
+      Handle<>(&O2REG(PutByIdLoose)),
+      DEFAULT_PROP_OP_FLAGS(true));
+  if (LLVM_UNLIKELY(putRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
   return ExecutionStatus::RETURNED;
 }
 
@@ -207,7 +314,8 @@ ExecutionStatus Interpreter::caseDefineOwnGetterSetterByVal(
              runtime,
              Handle<>(&O2REG(DefineOwnGetterSetterByVal)),
              dpFlags,
-             accessor)
+             accessor,
+             PropOpFlags().plusThrowOnError())
       .getStatus();
 }
 
@@ -372,7 +480,7 @@ ExecutionStatus Interpreter::caseGetPNameList(
   } lv;
   LocalsRAII lraii{runtime, &lv};
 
-  lv.obj = vmcast<JSObject>(O2REG(GetPNameList));
+  lv.obj.castAndSetHermesValue<JSObject>(O2REG(GetPNameList));
   uint32_t beginIndex;
   uint32_t endIndex;
   MutableHandle<JSObject> obj{lv.obj};
@@ -380,7 +488,7 @@ ExecutionStatus Interpreter::caseGetPNameList(
   if (LLVM_UNLIKELY(cr == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  Handle<BigStorage> arr = *cr;
+  Handle<ArrayStorageSmall> arr = *cr;
   O3REG(GetPNameList) = HermesValue::encodeTrustedNumberValue(beginIndex);
   O4REG(GetPNameList) = HermesValue::encodeTrustedNumberValue(endIndex);
   // Write the result last in case it is the same register as one of the in/out
@@ -402,10 +510,10 @@ ExecutionStatus Interpreter::caseGetNextPName(
   LocalsRAII lraii{runtime, &lv};
 
   assert(
-      vmisa<BigStorage>(O2REG(GetNextPName)) &&
-      "GetNextPName's second op must be BigStorage");
+      vmisa<ArrayStorageSmall>(O2REG(GetNextPName)) &&
+      "GetNextPName's second op must be ArrayStorageSmall");
   auto obj = Handle<JSObject>::vmcast(&O3REG(GetNextPName));
-  auto arr = Handle<BigStorage>::vmcast(&O2REG(GetNextPName));
+  auto arr = Handle<ArrayStorageSmall>::vmcast(&O2REG(GetNextPName));
   uint32_t idx = O4REG(GetNextPName).getNumber();
   uint32_t size = O5REG(GetNextPName).getNumber();
 
@@ -413,10 +521,11 @@ ExecutionStatus Interpreter::caseGetNextPName(
   uint32_t startIdx = 0;
   uint32_t numObjProps = 0;
   if (LLVM_LIKELY(size > 2)) {
-    lv.cachedClass = dyn_vmcast<HiddenClass>(arr->at(runtime, 2));
-    if (lv.cachedClass.get()) {
-      startIdx = arr->at(runtime, 0).getNumberAs<uint32_t>();
-      numObjProps = arr->at(runtime, 1).getNumberAs<uint32_t>();
+    auto clazzSHV = arr->at(2);
+    if (clazzSHV.isObject()) {
+      lv.cachedClass = vmcast<HiddenClass>(clazzSHV.getObject(runtime));
+      startIdx = arr->at(0).getNumberAs<uint32_t>(runtime);
+      numObjProps = arr->at(1).getNumberAs<uint32_t>(runtime);
     }
   }
 
@@ -424,7 +533,6 @@ ExecutionStatus Interpreter::caseGetNextPName(
   MutableHandle<SymbolID> tmpPropNameStorage{lv.tmpPropNameStorage};
   // Loop until we find a property which is present.
   while (LLVM_LIKELY(idx < size)) {
-    lv.tmp = arr->at(runtime, idx);
     // If there's no caching, lv.cachedClass is nullptr and the comparison will
     // fail.
     if (LLVM_LIKELY(size > 0) && idx - startIdx < numObjProps &&
@@ -433,19 +541,21 @@ ExecutionStatus Interpreter::caseGetNextPName(
       propObj = obj;
       break;
     }
-    if (lv.tmp->isSymbol()) {
+    auto tmpSHV = arr->at(idx);
+    if (tmpSHV.isSymbol()) {
       // NOTE: This call is safe because we immediately discard desc,
       // so it can't outlive the SymbolID.
       NamedPropertyDescriptor desc;
       propObj = JSObject::getNamedDescriptorUnsafe(
-          obj, runtime, lv.tmp->getSymbol(), desc);
+          obj, runtime, tmpSHV.getSymbol(), desc);
     } else {
       assert(
-          (lv.tmp->isNumber() || lv.tmp->isString()) &&
+          (tmpSHV.isNumber() || tmpSHV.isString()) &&
           "GetNextPName must be symbol, string, number");
-      ComputedPropertyDescriptor desc;
+      ComputedPropertyDescWithSymStorage desc{tmpPropNameStorage};
+      lv.tmp = tmpSHV.unboxToHV(runtime);
       ExecutionStatus status = JSObject::getComputedPrimitiveDescriptor(
-          obj, runtime, lv.tmp, propObj, tmpPropNameStorage, desc);
+          obj, runtime, lv.tmp, propObj, desc);
       if (LLVM_UNLIKELY(status == ExecutionStatus::EXCEPTION)) {
         return ExecutionStatus::EXCEPTION;
       }
@@ -455,14 +565,15 @@ ExecutionStatus Interpreter::caseGetNextPName(
     ++idx;
   }
   if (LLVM_LIKELY(idx < size)) {
+    auto tmpSHV = arr->at(idx);
     // We must return the property as a string
-    if (lv.tmp->isNumber()) {
-      auto strRes = numberToStringPrimitive(runtime, lv.tmp->getNumber());
+    if (tmpSHV.isNumber()) {
+      auto strRes = numberToStringPrimitive(runtime, tmpSHV.getNumber(runtime));
       if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION)) {
         return ExecutionStatus::EXCEPTION;
       }
       lv.tmp = strRes->getHermesValue();
-    } else if (LLVM_LIKELY(lv.tmp->isSymbol())) {
+    } else if (LLVM_LIKELY(tmpSHV.isSymbol())) {
       // for-in enumeration only returns numbers and strings.
       // In most cases (i.e. non-Proxy), we keep the symbol around instead
       // and convert here, so that the above getNamedDescriptor call is faster.
@@ -470,11 +581,15 @@ ExecutionStatus Interpreter::caseGetNextPName(
       // So we don't have to check isUniqued and can convert to string
       // unconditionally.
       assert(
-          lv.tmp->getSymbol().isUniqued() &&
+          tmpSHV.getSymbol().isUniqued() &&
           "Symbol primitives (non-uniqued) can't be used in for-in, "
           "not even by Proxy");
       lv.tmp = HermesValue::encodeStringValue(
-          runtime.getStringPrimFromSymbolID(lv.tmp->getSymbol()));
+          runtime.getStringPrimFromSymbolID(tmpSHV.getSymbol()));
+    } else {
+      assert(
+          tmpSHV.isString() && "GetNextPName must be symbol, string, number");
+      lv.tmp = vm::HermesValue::encodeStringValue(tmpSHV.getString(runtime));
     }
     O4REG(GetNextPName) = HermesValue::encodeTrustedNumberValue(idx + 1);
     // Write the result last in case it is the same register as O4REG.
@@ -568,11 +683,14 @@ ExecutionStatus Interpreter::caseDelByVal(
   return ExecutionStatus::RETURNED;
 }
 
-PseudoHandle<> Interpreter::getByValTransientFast(
-    Runtime &runtime,
-    Handle<> base,
-    Handle<> nameHandle) {
+/// Fast path for getByValTransient() -- avoid boxing for \p base if it is
+/// string primitive and \p nameHandle is an array index.
+/// If the property does not exist, return Empty.
+static inline PseudoHandle<>
+getByValTransientFast(Runtime &runtime, Handle<> base, Handle<> nameHandle) {
   if (base->isString()) {
+    ++NumGetByValStr;
+
     // Handle most common fast path -- array index property for string
     // primitive.
     // Since primitive string cannot have index like property we can
@@ -686,6 +804,7 @@ ExecutionStatus Interpreter::casePutByVal(
     Runtime &runtime,
     PinnedHermesValue *frameRegs,
     const inst::Inst *ip) {
+  ++NumPutByVal;
   bool strictMode = (ip->opCode == inst::OpCode::PutByValStrict);
   if (LLVM_LIKELY(O1REG(PutByValLoose).isObject())) {
     auto defaultPropOpFlags = DEFAULT_PROP_OP_FLAGS(strictMode);
@@ -826,7 +945,7 @@ CallResult<HermesValue> Interpreter::createThisImpl(
   // return the property.
   if (LLVM_LIKELY(cacheEntry->clazz == clazzPtr)) {
     auto shvPrototype = JSObject::getNamedSlotValueUnsafe(
-        *lv.newTarget, runtime, cacheEntry->slot);
+        *lv.newTarget, runtime, cacheEntry->getSlot());
     if (LLVM_LIKELY(shvPrototype.isObject())) {
       lv.newTargetPrototype = vmcast<JSObject>(shvPrototype.getObject(runtime));
     } else {
@@ -844,7 +963,8 @@ CallResult<HermesValue> Interpreter::createThisImpl(
       return ExecutionStatus::EXCEPTION;
     }
     if ((*newTargetProtoRes)->isObject()) {
-      lv.newTargetPrototype = vmcast<JSObject>(newTargetProtoRes->get());
+      lv.newTargetPrototype.castAndSetHermesValue<JSObject>(
+          newTargetProtoRes->get());
     } else {
       lv.newTargetPrototype = runtime.objectPrototype;
     }
@@ -1334,7 +1454,8 @@ ExecutionStatus doGetByIdSlowPath_RJS(
     // those cases.
     HiddenClass *clazz = vmcast<HiddenClass>(clazzPtr.getNonNull(runtime));
     if (LLVM_LIKELY(!clazz->isDictionaryNoCache()) &&
-        LLVM_LIKELY(cacheIdx != hbc::PROPERTY_CACHING_DISABLED)) {
+        LLVM_LIKELY(cacheIdx != hbc::PROPERTY_CACHING_DISABLED) &&
+        LLVM_LIKELY(desc.slot <= ReadPropertyCacheEntry::kMaxSlot)) {
 #ifdef HERMES_SLOW_DEBUG
       if (cacheEntry->clazz && cacheEntry->clazz != clazzPtr)
         ++NumGetByIdCacheEvicts;
@@ -1343,7 +1464,7 @@ ExecutionStatus doGetByIdSlowPath_RJS(
 #endif
       // Cache the class, id and property slot.
       cacheEntry->clazz = clazzPtr;
-      cacheEntry->slot = desc.slot;
+      cacheEntry->setSlot(desc.slot);
     }
 
     assert(
@@ -1412,10 +1533,14 @@ ExecutionStatus doGetByIdSlowPath_RJS(
   return ExecutionStatus::RETURNED;
 }
 
-inline PseudoHandle<> Interpreter::tryGetPrimitiveOwnPropertyById(
-    Runtime &runtime,
-    Handle<> base,
-    SymbolID id) {
+/// Fast path to get primitive value \p base's own properties by name \p id
+/// without boxing.
+/// Primitive own properties are properties fetching values from primitive
+/// value itself.
+/// Currently the only primitive own property is String.prototype.length.
+/// If the fast path property does not exist, return Empty.
+static inline PseudoHandle<>
+tryGetPrimitiveOwnPropertyById(Runtime &runtime, Handle<> base, SymbolID id) {
   if (base->isString() && id == Predefined::getSymbolID(Predefined::length)) {
     return createPseudoHandle(HermesValue::encodeTrustedNumberValue(
         base->getString()->getStringLength()));
@@ -1610,25 +1735,39 @@ ExecutionStatus doPutByIdSlowPath_RJS(
     uint32_t idVal,
     bool strictMode,
     bool tryProp) {
-  auto id = ID(idVal);
-  if (LLVM_UNLIKELY(!O1REG(PutByIdLoose).isObject())) {
+  return Interpreter::putByIdSlowPath_RJS(
+      runtime,
+      curCodeBlock,
+      &O1REG(PutByIdLoose),
+      &O2REG(PutByIdLoose),
+      ip->iPutByIdLoose.op3,
+      ID(idVal),
+      strictMode,
+      tryProp);
+}
+
+ExecutionStatus Interpreter::putByIdSlowPath_RJS(
+    Runtime &runtime,
+    CodeBlock *curCodeBlock,
+    PinnedHermesValue *base,
+    PinnedHermesValue *value,
+    uint8_t cacheIdx,
+    SymbolID id,
+    bool strictMode,
+    bool tryProp) {
+  if (LLVM_UNLIKELY(!base->isObject())) {
     ++NumPutByIdTransient;
     assert(!tryProp && "TryPutById can only be used on the global object");
     auto retStatus = Interpreter::putByIdTransient_RJS(
-        runtime,
-        Handle<>(&O1REG(PutByIdLoose)),
-        ID(idVal),
-        Handle<>(&O2REG(PutByIdLoose)),
-        strictMode);
+        runtime, Handle<>(base), id, Handle<>(value), strictMode);
     if (retStatus == ExecutionStatus::EXCEPTION) {
       return ExecutionStatus::EXCEPTION;
     }
     return ExecutionStatus::RETURNED;
   }
 
-  auto shv = SmallHermesValue::encodeHermesValue(O2REG(PutByIdLoose), runtime);
-  auto *obj = vmcast<JSObject>(O1REG(PutByIdLoose));
-  auto cacheIdx = ip->iPutByIdLoose.op3;
+  auto shv = SmallHermesValue::encodeHermesValue(*value, runtime);
+  auto *obj = vmcast<JSObject>(*base);
   auto *cacheEntry = curCodeBlock->getWriteCacheEntry(cacheIdx);
   CompressedPointer clazzPtr{obj->getClassGCPtr()};
 
@@ -1643,8 +1782,9 @@ ExecutionStatus doPutByIdSlowPath_RJS(
     // cacheIdx == 0 indicates no caching so don't update the cache in
     // those cases.
     HiddenClass *clazz = vmcast<HiddenClass>(clazzPtr.getNonNull(runtime));
-    if (LLVM_LIKELY(!clazz->isDictionary()) &&
-        LLVM_LIKELY(cacheIdx != hbc::PROPERTY_CACHING_DISABLED)) {
+    if (LLVM_LIKELY(!clazz->isDictionaryNoCache()) &&
+        LLVM_LIKELY(cacheIdx != hbc::PROPERTY_CACHING_DISABLED) &&
+        LLVM_LIKELY(desc.slot <= WritePropertyCacheEntry::kMaxSlot)) {
 #ifdef HERMES_SLOW_DEBUG
       if (cacheEntry->clazz && cacheEntry->clazz != clazzPtr)
         ++NumPutByIdCacheEvicts;
@@ -1652,8 +1792,9 @@ ExecutionStatus doPutByIdSlowPath_RJS(
       (void)NumPutByIdCacheEvicts;
 #endif
       // Cache the class and property slot.
+      // Preserve the addCacheIndex if the slot hasn't changed.
       cacheEntry->clazz = clazzPtr;
-      cacheEntry->slot = desc.slot;
+      cacheEntry->setSlot(desc.slot);
     }
 
     // This must be valid because an own property was already found.
@@ -1662,15 +1803,248 @@ ExecutionStatus doPutByIdSlowPath_RJS(
   }
   const PropOpFlags defaultPropOpFlags = DEFAULT_PROP_OP_FLAGS(strictMode);
   auto putRes = JSObject::putNamed_RJS(
-      Handle<JSObject>::vmcast(&O1REG(PutByIdLoose)),
+      Handle<JSObject>::vmcast(base),
       runtime,
       id,
-      Handle<>(&O2REG(PutByIdLoose)),
-      !tryProp ? defaultPropOpFlags : defaultPropOpFlags.plusMustExist());
+      Handle<>(value),
+      !tryProp ? defaultPropOpFlags : defaultPropOpFlags.plusMustExist(),
+      cacheIdx != hbc::PROPERTY_CACHING_DISABLED
+          ? curCodeBlock->getRuntimeModule()
+          : nullptr,
+      /* unit */ nullptr,
+      cacheIdx != hbc::PROPERTY_CACHING_DISABLED ? cacheEntry : nullptr);
   if (LLVM_UNLIKELY(putRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   return ExecutionStatus::RETURNED;
+}
+
+CallResult<HiddenClass *> Interpreter::getHiddenClassForBuffer(
+    Runtime &runtime,
+    CodeBlock *curCodeBlock,
+    Handle<JSObject> parent,
+    unsigned shapeTableIndex) {
+  RuntimeModule *runtimeModule = curCodeBlock->getRuntimeModule();
+  HiddenClass *clazz;
+  if (auto *cachedClazz = runtimeModule->findCachedLiteralHiddenClass(
+          runtime, shapeTableIndex)) {
+    clazz = cachedClazz;
+  } else {
+    const auto *shapeInfo =
+        &runtimeModule->getBytecode()->getObjectShapeTable()[shapeTableIndex];
+    auto *rootClazz = *runtime.getHiddenClassForPrototype(
+        *parent, JSObject::numOverlapSlots<JSObject>());
+
+    // Ensure that the hidden class does not start out with any properties, so
+    // we just need to check the shape table entry.
+    assert(rootClazz->getNumProperties() == 0);
+    if (shapeInfo->numProps > HiddenClass::maxNumProperties()) {
+      return runtime.raiseRangeError(
+          TwineChar16("Object has more than ") +
+          HiddenClass::maxNumProperties() + " properties");
+    }
+
+    auto keyBuffer = runtimeModule->getBytecode()->getObjectKeyBuffer().slice(
+        shapeInfo->keyBufferOffset);
+
+    clazz = addBufferPropertiesToHiddenClass(
+        runtime,
+        keyBuffer,
+        shapeInfo->numProps,
+        rootClazz,
+        [runtimeModule](StringID id) {
+          return runtimeModule->getSymbolIDMustExist(id);
+        });
+
+    assert(
+        shapeInfo->numProps == clazz->getNumProperties() &&
+        "numLiterals should match hidden class property count.");
+    // Dictionary mode classes cannot be cached since they can change as the
+    // resulting object is modified.
+    if (LLVM_LIKELY(!clazz->isDictionary())) {
+      runtimeModule->setCachedLiteralHiddenClass(
+          runtime, shapeTableIndex, clazz);
+    }
+  }
+
+  return clazz;
+}
+
+CallResult<PseudoHandle<>> Interpreter::createObjectFromBuffer(
+    Runtime &runtime,
+    CodeBlock *curCodeBlock,
+    Handle<JSObject> parent,
+    unsigned shapeTableIndex,
+    unsigned valBufferOffset) {
+  struct : public Locals {
+    PinnedValue<JSObject> obj;
+    PinnedValue<HiddenClass> clazz;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  CallResult<HiddenClass *> clazzRes =
+      getHiddenClassForBuffer(runtime, curCodeBlock, parent, shapeTableIndex);
+  if (LLVM_UNLIKELY(clazzRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.clazz = *clazzRes;
+
+  // Create a new object using the built-in constructor or cached hidden class.
+  // Note that the built-in constructor is empty, so we don't actually need to
+  // call it.
+  lv.obj = JSObject::create(runtime, parent, lv.clazz).get();
+  auto numLiterals = lv.clazz->getNumProperties();
+
+  // Set up the visitor to populate property values in the object.
+  struct {
+    void visitStringID(StringID id) {
+      auto shv = SmallHermesValue::encodeStringValue(
+          runtimeModule->getStringPrimFromStringIDMayAllocate(id), runtime);
+      JSObject::setNamedSlotValueUnsafe(*obj, runtime, propIndex++, shv);
+    }
+    void visitNumber(double d) {
+      auto shv = SmallHermesValue::encodeNumberValue(d, runtime);
+      JSObject::setNamedSlotValueUnsafe(*obj, runtime, propIndex++, shv);
+    }
+    void visitNull() {
+      static constexpr auto shv = SmallHermesValue::encodeNullValue();
+      JSObject::setNamedSlotValueUnsafe(*obj, runtime, propIndex++, shv);
+    }
+    void visitUndefined() {
+      static constexpr auto shv = SmallHermesValue::encodeUndefinedValue();
+      JSObject::setNamedSlotValueUnsafe(*obj, runtime, propIndex++, shv);
+    }
+    void visitBool(bool b) {
+      auto shv = SmallHermesValue::encodeBoolValue(b);
+      JSObject::setNamedSlotValueUnsafe(*obj, runtime, propIndex++, shv);
+    }
+
+    Handle<JSObject> obj;
+    Runtime &runtime;
+    RuntimeModule *runtimeModule;
+    size_t propIndex;
+  } v{lv.obj, runtime, curCodeBlock->getRuntimeModule(), 0};
+
+  // Visit each value in the given buffer, and set it in the object.
+  SerializedLiteralParser::parse(
+      curCodeBlock->getRuntimeModule()
+          ->getBytecode()
+          ->getLiteralValueBuffer()
+          .slice(valBufferOffset),
+      numLiterals,
+      v);
+
+  return createPseudoHandle(lv.obj.getHermesValue());
+}
+
+ExecutionStatus Interpreter::caseNewObjectWithBufferAndParent(
+    Runtime &runtime,
+    PinnedHermesValue *frameRegs,
+    CodeBlock *curCodeBlock,
+    const inst::Inst *ip) {
+  Handle<JSObject> parent = O2REG(NewObjectWithParent).isObject()
+      ? Handle<JSObject>::vmcast(&O2REG(NewObjectWithParent))
+      : O2REG(NewObjectWithParent).isNull()
+      ? Runtime::makeNullHandle<JSObject>()
+      : Handle<JSObject>::vmcast(&runtime.objectPrototype);
+  auto res = createObjectFromBuffer(
+      runtime,
+      curCodeBlock,
+      parent,
+      ip->iNewObjectWithBufferAndParent.op3,
+      ip->iNewObjectWithBufferAndParent.op4);
+  if (res == ExecutionStatus::EXCEPTION)
+    return ExecutionStatus::EXCEPTION;
+  O1REG(NewObjectWithBufferAndParent) = res->getHermesValue();
+  return ExecutionStatus::RETURNED;
+}
+
+CallResult<PseudoHandle<>> Interpreter::createArrayFromBuffer(
+    Runtime &runtime,
+    CodeBlock *curCodeBlock,
+    unsigned numElements,
+    unsigned numLiterals,
+    unsigned bufferIndex) {
+  // Create a new array using the built-in constructor, and initialize
+  // the elements from a literal array buffer.
+  auto arrRes = JSArray::create(runtime, numElements, numElements);
+  if (arrRes == ExecutionStatus::EXCEPTION) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  // Resize the array storage in advance.
+  Handle<JSArray> arr = runtime.makeHandle(std::move(*arrRes));
+  JSArray::setStorageEndIndex(arr, runtime, numElements);
+
+  // Set up the visitor to populate literal elements in the array.
+  struct {
+    void visitStringID(StringID id) {
+      auto shv = SmallHermesValue::encodeStringValue(
+          runtimeModule->getStringPrimFromStringIDMayAllocate(id), runtime);
+      JSArray::unsafeSetExistingElementAt(*arr, runtime, i++, shv);
+    }
+    void visitNumber(double d) {
+      auto shv = SmallHermesValue::encodeNumberValue(d, runtime);
+      JSArray::unsafeSetExistingElementAt(*arr, runtime, i++, shv);
+    }
+    void visitNull() {
+      constexpr auto shv = SmallHermesValue::encodeNullValue();
+      JSArray::unsafeSetExistingElementAt(*arr, runtime, i++, shv);
+    }
+    void visitUndefined() {
+      constexpr auto shv = SmallHermesValue::encodeUndefinedValue();
+      JSArray::unsafeSetExistingElementAt(*arr, runtime, i++, shv);
+    }
+    void visitBool(bool b) {
+      auto shv = SmallHermesValue::encodeBoolValue(b);
+      JSArray::unsafeSetExistingElementAt(*arr, runtime, i++, shv);
+    }
+
+    Handle<JSArray> arr;
+    Runtime &runtime;
+    RuntimeModule *runtimeModule;
+    JSArray::size_type i;
+  } v{arr, runtime, curCodeBlock->getRuntimeModule(), 0};
+
+  // Visit each serialized value in the given buffer.
+  SerializedLiteralParser::parse(
+      curCodeBlock->getRuntimeModule()
+          ->getBytecode()
+          ->getLiteralValueBuffer()
+          .slice(bufferIndex),
+      numLiterals,
+      v);
+
+  return createPseudoHandle(HermesValue::encodeObjectValue(*arr));
+}
+
+const Inst *doStringSwitchImm(
+    CodeBlock *curCodeBlock,
+    PinnedHermesValue *frameRegs,
+    const Inst *ip) {
+  if (LLVM_LIKELY(O1REG(StringSwitchImm).isString())) {
+    RuntimeModule *runtimeModule = curCodeBlock->getRuntimeModule();
+    auto *runtimeTables = runtimeModule->getStringSwitchImmTables();
+    assert(
+        ip->iStringSwitchImm.op2 < runtimeModule->numStringSwitchImmTables() &&
+        "String Switch index out of range.");
+    StringSwitchDenseMap &runtimeTable =
+        runtimeTables[ip->iStringSwitchImm.op2];
+    if (LLVM_UNLIKELY(runtimeTable.empty())) {
+      const auto *bytecodeTable =
+          reinterpret_cast<const hbc::StringSwitchTableCase *>(llvh::alignAddr(
+              (const uint8_t *)ip + ip->iStringSwitchImm.op3,
+              alignof(hbc::StringSwitchTableCase)));
+      runtimeModule->initializeStringSwitchImmTable(
+          runtimeTable, bytecodeTable, ip->iStringSwitchImm.op5);
+    }
+    StringPrimitive *strVal = O1REG(StringSwitchImm).getString();
+    auto iter = runtimeTable.find(strVal);
+    if (iter != runtimeTable.end()) {
+      return IPADD(iter->second.bytecodeOffset);
+    }
+  }
+  // Wrong type or not found, jump to default.
+  return IPADD(ip->iStringSwitchImm.op4);
 }
 
 } // namespace vm

@@ -29,7 +29,6 @@ set(RTSources
   GCBasicsTest.cpp
   GCFinalizerTest.cpp
   GCFragmentationTest.cpp
-  GCGuardPageNCTest.cpp
   GCInitTest.cpp
   GCLazySegmentNCTest.cpp
   GCObjectIterationTest.cpp
@@ -53,11 +52,12 @@ set(RTSources
   ObjectModelTest.cpp
   OperationsTest.cpp
   PredefinedStringsTest.cpp
+  PropertyCacheTest.cpp
+  ProfileGeneratorTest.cpp
   HandleTest.cpp
   RuntimeConfigTest.cpp
   SamplingHeapProfilerTest.cpp
   SamplingProfilerTest.cpp
-  SegmentedArrayTest.cpp
   SmallHermesValueTest.cpp
   SmallXStringTest.cpp
   StaticBuiltinsTest.cpp

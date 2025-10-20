@@ -127,13 +127,13 @@ void ESTreeIRGen::genClassDeclaration(ESTree::ClassDeclarationNode *node) {
   // Store the home object in a variable so that we can reference it later,
   // e.g. when we emit method calls.
   Variable *homeObjectVar = Builder.createVariable(
-      curFunction()->curScope->getVariableScope(),
+      curFunction()->curScope()->getVariableScope(),
       Builder.createIdentifier(
           llvh::Twine("?") + classType->getClassName().str() + ".prototype"),
       flowTypeToIRType(classType->getHomeObjectType()),
       /* hidden */ true);
   Builder.createStoreFrameInst(
-      curFunction()->curScope, homeObject, homeObjectVar);
+      curFunction()->curScope(), homeObject, homeObjectVar);
 
   // Check to make sure this is a valid class definition,
   // because there may have been errors.
@@ -203,7 +203,7 @@ CreateFunctionInst *ESTreeIRGen::genTypedImplicitConstructor(
                         funcInfo,
                         typedClassContext = curFunction()->typedClassContext,
                         parentScope =
-                            curFunction()->curScope->getVariableScope()] {
+                            curFunction()->curScope()->getVariableScope()] {
       FunctionContext newFunctionContext{this, func, funcInfo};
       newFunctionContext.typedClassContext = typedClassContext;
 
@@ -228,14 +228,14 @@ CreateFunctionInst *ESTreeIRGen::genTypedImplicitConstructor(
         compileFunc);
   }
 
-  return Builder.createCreateFunctionInst(curFunction()->curScope, func);
+  return Builder.createCreateFunctionInst(curFunction()->curScope(), func);
 }
 
 Value *ESTreeIRGen::emitTypedClassAllocation(
     flow::ClassType *classType,
     Value *parent) {
   // TODO: should create a sealed object, etc.
-  AllocObjectLiteralInst::ObjectPropertyMap propMap{};
+  AllocTypedObjectInst::ObjectPropertyMap propMap{};
   propMap.resize(classType->getFieldNameMap().size());
 
   // Generate code for each field, place it in the propMap.
@@ -277,25 +277,18 @@ Value *ESTreeIRGen::emitTypedClassAllocation(
         continue;
       }
     } else {
+      // Class element is a field.
+      // Need to emit an IDZ check for types that can't have a primitive
+      // default.
+      Value *initValue = flowTypeToIRType(field.type).canBePrimitive()
+          ? getDefaultInitValue(field.type)
+          : Builder.getLiteralUninit();
       propMap[field.layoutSlotIR] = {
-          Builder.getLiteralString(field.name),
-          getDefaultInitValue(field.type)};
+          Builder.getLiteralString(field.name), initValue};
     }
   }
 
-  // TODO: Have a specific instruction for allocating an object from a class
-  // that sets the parent, uses the prop map, etc.
-  Value *result;
-  if (propMap.empty()) {
-    result = Builder.createAllocObjectLiteralInst({}, parent);
-  } else {
-    result = Builder.createAllocObjectLiteralInst(propMap);
-    if (parent) {
-      // TODO: Ensure that parent is typed correctly as 'object'.
-      Builder.createTypedStoreParentInst(parent, result);
-    }
-  }
-  return result;
+  return Builder.createAllocTypedObjectInst(propMap, parent);
 }
 
 Value *ESTreeIRGen::getDefaultInitValue(flow::Type *type) {

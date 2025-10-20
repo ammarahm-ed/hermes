@@ -29,7 +29,8 @@ CallResult<HermesValue> evalInEnvironment(
     const CodeBlock *codeBlock,
     Handle<> thisArg,
     Handle<> newTarget,
-    bool singleFunction) {
+    bool singleFunction,
+    OptValue<uint32_t> lexicalScopeIdxInParentFunction) {
   if (!runtime.enableEval) {
     return runtime.raiseEvalUnsupported(utf8code);
   }
@@ -41,8 +42,8 @@ CallResult<HermesValue> evalInEnvironment(
   compileFlags.emitAsyncBreakCheck = runtime.asyncBreakCheckInEval;
   compileFlags.lazy =
       utf8code.size() >= compileFlags.preemptiveFileCompilationThreshold;
-  compileFlags.enableES6Classes = runtime.hasES6Class();
   compileFlags.enableES6BlockScoping = runtime.hasES6BlockScoping();
+  compileFlags.enableAsyncGenerators = runtime.hasAsyncGenerators();
   compileFlags.requireSingleFunction = singleFunction;
 #ifdef HERMES_ENABLE_DEBUGGER
   // Required to allow stepping and examining local variables in eval'd code
@@ -68,18 +69,27 @@ CallResult<HermesValue> evalInEnvironment(
 
     if (codeBlock) {
       assert(
+          lexicalScopeIdxInParentFunction &&
+          "lexical scope required for non-global eval");
+      assert(
           !singleFunction && "Function constructor must always be global eval");
       // Local eval.
       std::unique_ptr<hbc::BCProvider> newBCProvider;
       std::string error;
       executeInStack(
           runtime.getStackExecutor(),
-          [&newBCProvider, &error, &buffer, codeBlock, compileFlags]() {
+          [&newBCProvider,
+           &error,
+           &buffer,
+           codeBlock,
+           compileFlags,
+           lexicalScopeIdxInParentFunction]() {
             std::tie(newBCProvider, error) = hbc::compileEvalModule(
                 std::move(buffer),
                 codeBlock->getRuntimeModule()->getBytecode(),
                 codeBlock->getFunctionID(),
-                compileFlags);
+                compileFlags,
+                *lexicalScopeIdxInParentFunction);
           });
       if (!newBCProvider) {
         return runtime.raiseSyntaxError(llvh::StringRef(error));
@@ -145,10 +155,12 @@ CallResult<HermesValue> directEval(
       codeBlock,
       runtime.getGlobal(),
       Runtime::getUndefinedValue(),
-      singleFunction);
+      singleFunction,
+      /* lexScope */ llvh::None);
 }
 
-CallResult<HermesValue> eval(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> eval(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope(runtime);
 
   if (!args.getArg(0).isString()) {

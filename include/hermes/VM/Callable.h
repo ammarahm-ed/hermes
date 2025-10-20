@@ -340,8 +340,6 @@ class Callable : public JSObject {
       Handle<Environment> env)
       : JSObject(runtime, parent, clazz),
         environment_(runtime, *env, runtime.getHeap()) {}
-  Callable(Runtime &runtime, JSObject *parent, HiddenClass *clazz)
-      : JSObject(runtime, parent, clazz), environment_() {}
 
 #ifdef HERMES_MEMORY_INSTRUMENTATION
   static std::string _snapshotNameImpl(GCCell *cell, GC &gc);
@@ -413,10 +411,9 @@ class BoundFunction final : public Callable {
   /// Perform the actual call. This is a light-weight handler which is part of
   /// the private API - it is only used internally and by the interpreter.
   /// Other users of this class must use \c Callable::call().
-  /// \param ip the caller's IP at the point of the call (used for preserving
-  /// stack traces).
-  static CallResult<PseudoHandle<>>
-  _boundCall(BoundFunction *self, const Inst *ip, Runtime &runtime);
+  static CallResult<PseudoHandle<>> _boundCall(
+      BoundFunction *self,
+      Runtime &runtime);
 
   /// Initialize the length and name and property of a lazily created bound
   /// function.
@@ -438,14 +435,18 @@ class BoundFunction final : public Callable {
       Handle<HiddenClass> clazz,
       Handle<Callable> target,
       Handle<ArrayStorage> argStorage)
-      : Callable(runtime, *parent, *clazz),
+      : Callable(
+            runtime,
+            *parent,
+            *clazz,
+            Runtime::makeNullHandle<Environment>()),
         target_(runtime, *target, runtime.getHeap()),
         argStorage_(runtime, *argStorage, runtime.getHeap()) {}
 
  private:
   /// Return a pointer to the stored arguments, including \c this. \c this is
   /// at index 0, followed by the rest.
-  GCHermesValue *getArgsWithThis(PointerBase &runtime) {
+  ArrayStorage::iterator getArgsWithThis(PointerBase &runtime) {
     return argStorage_.getNonNull(runtime)->begin();
   }
 
@@ -453,11 +454,19 @@ class BoundFunction final : public Callable {
   static CallResult<PseudoHandle<>> _callImpl(
       Handle<Callable> selfHandle,
       Runtime &runtime);
+
+  /// Call a BoundFunction with arguments already on the stack, using the native
+  /// calling convention.
+  static HermesValue _jitCallImpl(Runtime *runtime, JSObject *self);
 };
 
 /// This class represents a native function callable from JavaScript with
 /// context and the JavaScript arguments.
 class NativeJSFunction : public Callable {
+  friend void NativeJSFunctionBuildMeta(
+      const GCCell *cell,
+      Metadata::Builder &mb);
+
  protected:
   /// Pointer to the actual code.
   const NativeJSFunctionPtr functionPtr_;
@@ -483,7 +492,7 @@ class NativeJSFunction : public Callable {
   static bool classof(const GCCell *cell) {
     switch (cell->getKind()) {
       case CellKind::NativeJSFunctionKind:
-      case CellKind::NativeJSDerivedClassKind:
+      case CellKind::NativeJSClassKind:
         return true;
       default:
         return false;
@@ -532,18 +541,6 @@ class NativeJSFunction : public Callable {
 
   /// Create an instance of NativeJSFunction.
   /// \param parentHandle object to use as [[Prototype]].
-  /// \param context the context to be passed to the function
-  /// \param functionPtr the native function
-  /// \param funcInfo pointer to the information describing the function.
-  static Handle<NativeJSFunction> create(
-      Runtime &runtime,
-      Handle<JSObject> parentHandle,
-      NativeJSFunctionPtr functionPtr,
-      const SHNativeFuncInfo *funcInfo,
-      const SHUnit *unit);
-
-  /// Create an instance of NativeJSFunction.
-  /// \param parentHandle object to use as [[Prototype]].
   /// \param parentEnvHandle the parent environment
   /// \param context the context to be passed to the function
   /// \param functionPtr the native function
@@ -574,17 +571,6 @@ class NativeJSFunction : public Callable {
       Runtime &runtime,
       Handle<JSObject> parent,
       Handle<HiddenClass> clazz,
-      NativeJSFunctionPtr functionPtr,
-      const SHNativeFuncInfo *funcInfo,
-      const SHUnit *unit)
-      : Callable(runtime, *parent, *clazz),
-        functionPtr_(functionPtr),
-        functionInfo_(funcInfo),
-        unit_(unit) {}
-  NativeJSFunction(
-      Runtime &runtime,
-      Handle<JSObject> parent,
-      Handle<HiddenClass> clazz,
       Handle<Environment> environment,
       NativeJSFunctionPtr functionPtr,
       const SHNativeFuncInfo *funcInfo,
@@ -604,6 +590,10 @@ class NativeJSFunction : public Callable {
       Handle<Callable> selfHandle,
       Runtime &runtime);
 
+  /// Call a NativeJSFunction with arguments already on the stack, using the
+  /// native calling convention.
+  static HermesValue _jitCallImpl(Runtime *runtime, JSObject *self);
+
  private:
   /// Dummy function for static asserts that may need private fields.
   static inline void staticAsserts() {
@@ -614,13 +604,13 @@ class NativeJSFunction : public Callable {
   }
 };
 
-/// This is a specific kind of NativeJSFunction: a derived class. Derived means
-/// that the class was declared with the "extends" keyword.
-class NativeJSDerivedClass : public NativeJSFunction {
+/// A NativeJSClass is a special kind of NativeJSFunction that is used to
+/// implement class constructors.
+class NativeJSClass : public NativeJSFunction {
   static constexpr auto kHasFinalizer = HasFinalizer::No;
 
  public:
-  NativeJSDerivedClass(
+  NativeJSClass(
       Runtime &runtime,
       Handle<JSObject> parent,
       Handle<HiddenClass> clazz,
@@ -639,14 +629,14 @@ class NativeJSDerivedClass : public NativeJSFunction {
   static const CallableVTable vt;
 
   static constexpr CellKind getCellKind() {
-    return CellKind::NativeJSDerivedClassKind;
+    return CellKind::NativeJSClassKind;
   }
   static bool classof(const GCCell *cell) {
-    return cell->getKind() == CellKind::NativeJSDerivedClassKind;
+    return cell->getKind() == CellKind::NativeJSClassKind;
   }
 
-  /// Create an instance of NativeJSDerivedClass.
-  static Handle<NativeJSDerivedClass> create(
+  /// Create an instance of NativeJSClass.
+  static Handle<NativeJSClass> create(
       Runtime &runtime,
       Handle<JSObject> parentHandle,
       Handle<Environment> parentEnvHandle,
@@ -657,11 +647,15 @@ class NativeJSDerivedClass : public NativeJSFunction {
 
 /// A pointer to native function.
 typedef CallResult<HermesValue> (
-    *NativeFunctionPtr)(void *context, Runtime &runtime, NativeArgs args);
+    *NativeFunctionPtr)(void *context, Runtime &runtime);
 
 /// This class represents a native function callable from JavaScript with
 /// context and the JavaScript arguments.
 class NativeFunction : public Callable {
+  friend void NativeFunctionBuildMeta(
+      const GCCell *cell,
+      Metadata::Builder &mb);
+
  protected:
   /// Context to be passed to the native function.
   void *const context_;
@@ -725,24 +719,22 @@ class NativeFunction : public Callable {
           Runtime::StackOverflowKind::NativeStack);
     }
 
-    runtime.saveCallerIPInStackFrame();
+    // Ensure the IP was correctly saved before we create the new frame.
+    runtime.validateSavedIPBeforeCall();
     auto newFrame = runtime.setCurrentFrameToTopOfStack();
-    // Allocate the "reserved" registers in the new frame.
-    if (LLVM_UNLIKELY(!runtime.checkAndAllocStack(
-            StackFrameLayout::CalleeExtraRegistersAtStart,
-            HermesValue::encodeUndefinedValue()))) {
-      // Restore the stack before raising the overflow.
-      runtime.restoreStackAndPreviousFrame(newFrame);
-      return runtime.raiseStackOverflow(
-          Runtime::StackOverflowKind::JSRegisterStack);
-    }
+    // We don't need to allocate CalleeExtraRegistersAtStart here because the
+    // only register is DebugEnvironment, which is not useful in a
+    // NativeFunction.
+    static_assert(
+        StackFrameLayout::FirstLocal - 1 ==
+            StackFrameLayout::DebugEnvironment &&
+        StackFrameLayout::CalleeExtraRegistersAtStart == 1);
 
 #ifdef HERMESVM_PROFILER_NATIVECALL
     auto t1 = HERMESVM_RDTSC();
 #endif
 
-    auto res =
-        self->functionPtr_(self->context_, runtime, newFrame.getNativeArgs());
+    auto res = self->functionPtr_(self->context_, runtime);
 
 #ifdef HERMESVM_PROFILER_NATIVECALL
     self->callDuration_ = HERMESVM_RDTSC() - t1;
@@ -754,25 +746,6 @@ class NativeFunction : public Callable {
     }
     return createPseudoHandle(*res);
   }
-
-  /// Create an instance of NativeFunction.
-  /// \param parentHandle object to use as [[Prototype]].
-  /// \param context the context to be passed to the function
-  /// \param functionPtr the native function
-  /// \param name the name property of the function.
-  /// \param paramCount number of parameters (excluding `this`)
-  /// \param prototypeObjectHandle if non-null, set as prototype property.
-  /// \param additionalSlotCount internal slots to reserve within the
-  /// object (defaults to zero).
-  static Handle<NativeFunction> create(
-      Runtime &runtime,
-      Handle<JSObject> parentHandle,
-      void *context,
-      NativeFunctionPtr functionPtr,
-      SymbolID name,
-      unsigned paramCount,
-      Handle<JSObject> prototypeObjectHandle,
-      unsigned additionalSlotCount = 0);
 
   /// Create an instance of NativeFunction.
   /// \param parentHandle object to use as [[Prototype]].
@@ -794,60 +767,6 @@ class NativeFunction : public Callable {
       unsigned paramCount,
       Handle<JSObject> prototypeObjectHandle,
       unsigned additionalSlotCount = 0);
-
-  /// Create an instance of NativeFunction.
-  /// The prototype property will be null.
-  /// \param parentHandle object to use as [[Prototype]].
-  /// \param context the context to be passed to the function
-  /// \param functionPtr the native function
-  /// \param name the name property of the function.
-  /// \param paramCount number of parameters (excluding `this`)
-  /// \param additionalSlotCount internal slots to reserve within the
-  /// object (defaults to zero).
-  static Handle<NativeFunction> createWithoutPrototype(
-      Runtime &runtime,
-      Handle<JSObject> parentHandle,
-      void *context,
-      NativeFunctionPtr functionPtr,
-      SymbolID name,
-      unsigned paramCount,
-      unsigned additionalSlotCount = 0) {
-    return create(
-        runtime,
-        parentHandle,
-        context,
-        functionPtr,
-        name,
-        paramCount,
-        runtime.makeNullHandle<JSObject>(),
-        additionalSlotCount);
-  }
-
-  /// Create an instance of NativeFunction
-  /// The [[Prototype]] will be Function.prototype.
-  /// The prototype property wil be null;
-  /// \param context the context to be passed to the function
-  /// \param functionPtr the native function
-  /// \param name the name property of the function.
-  /// \param paramCount number of parameters (excluding `this`)
-  /// \param additionalSlotCount internal slots to reserve within the
-  /// object (defaults to zero).
-  static Handle<NativeFunction> createWithoutPrototype(
-      Runtime &runtime,
-      void *context,
-      NativeFunctionPtr functionPtr,
-      SymbolID name,
-      unsigned paramCount,
-      unsigned additionalSlotCount = 0) {
-    return createWithoutPrototype(
-        runtime,
-        Handle<JSObject>::vmcast(&runtime.functionPrototype),
-        context,
-        functionPtr,
-        name,
-        paramCount,
-        additionalSlotCount);
-  }
 
   /// \return the value in an additional slot.
   /// \param index must be less than the \c additionalSlotCount passed to
@@ -872,16 +791,6 @@ class NativeFunction : public Callable {
         self, runtime, numOverlapSlots<NativeFunction>() + index, value);
   }
 
- public:
-  NativeFunction(
-      Runtime &runtime,
-      Handle<JSObject> parent,
-      Handle<HiddenClass> clazz,
-      void *context,
-      NativeFunctionPtr functionPtr)
-      : Callable(runtime, *parent, *clazz),
-        context_(context),
-        functionPtr_(functionPtr) {}
   NativeFunction(
       Runtime &runtime,
       Handle<JSObject> parent,
@@ -902,6 +811,10 @@ class NativeFunction : public Callable {
   static CallResult<PseudoHandle<>> _callImpl(
       Handle<Callable> selfHandle,
       Runtime &runtime);
+
+  /// Call a NativeFunction with arguments already on the stack, using the
+  /// native calling convention.
+  static HermesValue _jitCallImpl(Runtime *runtime, JSObject *self);
 };
 
 /// A NativeFunction to be used as a constructor for native objects other than
@@ -937,6 +850,7 @@ class NativeConstructor final : public NativeFunction {
         parentHandle,
         runtime.getHiddenClassForPrototype(
             *parentHandle, numOverlapSlots<NativeConstructor>()),
+        Runtime::makeNullHandle<Environment>(),
         context,
         functionPtr);
     return JSObjectInit::initToPseudoHandle(runtime, cell);
@@ -975,16 +889,6 @@ class NativeConstructor final : public NativeFunction {
       Runtime &runtime,
       Handle<Callable> newTarget,
       Handle<JSObject> nativeCtorProto);
-
- private:
- public:
-  NativeConstructor(
-      Runtime &runtime,
-      Handle<JSObject> parent,
-      Handle<HiddenClass> clazz,
-      void *context,
-      NativeFunctionPtr functionPtr)
-      : NativeFunction(runtime, parent, clazz, context, functionPtr) {}
 
   NativeConstructor(
       Runtime &runtime,
@@ -1126,6 +1030,10 @@ class JSFunction : public Callable {
       Handle<Callable> selfHandle,
       Runtime &runtime);
 
+  /// Call a JSFunction with arguments already on the stack, using the native
+  /// calling convention.
+  static HermesValue _jitCallImpl(Runtime *runtime, JSObject *self);
+
 #ifdef HERMES_MEMORY_INSTRUMENTATION
   static std::string _snapshotNameImpl(GCCell *cell, GC &gc);
   static void
@@ -1134,13 +1042,13 @@ class JSFunction : public Callable {
 #endif
 };
 
-/// This is a specific kind of JSFunction: a derived class. Derived means that
-/// the class was declared with the "extends" keyword.
-class JSDerivedClass : public JSFunction {
+/// A JSClass is a special kind of JSFunction that is used to implement class
+/// constructors.
+class JSClass : public JSFunction {
   static constexpr auto kHasFinalizer = HasFinalizer::No;
 
  public:
-  JSDerivedClass(
+  JSClass(
       Runtime &runtime,
       Handle<Domain> domain,
       Handle<JSObject> parent,
@@ -1151,13 +1059,13 @@ class JSDerivedClass : public JSFunction {
   static const CallableVTable vt;
 
   static constexpr CellKind getCellKind() {
-    return CellKind::JSDerivedClassKind;
+    return CellKind::JSClassKind;
   }
   static bool classof(const GCCell *cell) {
-    return cell->getKind() == CellKind::JSDerivedClassKind;
+    return cell->getKind() == CellKind::JSClassKind;
   }
-  /// Create an instance of JSDerivedClass.
-  static PseudoHandle<JSDerivedClass> create(
+  /// Create an instance of JSClass.
+  static PseudoHandle<JSClass> create(
       Runtime &runtime,
       Handle<Domain> domain,
       Handle<JSObject> parentHandle,

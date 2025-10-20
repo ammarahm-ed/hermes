@@ -85,6 +85,8 @@ emitReturnIterResultObject(IRBuilder &builder, Value *val, bool done) {
 /// be persisted between generator invocations is lifted to the outer function's
 /// environment.
 class LowerToStateMachine {
+  /// The module.
+  Module *M_;
   /// Outer generator function.
   GeneratorFunction *outer_;
   /// Inner generator function.
@@ -98,9 +100,6 @@ class LowerToStateMachine {
   BaseScopeInst *getParentOuterScope_;
   /// Builder used to generate IR.
   IRBuilder builder_;
-  /// Set to true if the resulting function contains try blocks. Used to decide
-  /// whether to run fixupCatchTargets.
-  bool resultContainsTrys_ = false;
 
   /// Represents the GeneratorState internal slot.
   /// ES6.0 25.3.2.
@@ -116,7 +115,8 @@ class LowerToStateMachine {
       Module *M,
       GeneratorFunction *outer,
       CreateGeneratorInst *CGI)
-      : outer_(outer),
+      : M_(M),
+        outer_(outer),
         inner_(llvh::cast<NormalFunction>(CGI->getFunctionCode())),
         CGI_(CGI),
         newOuterScope_(nullptr),
@@ -219,9 +219,7 @@ void LowerToStateMachine::convert() {
   // operations.
   moveCrossingValuesToOuter();
 
-  // If the result contains trys, fixup the throws.
-  if (resultContainsTrys_)
-    fixupCatchTargets(inner_);
+  fixupCatchTargets(inner_);
 }
 
 void LowerToStateMachine::setupScopes() {
@@ -589,10 +587,6 @@ void LowerToStateMachine::lowerToSwitch(
   // Before we modify anything, record the relationship of each block to its
   // enclosing try.
   auto blockToEnclosingTry = findEnclosingTrysPerBlock(inner_);
-  // If there are no existing trys, then we will not create a try of our own.
-  // Instead we simply let all exceptions bubble up out of the inner function,
-  // which is what should happen since there are no trys anywhere.
-  bool hasExistingTrys = blockToEnclosingTry.hasValue();
 
   // This is the main switch that will contain all target blocks of
   // SaveAndYieldInsts and all catch handlers of a try-catch.
@@ -638,6 +632,13 @@ void LowerToStateMachine::lowerToSwitch(
   builder_.createCondBranchInst(
       isExecuting, throwBecauseExecutingBB, checkIfCompletedBB);
 
+  // Transfer the EvalCompilationDataInst from the old beginning BB, if it
+  // exists.
+  if (auto *evalDataInst =
+          llvh::dyn_cast<EvalCompilationDataInst>(&oldBeginBB->front())) {
+    evalDataInst->moveBefore(&newBeginBB->front());
+  }
+
   builder_.setInsertionBlock(throwBecauseExecutingBB);
   builder_.createStoreFrameInst(
       getParentOuterScope_,
@@ -674,55 +675,44 @@ void LowerToStateMachine::lowerToSwitch(
 
   // This switch will be executed when an exception is thrown and is responsible
   // for setting up switchIdx to point to the correct block for the user catch
-  // handler.
+  // handler, or to just rethrow the exception if there is no user catch block.
   SwitchBuilder exceptionSwitch(builder_);
-  Variable *exceptionSwitchIdx = nullptr;
-  // This BB guards the entire execution of user blocks.
-  BasicBlock *surroundingCatchBB = nullptr;
   // The top level catch will propagate the caught error to the user
   // handlers via this value.
-  Variable *thrownValPlaceholder = nullptr;
+  Variable *thrownValPlaceholder = builder_.createVariable(
+      getParentOuterScope_->getVariableScope(),
+      "catchVal",
+      Type::createAnyType(),
+      /* hidden */ true);
   // The default case in the exception handler switch is to simply re-throw the
   // exception. Also mark the generator as completed.
-  BasicBlock *rethrowBB = nullptr;
-  size_t rethrowBBIdx = 0;
-  if (hasExistingTrys) {
-    thrownValPlaceholder = builder_.createVariable(
-        getParentOuterScope_->getVariableScope(),
-        "catchVal",
-        Type::createAnyType(),
-        /* hidden */ true);
-    rethrowBB = builder_.createBasicBlock(inner_);
-    builder_.setInsertionBlock(rethrowBB);
-    builder_.createStoreFrameInst(
-        getParentOuterScope_,
-        builder_.getLiteralNumber((uint8_t)State::Completed),
-        genState);
-    auto loadVal = builder_.createLoadFrameInst(
-        getParentOuterScope_, thrownValPlaceholder);
-    builder_.createThrowInst(loadVal);
-    rethrowBBIdx = exceptionSwitch.getBBIdx(rethrowBB);
-    builder_.setInsertionPoint(CGI_);
-    // Initialize the exception index to rethrow idx, which is equivalent to
-    // being outside of any try body.
-    exceptionSwitchIdx = builder_.createVariable(
-        getParentOuterScope_->getVariableScope(),
-        "exception_handler_idx",
-        Type::createInt32(),
-        /* hidden */ true);
-    builder_.createStoreFrameInst(
-        newOuterScope_,
-        builder_.getLiteralNumber(rethrowBBIdx),
-        exceptionSwitchIdx);
-    // Wrap execution of switch in a try.
-    builder_.setInsertionBlock(executeSwitchBB);
-    surroundingCatchBB = builder_.createBasicBlock(inner_);
-    builder_.createTryStartInst(userCodeSwitchBB, surroundingCatchBB);
-  } else {
-    // Don't wrap execution of switch in a try.
-    builder_.setInsertionBlock(executeSwitchBB);
-    builder_.createBranchInst(userCodeSwitchBB);
-  }
+  BasicBlock *rethrowBB = builder_.createBasicBlock(inner_);
+  builder_.setInsertionBlock(rethrowBB);
+  builder_.createStoreFrameInst(
+      getParentOuterScope_,
+      builder_.getLiteralNumber((uint8_t)State::Completed),
+      genState);
+  auto *loadVal =
+      builder_.createLoadFrameInst(getParentOuterScope_, thrownValPlaceholder);
+  builder_.createThrowInst(loadVal);
+  size_t rethrowBBIdx = exceptionSwitch.getBBIdx(rethrowBB);
+  builder_.setInsertionPoint(CGI_);
+  // Initialize the exception index to rethrow idx, which is equivalent to
+  // being outside of any try body.
+  Variable *exceptionSwitchIdx = builder_.createVariable(
+      getParentOuterScope_->getVariableScope(),
+      "exception_handler_idx",
+      Type::createInt32(),
+      /* hidden */ true);
+  builder_.createStoreFrameInst(
+      newOuterScope_,
+      builder_.getLiteralNumber(rethrowBBIdx),
+      exceptionSwitchIdx);
+  // Wrap execution of switch in a try.
+  builder_.setInsertionBlock(executeSwitchBB);
+  // This BB guards the entire execution of user blocks.
+  BasicBlock *surroundingCatchBB = builder_.createBasicBlock(inner_);
+  builder_.createTryStartInst(userCodeSwitchBB, surroundingCatchBB);
 
   // This holds the mapping of user error handler to the exception switch index
   // that will lead to the execution of that handler.
@@ -768,11 +758,7 @@ void LowerToStateMachine::lowerToSwitch(
   IRBuilder::InstructionDestroyer destroyer{};
   for (auto *BB : userBBs) {
     for (Instruction &I : *BB) {
-      if (auto *SGI = llvh::dyn_cast<StartGeneratorInst>(&I)) {
-        // We've already replicated the semantics of StartGeneratorInst, so
-        // remove it.
-        destroyer.add(SGI);
-      } else if (auto *YI = llvh::dyn_cast<SaveAndYieldInst>(&I)) {
+      if (auto *YI = llvh::dyn_cast<SaveAndYieldInst>(&I)) {
         // Return a value, and set switchIdx to jump to the next block
         // specified in the parameter of SaveAndYieldInst.
         auto *nextBB = YI->getNextBlock();
@@ -872,17 +858,13 @@ void LowerToStateMachine::lowerToSwitch(
   mainSwitch.generate(
       builder_.createLoadFrameInst(getParentOuterScope_, switchIdx));
 
-  if (hasExistingTrys) {
-    // Set the thrown value placeholder variable and execute the switch.
-    builder_.setInsertionBlock(surroundingCatchBB);
-    auto *catchVal = builder_.createCatchInst();
-    builder_.createStoreFrameInst(
-        getParentOuterScope_, catchVal, thrownValPlaceholder);
-    exceptionSwitch.generate(
-        builder_.createLoadFrameInst(getParentOuterScope_, exceptionSwitchIdx));
-  }
-
-  resultContainsTrys_ = hasExistingTrys;
+  // Set the thrown value placeholder variable and execute the switch.
+  builder_.setInsertionBlock(surroundingCatchBB);
+  auto *catchVal = builder_.createCatchInst();
+  builder_.createStoreFrameInst(
+      getParentOuterScope_, catchVal, thrownValPlaceholder);
+  exceptionSwitch.generate(
+      builder_.createLoadFrameInst(getParentOuterScope_, exceptionSwitchIdx));
 }
 
 BasicBlock *LowerToStateMachine::createCompletedStateBlock(
@@ -932,6 +914,10 @@ void LowerToStateMachine::moveCrossingValuesToOuter() {
   // additionally into the outer scope in this pass.
   moveInnerPhisToOuter(D);
 
+  // Only spill CreateScopeInst under full debug info. This is to ensure they
+  // can still be reached in debugging.
+  bool forceSpillCreateScope =
+      M_->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL;
   for (BasicBlock &BB : *inner_) {
     for (Instruction &I : BB) {
       // Store the illegal users separately as we cannot modify the users list
@@ -947,7 +933,8 @@ void LowerToStateMachine::moveCrossingValuesToOuter() {
           illegalUsers.push_back(user);
         }
       }
-      if (illegalUsers.empty())
+      if (!(forceSpillCreateScope && llvh::isa<CreateScopeInst>(I)) &&
+          illegalUsers.empty())
         continue;
 
       // The current instruction is used across a BB it does not dominate. Store
@@ -965,6 +952,13 @@ void LowerToStateMachine::moveCrossingValuesToOuter() {
       llvh::DenseMap<BasicBlock *, LoadFrameInst *> loadFramePerBlock;
       moveBuilderAfter(&I, builder_);
       builder_.createStoreFrameInst(getParentOuterScope_, &I, storedValueOfI);
+      // If this is a CreateScopeInst and the create scope has a valid ID
+      // associated with it, we must update the value in the Function's
+      // environment list to be the spilled Variable.
+      if (llvh::isa<CreateScopeInst>(I) &&
+          I.getEnvironmentID() >= Instruction::kFirstScopeCreationIdIndex) {
+        inner_->environments()[I.getEnvironmentIDAsIndex()] = storedValueOfI;
+      }
       for (const auto &user : illegalUsers) {
         auto *userBB = user->getParent();
         LoadFrameInst *&load = loadFramePerBlock[userBB];
@@ -981,13 +975,19 @@ void LowerToStateMachine::moveCrossingValuesToOuter() {
 }
 
 /// \return true if an entry BasicBlock in \p PI is not a predecessor of
-/// the BasicBlock \p PI resides in.
+/// the BasicBlock \p PI resides in, or a Value operand no longer dominates
+/// \p PI.
 static bool shouldMovePhiInst(
     PhiInst *PI,
-    const llvh::DenseSet<BasicBlock *> &predBBs) {
+    const llvh::DenseSet<BasicBlock *> &predBBs,
+    const DominanceInfo &D) {
   for (size_t i = 0, e = PI->getNumEntries(); i < e; ++i) {
-    auto [_, valBB] = PI->getEntry(i);
+    auto [val, valBB] = PI->getEntry(i);
     if (!predBBs.count(valBB)) {
+      return true;
+    }
+    if (auto *valInst = llvh::dyn_cast<Instruction>(val);
+        valInst && !D.properlyDominates(valInst, PI)) {
       return true;
     }
   }
@@ -1001,7 +1001,7 @@ void LowerToStateMachine::moveInnerPhisToOuter(DominanceInfo &D) {
     predBBs.insert(pred_begin(&BB), pred_end(&BB));
     for (Instruction &I : BB) {
       if (auto *PI = llvh::dyn_cast<PhiInst>(&I)) {
-        if (!shouldMovePhiInst(PI, predBBs))
+        if (!shouldMovePhiInst(PI, predBBs, D))
           continue;
         auto outerVar = builder_.createVariable(
             getParentOuterScope_->getVariableScope(),
@@ -1017,7 +1017,7 @@ void LowerToStateMachine::moveInnerPhisToOuter(DominanceInfo &D) {
           moveBuilderTo(&predBB->back(), builder_);
           builder_.createStoreFrameInst(getParentOuterScope_, val, outerVar);
         }
-        moveBuilderTo(PI, builder_);
+        movePastFirstInBlock(builder_, PI->getParent());
         auto loadReplacement =
             builder_.createLoadFrameInst(getParentOuterScope_, outerVar);
         PI->replaceAllUsesWith(loadReplacement);

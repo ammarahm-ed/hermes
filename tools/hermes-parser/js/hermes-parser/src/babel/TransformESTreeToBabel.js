@@ -85,6 +85,7 @@ const FlowESTreeAndBabelVisitorKeys: VisitorKeys = {
   RegExpLiteral: [],
   RestElement: [...FlowVisitorKeys.RestElement, 'typeAnnotation'],
   StringLiteral: [],
+  TupleTypeAnnotation: ['types'],
   CommentBlock: [],
   CommentLine: [],
 };
@@ -374,7 +375,7 @@ function mapNodeWithDirectives<T: Program | BlockStatement>(node: T): T {
   }
 
   // Move directives from body to new directives array
-  // $FlowExpectedError[incompatible-call] We are adding properties for babel that don't exist in the ESTree types.
+  // $FlowExpectedError[incompatible-type] We are adding properties for babel that don't exist in the ESTree types.
   return nodeWith(node, {
     directives,
     body:
@@ -406,31 +407,33 @@ function mapProgram(node: Program): BabelFile {
   };
   const range = [0, endRange];
 
-  const babelComments = program.comments.map(comment => {
-    switch (comment.type) {
-      case 'Line': {
-        return {
-          type: 'CommentLine',
-          value: comment.value,
-          loc: comment.loc,
-          range: comment.range,
-        };
+  const babelComments: $ReadOnlyArray<BabelComment> = program.comments.map(
+    comment => {
+      switch (comment.type) {
+        case 'Line': {
+          return {
+            type: 'CommentLine',
+            value: comment.value,
+            loc: comment.loc,
+            range: comment.range,
+          };
+        }
+        case 'Block': {
+          return {
+            type: 'CommentBlock',
+            value: comment.value,
+            loc: comment.loc,
+            range: comment.range,
+          };
+        }
       }
-      case 'Block': {
-        return {
-          type: 'CommentBlock',
-          value: comment.value,
-          loc: comment.loc,
-          range: comment.range,
-        };
-      }
-    }
-  });
+    },
+  );
 
   // Rename root node to File node and move Program node under program property
   return {
     type: 'File',
-    // $FlowExpectedError[prop-missing] Comments, docblock and tokens are purposely missing to match the Babel AST.
+    // $FlowExpectedError[incompatible-type] Comments, docblock and tokens are purposely missing to match the Babel AST.
     program: {
       type: 'Program',
       body: program.body,
@@ -530,7 +533,7 @@ function mapProperty(node: Property): BabelObjectMethod | BabelObjectProperty {
     type: 'ObjectProperty',
     computed: node.computed,
     key: node.key,
-    // $FlowExpectedError[incompatible-cast]
+    // $FlowExpectedError[incompatible-type]
     value: (node.value: Expression),
     method: node.method,
     shorthand: node.shorthand,
@@ -664,10 +667,10 @@ function mapImportExpression(node: ImportExpression): CallExpression {
   // Babel expects ImportExpression to be structured as a regular
   // CallExpression where the callee is an Import node.
 
-  // $FlowExpectedError[prop-missing] optional and typeArguments are missing to match existing output.
+  // $FlowExpectedError[incompatible-type] optional and typeArguments are missing to match existing output.
   return {
     type: 'CallExpression',
-    // $FlowExpectedError[incompatible-return] This is a babel specific node
+    // $FlowExpectedError[incompatible-type] This is a babel specific node
     callee: {
       type: 'Import',
       loc: {
@@ -751,9 +754,10 @@ function mapTypeofTypeAnnotation(
   // $FlowExpectedError[cannot-write]
   delete node.typeArguments;
   // $FlowFixMe[incompatible-type]
+  // $FlowFixMe[invalid-compare]
   if (node.argument.type !== 'GenericTypeAnnotation') {
     return nodeWith(node, {
-      // $FlowExpectedError[incompatible-call] Special override for Babel
+      // $FlowExpectedError[incompatible-type] Special override for Babel
       argument: {
         type: 'GenericTypeAnnotation',
         id: node.argument,
@@ -918,6 +922,7 @@ function transformNode(node: ESNodeOrBabelNode): ESNodeOrBabelNode | null {
     case 'Program': {
       // Check if we have already processed this node.
       // $FlowFixMe[incompatible-type]
+      // $FlowFixMe[invalid-compare]
       if (node.parent?.type === 'File') {
         return node;
       }
@@ -1036,6 +1041,26 @@ function transformNode(node: ESNodeOrBabelNode): ESNodeOrBabelNode | null {
     case 'TupleTypeAnnotation': {
       // $FlowExpectedError[cannot-write]
       delete node.inexact;
+      // $FlowExpectedError[prop-missing]
+      node.types = node.elementTypes;
+      // $FlowExpectedError[cannot-write]
+      delete node.elementTypes;
+      return node;
+    }
+
+    case 'UnknownTypeAnnotation': {
+      // $FlowExpectedError[cannot-write]
+      node.type = 'MixedTypeAnnotation';
+      return node;
+    }
+    case 'NeverTypeAnnotation': {
+      // $FlowExpectedError[cannot-write]
+      node.type = 'EmptyTypeAnnotation';
+      return node;
+    }
+    case 'UndefinedTypeAnnotation': {
+      // $FlowExpectedError[cannot-write]
+      node.type = 'VoidTypeAnnotation';
       return node;
     }
 
@@ -1221,6 +1246,18 @@ function transformNode(node: ESNodeOrBabelNode): ESNodeOrBabelNode | null {
       }
       return node;
     }
+    case 'DeclareOpaqueType':
+    case 'OpaqueType': {
+      if (node.lowerBound != null) {
+        // $FlowExpectedError[cannot-write]
+        delete node.lowerBound;
+      }
+      if (node.upperBound != null) {
+        // $FlowExpectedError[cannot-write]
+        delete node.upperBound;
+      }
+      return node;
+    }
     default: {
       return node;
     }
@@ -1233,13 +1270,13 @@ export function transformProgram(
 ): BabelFile {
   const resultNode = SimpleTransform.transform(program, {
     transform(node) {
-      // $FlowExpectedError[incompatible-call] We override the type to support the additional Babel types
+      // $FlowExpectedError[incompatible-type] We override the type to support the additional Babel types
       return transformNode(node);
     },
     visitorKeys: FlowESTreeAndBabelVisitorKeys,
   });
 
-  // $FlowExpectedError[incompatible-call] We override the type to support the additional Babel types
+  // $FlowExpectedError[incompatible-type] We override the type to support the additional Babel types
   SimpleTraverser.traverse(resultNode, {
     enter(node) {
       fixSourceLocation(node, options);
@@ -1249,6 +1286,7 @@ export function transformProgram(
   });
 
   // $FlowFixMe[incompatible-type]
+  // $FlowFixMe[invalid-compare]
   if (resultNode?.type === 'File') {
     return resultNode;
   }

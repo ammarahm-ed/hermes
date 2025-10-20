@@ -5,6 +5,7 @@
 
 # Define targets for the C++ console bindings. We define both a static and a
 # dynamic library, so they can be linked the same way as hermesvm.
+set(HERMES_ENABLE_EH ON)
 add_library(shermes_console SHARED ConsoleBindings.cpp)
 target_link_libraries(shermes_console PRIVATE hermesvm)
 
@@ -12,15 +13,24 @@ add_library(shermes_console_a STATIC ConsoleBindings.cpp)
 # Add hermesvm as a dependency so headers are available, even though we aren't
 # actually linking anything here.
 target_link_libraries(shermes_console_a PRIVATE hermesvm_a)
+set(HERMES_ENABLE_EH OFF)
 
 set(SHERMES_CC "cc" CACHE STRING "C compiler to invoke")
 set(SHERMES_CC_SYSCFLAGS "" CACHE STRING "C compiler system flags")
 set(SHERMES_CC_SYSLDFLAGS "" CACHE STRING "C compiler system linker flags")
 set(SHERMES_CC_INCLUDE_PATH
-  "${CMAKE_BINARY_DIR}/lib/config:${CMAKE_SOURCE_DIR}/include" CACHE STRING
+  "${CMAKE_BINARY_DIR}/lib/config:${PROJECT_SOURCE_DIR}/include" CACHE STRING
   "Include path when invoking CC")
 set(SHERMES_CC_LIB_PATH "$<TARGET_FILE_DIR:hermesvm>:$<TARGET_FILE_DIR:jsi>:$<TARGET_FILE_DIR:shermes_console>" CACHE STRING
   "Library path when invoking CC")
+
+if (HERMES_ENABLE_ADDRESS_SANITIZER)
+  append("-fsanitize=address" SHERMES_CC_SYSCFLAGS SHERMES_CC_SYSLDFLAGS)
+endif()
+
+if (HERMES_ENABLE_UNDEFINED_BEHAVIOR_SANITIZER)
+  append("-fsanitize=undefined" SHERMES_CC_SYSCFLAGS SHERMES_CC_SYSLDFLAGS)
+endif()
 
 file(GENERATE
         OUTPUT $<CONFIG>/config.h

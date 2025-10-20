@@ -36,13 +36,11 @@ TEST_F(ArrayTest, CppAPITest) {
 
   // Call haveOwnIndexed() and getOwnIndexed() on a element not in the array.
   ComputedPropertyDescriptor desc;
-  MutableHandle<SymbolID> tmpSymbolStorage{runtime};
   ASSERT_FALSE(*lv.array->getOwnComputedPrimitiveDescriptor(
       lv.array,
       runtime,
       runtime.makeHandle(100.0_hd),
       JSObject::IgnoreProxy::No,
-      tmpSymbolStorage,
       desc));
   EXPECT_CALLRESULT_UNDEFINED(lv.array->getComputed_RJS(
       lv.array, runtime, runtime.makeHandle(100.0_hd)));
@@ -54,7 +52,6 @@ TEST_F(ArrayTest, CppAPITest) {
       array,                                                                  \
       runtime,                                                                \
       runtime.makeHandle(HermesValue::encodeTrustedNumberValue(index)),       \
-      tmpSymbolStorage,                                                       \
       desc));                                                                 \
   EXPECT_CALLRESULT_VALUE(                                                    \
       value,                                                                  \
@@ -62,7 +59,6 @@ TEST_F(ArrayTest, CppAPITest) {
           array,                                                              \
           runtime,                                                            \
           array,                                                              \
-          tmpSymbolStorage,                                                   \
           desc,                                                               \
           runtime.makeHandle(HermesValue::encodeTrustedNumberValue(index)))); \
   EXPECT_CALLRESULT_VALUE(                                                    \
@@ -73,27 +69,38 @@ TEST_F(ArrayTest, CppAPITest) {
           runtime.makeHandle(HermesValue::encodeTrustedNumberValue(index))));
 
   // array[100] = 50. This will case a reallocation.
-  JSArray::setElementAt(lv.array, runtime, 100, runtime.makeHandle(50.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(
+          lv.array, runtime, 100, runtime.makeHandle(50.0_hd)),
+      ExecutionStatus::EXCEPTION);
   // Length must be 101.
   ASSERT_EQ(101u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(50.0_hd, lv.array, 100);
 
   // array[90] = 40. This will cause a reallocation.
-  JSArray::setElementAt(lv.array, runtime, 90, runtime.makeHandle(40.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(lv.array, runtime, 90, runtime.makeHandle(40.0_hd)),
+      ExecutionStatus::EXCEPTION);
   // Length must still be 101.
   ASSERT_EQ(101u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(40.0_hd, lv.array, 90);
   EXPECT_INDEX_VALUE(50.0_hd, lv.array, 100);
 
   // array[105] = 60. This will case a reallocation.
-  JSArray::setElementAt(lv.array, runtime, 105, runtime.makeHandle(60.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(
+          lv.array, runtime, 105, runtime.makeHandle(60.0_hd)),
+      ExecutionStatus::EXCEPTION);
   ASSERT_EQ(106u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(40.0_hd, lv.array, 90);
   EXPECT_INDEX_VALUE(50.0_hd, lv.array, 100);
   EXPECT_INDEX_VALUE(60.0_hd, lv.array, 105);
 
   // array[106] = 70. This will not case a reallocation.
-  JSArray::setElementAt(lv.array, runtime, 106, runtime.makeHandle(70.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(
+          lv.array, runtime, 106, runtime.makeHandle(70.0_hd)),
+      ExecutionStatus::EXCEPTION);
   ASSERT_EQ(107u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(40.0_hd, lv.array, 90);
   EXPECT_INDEX_VALUE(50.0_hd, lv.array, 100);
@@ -101,7 +108,10 @@ TEST_F(ArrayTest, CppAPITest) {
   EXPECT_INDEX_VALUE(70.0_hd, lv.array, 106);
 
   // array[100] = 51. We are updating an element in-place.
-  JSArray::setElementAt(lv.array, runtime, 100, runtime.makeHandle(51.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(
+          lv.array, runtime, 100, runtime.makeHandle(51.0_hd)),
+      ExecutionStatus::EXCEPTION);
   ASSERT_EQ(107u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(40.0_hd, lv.array, 90);
   EXPECT_INDEX_VALUE(51.0_hd, lv.array, 100);
@@ -119,7 +129,6 @@ TEST_F(ArrayTest, CppAPITest) {
       runtime,
       runtime.makeHandle(106.0_hd),
       JSObject::IgnoreProxy::No,
-      tmpSymbolStorage,
       desc));
   EXPECT_CALLRESULT_UNDEFINED(lv.array->getComputed_RJS(
       lv.array, runtime, runtime.makeHandle(106.0_hd)));
@@ -135,13 +144,15 @@ TEST_F(ArrayTest, CppAPITest) {
       runtime,
       runtime.makeHandle(106.0_hd),
       JSObject::IgnoreProxy::No,
-      tmpSymbolStorage,
       desc));
   EXPECT_CALLRESULT_UNDEFINED(lv.array->getComputed_RJS(
       lv.array, runtime, runtime.makeHandle(106.0_hd)));
 
   // array[106] = 70 again.
-  JSArray::setElementAt(lv.array, runtime, 106, runtime.makeHandle(70.0_hd));
+  ASSERT_NE(
+      JSArray::setElementAt(
+          lv.array, runtime, 106, runtime.makeHandle(70.0_hd)),
+      ExecutionStatus::EXCEPTION);
   ASSERT_EQ(107u, lv.array->getEndIndex());
   EXPECT_INDEX_VALUE(40.0_hd, lv.array, 90);
   EXPECT_INDEX_VALUE(51.0_hd, lv.array, 100);

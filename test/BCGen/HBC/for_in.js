@@ -29,6 +29,10 @@ test_one(1,2,3)
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -42,13 +46,13 @@ test_one(1,2,3)
 // CHECK-NEXT:i1[ASCII, 6..13] #33D4E32D: test_one
 
 // CHECK:Function<global>(1 params, 17 registers, 3 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:[@ 0] DeclareGlobalVar 1<UInt32>
 // CHECK-NEXT:[@ 5] GetGlobalObject 4<Reg8>
 // CHECK-NEXT:[@ 7] LoadConstUndefined 3<Reg8>
 // CHECK-NEXT:[@ 9] CreateClosure 5<Reg8>, 3<Reg8>, 1<UInt16>
-// CHECK-NEXT:[@ 14] PutByIdLoose 4<Reg8>, 5<Reg8>, 1<UInt8>, 1<UInt16>
-// CHECK-NEXT:[@ 20] GetByIdShort 4<Reg8>, 4<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 14] PutByIdLoose 4<Reg8>, 5<Reg8>, 0<UInt8>, 1<UInt16>
+// CHECK-NEXT:[@ 20] GetByIdShort 4<Reg8>, 4<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 25] LoadConstUInt8 0<Reg8>, 3<UInt8>
 // CHECK-NEXT:[@ 28] LoadConstUInt8 1<Reg8>, 2<UInt8>
 // CHECK-NEXT:[@ 31] LoadConstUInt8 2<Reg8>, 1<UInt8>
@@ -56,15 +60,15 @@ test_one(1,2,3)
 // CHECK-NEXT:[@ 41] Ret 4<Reg8>
 
 // CHECK:Function<test_one>(3 params, 8 registers, 2 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0010, lexical 0x0000
-// CHECK-NEXT:[@ 0] LoadParam 4<Reg8>, 1<UInt8>
-// CHECK-NEXT:[@ 3] Mov 7<Reg8>, 4<Reg8>
-// CHECK-NEXT:[@ 6] GetPNameList 6<Reg8>, 7<Reg8>, 0<Reg8>, 1<Reg8>
-// CHECK-NEXT:[@ 11] JmpUndefined 21<Addr8>, 6<Reg8>
-// CHECK-NEXT:[@ 14] GetNextPName 5<Reg8>, 6<Reg8>, 7<Reg8>, 0<Reg8>, 1<Reg8>
-// CHECK-NEXT:[@ 20] JmpUndefined 12<Addr8>, 5<Reg8>
-// CHECK-NEXT:[@ 23] Mov 3<Reg8>, 5<Reg8>
-// CHECK-NEXT:[@ 26] GetByVal 3<Reg8>, 4<Reg8>, 3<Reg8>
+// CHECK-NEXT:Offset in debug table: source 0x0011
+// CHECK-NEXT:[@ 0] LoadParam 6<Reg8>, 1<UInt8>
+// CHECK-NEXT:[@ 3] Mov 4<Reg8>, 6<Reg8>
+// CHECK-NEXT:[@ 6] GetPNameList 5<Reg8>, 4<Reg8>, 0<Reg8>, 1<Reg8>
+// CHECK-NEXT:[@ 11] JmpUndefined 21<Addr8>, 5<Reg8>
+// CHECK-NEXT:[@ 14] GetNextPName 3<Reg8>, 5<Reg8>, 4<Reg8>, 0<Reg8>, 1<Reg8>
+// CHECK-NEXT:[@ 20] JmpUndefined 12<Addr8>, 3<Reg8>
+// CHECK-NEXT:[@ 23] Mov 7<Reg8>, 3<Reg8>
+// CHECK-NEXT:[@ 26] GetByVal 7<Reg8>, 6<Reg8>, 7<Reg8>
 // CHECK-NEXT:[@ 30] Jmp -16<Addr8>
 // CHECK-NEXT:[@ 32] LoadConstUndefined 2<Reg8>
 // CHECK-NEXT:[@ 34] Ret 2<Reg8>
@@ -81,8 +85,8 @@ test_one(1,2,3)
 // CHECK-NEXT:    bc 14: line 14 col 1
 // CHECK-NEXT:    bc 20: line 20 col 1
 // CHECK-NEXT:    bc 34: line 20 col 9
-// CHECK-NEXT:  0x0010  function idx 1, starts at line 14 col 1
+// CHECK-NEXT:  0x0011  function idx 1, starts at line 14 col 1
 // CHECK-NEXT:    bc 6: line 15 col 3
 // CHECK-NEXT:    bc 14: line 15 col 3
 // CHECK-NEXT:    bc 26: line 16 col 6
-// CHECK-NEXT:  0x001d  end of debug source table
+// CHECK-NEXT:  0x001f  end of debug source table

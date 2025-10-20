@@ -15,16 +15,16 @@ namespace {
 /// Check whether a particular operand of an instruction must stay
 /// as literal and hence cannot be lowered into load_const instruction.
 bool operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
-  // HBCLoadConstInst is meant to load a constant
-  if (llvh::isa<HBCLoadConstInst>(Inst))
+  // LIRLoadConstInst is meant to load a constant
+  if (llvh::isa<LIRLoadConstInst>(Inst))
     return true;
 
   // The operand of LoadParamInst is a literal index.
   if (llvh::isa<LoadParamInst>(Inst))
     return true;
 
-  if (llvh::isa<HBCAllocObjectFromBufferInst>(Inst))
-    return true;
+  if (llvh::isa<LIRAllocObjectFromBufferInst>(Inst))
+    return opIndex >= LIRAllocObjectFromBufferInst::FirstKeyIdx;
 
   // All operands of AllocArrayInst are literals.
   if (llvh::isa<AllocArrayInst>(Inst))
@@ -41,20 +41,20 @@ bool operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
   if (llvh::isa<SwitchInst>(Inst) && opIndex > 0)
     return true;
 
-  // DefineOwnPropertyInst and DefineNewOwnPropertyInst.
-  if (auto *SOP = llvh::dyn_cast<BaseDefineOwnPropertyInst>(Inst)) {
+  if (auto *SOP = llvh::dyn_cast<DefineOwnPropertyInst>(Inst)) {
     if (opIndex == DefineOwnPropertyInst::PropertyIdx) {
-      if (llvh::isa<DefineNewOwnPropertyInst>(Inst)) {
-        // In DefineNewOwnPropertyInst the property name must be a literal.
-        return true;
-      }
-
       // If the propery is a LiteralNumber, the property is enumerable, and it
       // is a valid array index, it is coming from an array initialization and
       // we will emit it as DefineOwnByIndex.
       if (auto *LN = llvh::dyn_cast<LiteralNumber>(Inst->getOperand(opIndex))) {
         if (SOP->getIsEnumerable() && LN->convertToArrayIndex().hasValue())
           return true;
+      }
+
+      // LiteralStrings are optimized, when they are enumerable.
+      if (llvh::isa<LiteralString>(Inst->getOperand(opIndex)) &&
+          SOP->getIsEnumerable()) {
+        return true;
       }
     }
 
@@ -63,6 +63,16 @@ bool operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
       return true;
 
     return false;
+  }
+
+  // DefineOwnInDenseArrayInst's arrayIndex operand must remain as a literal.
+  if (llvh::isa<DefineOwnInDenseArrayInst>(Inst) &&
+      opIndex == DefineOwnInDenseArrayInst::ArrayIndexIdx) {
+    return true;
+  }
+
+  if (llvh::isa<CreatePrivateNameInst>(Inst)) {
+    return opIndex == CreatePrivateNameInst::PropertyIdx;
   }
 
   // If StorePropertyInst's property ID is a LiteralString, we will keep it
@@ -108,11 +118,16 @@ bool operandMustBeLiteral(Instruction *Inst, unsigned opIndex) {
   if (llvh::isa<CreateRegExpInst>(Inst))
     return true;
 
-  if (llvh::isa<SwitchImmInst>(Inst) &&
-      (opIndex == SwitchImmInst::MinValueIdx ||
-       opIndex == SwitchImmInst::SizeIdx ||
-       opIndex >= SwitchImmInst::FirstCaseIdx))
+  if (auto *baseSwitchImm = llvh::dyn_cast<BaseSwitchImmInst>(Inst)) {
+    if (opIndex == BaseSwitchImmInst::SizeIdx ||
+        opIndex >= baseSwitchImm->getFirstCaseIdx())
+      return true;
+  }
+
+  if (llvh::isa<UIntSwitchImmInst>(Inst) &&
+      opIndex == UIntSwitchImmInst::MinValueIdx) {
     return true;
+  }
 
   /// CallBuiltin's callee, new.target, "this" should always be literals.
   if (llvh::isa<CallBuiltinInst>(Inst) &&
@@ -208,8 +223,8 @@ bool loadConstants(Function *F) {
   auto createLoadLiteral = [&builder](Literal *literal, Instruction *where) {
     builder.setInsertionPoint(where);
     return llvh::isa<GlobalObject>(literal)
-        ? cast<Instruction>(builder.createHBCGetGlobalObjectInst())
-        : cast<Instruction>(builder.createHBCLoadConstInst(literal));
+        ? cast<Instruction>(builder.createLIRGetGlobalObjectInst())
+        : cast<Instruction>(builder.createLIRLoadConstInst(literal));
   };
 
   for (BasicBlock &BB : *F) {

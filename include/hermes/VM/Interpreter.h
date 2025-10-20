@@ -87,15 +87,6 @@ class Interpreter {
       Runtime &runtime,
       PinnedHermesValue *callTarget);
 
-  /// Fast path to get primitive value \p base's own properties by name \p id
-  /// without boxing.
-  /// Primitive own properties are properties fetching values from primitive
-  /// value itself.
-  /// Currently the only primitive own property is String.prototype.length.
-  /// If the fast path property does not exist, return Empty.
-  static PseudoHandle<>
-  tryGetPrimitiveOwnPropertyById(Runtime &runtime, Handle<> base, SymbolID id);
-
   /// Implement OpCode::GetById/TryGetById when the base is not an object.
   static CallResult<PseudoHandle<>> getByIdTransientWithReceiver_RJS(
       Runtime &runtime,
@@ -107,12 +98,6 @@ class Interpreter {
     return getByIdTransientWithReceiver_RJS(runtime, base, id, base);
   }
 
-  /// Fast path for getByValTransient() -- avoid boxing for \p base if it is
-  /// string primitive and \p nameHandle is an array index.
-  /// If the property does not exist, return Empty.
-  static PseudoHandle<>
-  getByValTransientFast(Runtime &runtime, Handle<> base, Handle<> nameHandle);
-
   /// Implement OpCode::GetByVal when the base is not an object.
   static CallResult<PseudoHandle<>> getByValTransientWithReceiver_RJS(
       Runtime &runtime,
@@ -123,6 +108,20 @@ class Interpreter {
   getByValTransient_RJS(Runtime &runtime, Handle<> base, Handle<> name) {
     return getByValTransientWithReceiver_RJS(runtime, base, name, base);
   }
+
+  /// Implement the slow path for PutById.
+  /// \param base HermesValue to store into.
+  /// \param value HermesValue to store.
+  /// \param idVal the name of the property.
+  static ExecutionStatus putByIdSlowPath_RJS(
+      Runtime &runtime,
+      CodeBlock *curCodeBlock,
+      PinnedHermesValue *base,
+      PinnedHermesValue *value,
+      uint8_t cacheIdx,
+      SymbolID id,
+      bool strictMode,
+      bool tryProp);
 
   /// Implement OpCode::PutById/TryPutById when the base is not an object.
   static ExecutionStatus putByIdTransient_RJS(
@@ -153,13 +152,23 @@ class Interpreter {
       Runtime &runtime,
       InterpreterState &state);
 
+  /// \return the HiddenClass for a new object created from the \p
+  ///   shapeTableIndex.
+  static CallResult<HiddenClass *> getHiddenClassForBuffer(
+      Runtime &runtime,
+      CodeBlock *curCodeBlock,
+      Handle<JSObject> parent,
+      unsigned shapeTableIndex);
+
   /// Constructs an object via literal buffers in the bytecode file.
+  /// \param parent the parent of the newly created object.
   /// \param shapeTableIndex the index of the shape element.
   /// \param valBufferOffset the first element of the val buffer to read.
   /// \return ExecutionStatus::EXCEPTION if the property definitions throw.
   static CallResult<PseudoHandle<>> createObjectFromBuffer(
       Runtime &runtime,
       CodeBlock *curCodeBlock,
+      Handle<JSObject> parent,
       unsigned shapeTableIndex,
       unsigned valBufferOffset);
 
@@ -252,6 +261,11 @@ class Interpreter {
       PinnedHermesValue *frameRegs,
       const inst::Inst *ip);
 
+  static ExecutionStatus casePopulateArrayLiteral(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      const Inst *ip);
+
   static ExecutionStatus caseGetPNameList(
       Runtime &runtime,
       PinnedHermesValue *frameRegs,
@@ -284,6 +298,12 @@ class Interpreter {
       PinnedHermesValue *frameRegs,
       const inst::Inst *ip);
 
+  static ExecutionStatus caseNewObjectWithBufferAndParent(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      CodeBlock *curCodeBlock,
+      const inst::Inst *ip);
+
   /// Interpreter implementation for creating a RegExp object. Unlike the other
   /// out-of-line cases, this takes a CodeBlock* and does not return an
   /// ExecutionStatus.
@@ -309,6 +329,26 @@ class Interpreter {
   static ExecutionStatus caseCreateClass(
       Runtime &runtime,
       PinnedHermesValue *frameRegs);
+
+  static ExecutionStatus defineOwnByIdSlowPath(
+      Runtime &runtime,
+      SmallHermesValue valueToStore,
+      CodeBlock *curCodeBlock,
+      PinnedHermesValue *frameRegs,
+      const inst::Inst *ip);
+
+  /// Create a unique symbol value.
+  static ExecutionStatus caseCreatePrivateName(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      const Inst *ip);
+
+  /// Create a unique symbol value.
+  static ExecutionStatus casePrivateIsIn(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      CodeBlock *curCodeBlock,
+      const Inst *ip);
 
   /// Evaluate callBuiltin and store the result in the register stack. it must
   /// must be invoked with CallBuiltin or CallBuiltinLong. \p op3 contains the

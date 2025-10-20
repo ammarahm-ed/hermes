@@ -37,6 +37,10 @@ print(bench(4e6, 100))
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -51,14 +55,14 @@ print(bench(4e6, 100))
 // CHECK-NEXT:i2[ASCII, 11..15] #A689F65B: print
 
 // CHECK:Function<global>(1 params, 15 registers, 2 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "bench"
 // CHECK-NEXT:    GetGlobalObject   r3
 // CHECK-NEXT:    LoadConstUndefined r2
 // CHECK-NEXT:    CreateClosure     r4, r2, Function<bench>
-// CHECK-NEXT:    PutByIdStrict     r3, r4, 1, "bench"
-// CHECK-NEXT:    TryGetById        r4, r3, 1, "print"
-// CHECK-NEXT:    GetByIdShort      r3, r3, 2, "bench"
+// CHECK-NEXT:    PutByIdStrict     r3, r4, 0, "bench"
+// CHECK-NEXT:    TryGetById        r4, r3, 0, "print"
+// CHECK-NEXT:    GetByIdShort      r3, r3, 1, "bench"
 // CHECK-NEXT:    LoadConstUInt8    r0, 100
 // CHECK-NEXT:    LoadConstInt      r1, 4000000
 // CHECK-NEXT:    Call3             r3, r3, r2, r1, r0
@@ -66,7 +70,7 @@ print(bench(4e6, 100))
 // CHECK-NEXT:    Ret               r3
 
 // CHECK:Function<bench>(3 params, 15 registers, 14 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0017, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0018
 // CHECK-NEXT:    LoadParam         r14, 1
 // CHECK-NEXT:    ToNumber          r8, r14
 // CHECK-NEXT:    LoadParam         r14, 2
@@ -112,7 +116,7 @@ print(bench(4e6, 100))
 // CHECK-NEXT:    bc 26: line 28 col 7
 // CHECK-NEXT:    bc 40: line 28 col 12
 // CHECK-NEXT:    bc 46: line 28 col 6
-// CHECK-NEXT:  0x0017  function idx 1, starts at line 12 col 1
+// CHECK-NEXT:  0x0018  function idx 1, starts at line 12 col 1
 // CHECK-NEXT:    bc 3: line 14 col 10
 // CHECK-NEXT:    bc 9: line 15 col 10
-// CHECK-NEXT:  0x0021  end of debug source table
+// CHECK-NEXT:  0x0023  end of debug source table

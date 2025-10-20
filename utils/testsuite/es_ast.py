@@ -16,6 +16,7 @@ from .utils import TestCaseResult, TestResultCode
 OMITTED_KEYS = {
     # Keys in Hermes
     "ArrayExpression": {"trailingComma"},
+    "BlockStatement": {"implicit"},
     # Some literals support "raw" and others don't.
     # esprima doesn't distinguish.
     "EnumStringBody": {"hasUnknownMembers"},
@@ -164,7 +165,7 @@ def normalize_hermes_ast(ast: JSON) -> JSON:
             del ast["pattern"]
             del ast["flags"]
         if ast["type"] == "BigIntLiteral":
-            ast["bigint"] = ast["bigint"][:-1]
+            ast["bigint"] = ast["bigint"]
             ast["value"] = None
         ast["type"] = "Literal"
 

@@ -105,6 +105,12 @@ struct LegacyClassContext {
   llvh::DenseMap<ESTree::ClassPropertyNode *, Variable *>
       classComputedFieldKeys{};
 
+  /// First instance private method, or nullptr if there are none. If one
+  /// exists, then we will need to stamp the instance with the private instance
+  /// brand. The way to get the value of the instance brand is also through this
+  /// AST node.
+  ESTree::MethodDefinitionNode *firstInstancePrivateMethod{nullptr};
+
   explicit LegacyClassContext(Variable *cons, Variable *funcVar)
       : constructor(cons), instElemInitFuncVar(funcVar) {}
 };
@@ -135,7 +141,10 @@ class FunctionContext {
   /// unrolling or finally blocks), we don't create multiple scopes. Note that
   /// this is not needed for the function scope, since that is only emitted
   /// once.
-  llvh::DenseMap<ESTree::Node *, VariableScope *> innerScopes_;
+  llvh::MapVector<ESTree::Node *, VariableScope *> innerScopes_;
+
+  /// The CreateScopeInst that creates the scope for this function.
+  CreateScopeInst *currentScope_{};
 
  public:
   /// This is the actual function associated with this context.
@@ -210,9 +219,6 @@ class FunctionContext {
   /// their declaring function.
   llvh::DenseSet<Variable *> initializedTDZVars{};
 
-  /// The CreateScopeInst that creates the scope for this function.
-  CreateScopeInst *curScope{};
-
   /// Information about the current enclosing typed class.
   TypedClassContext typedClassContext{};
 
@@ -245,6 +251,12 @@ class FunctionContext {
     return semInfo_;
   }
 
+  /// \return the MapVector containing all inner scopes that were made in this
+  /// function.
+  const llvh::MapVector<ESTree::Node *, VariableScope *> &getInnerScopes() {
+    return innerScopes_;
+  }
+
   /// \return true if there is an active typed class context held in this
   /// function context.
   bool hasTypedClassContext() const {
@@ -257,6 +269,13 @@ class FunctionContext {
   /// function context.
   bool hasLegacyClassContext() const {
     return legacyClassContext != nullptr;
+  }
+
+  CreateScopeInst *curScope() const {
+    return currentScope_;
+  }
+  void setCurScope(CreateScopeInst *scope) {
+    currentScope_ = scope;
   }
 
   /// Generate a unique string that represents a temporary value. The string
@@ -332,7 +351,7 @@ class SurroundingTry {
       GenFinalizerCB genFinalizer = {})
       : functionContext_(functionContext),
         outer(functionContext->surroundingTry),
-        scope(functionContext->curScope),
+        scope(functionContext->curScope()),
         node(node),
         catchBlock(catchBlock),
         tryEndLoc(tryEndLoc),
@@ -367,6 +386,7 @@ class LReference {
     Destructuring,
   };
 
+  /// This constructor is used for any non-destructuring LReference.
   LReference(
       Kind kind,
       ESTreeIRGen *irgen,
@@ -376,18 +396,21 @@ class LReference {
       Value *property,
       SMLoc loadLoc,
       Value *thisVal = nullptr)
-      : kind_(kind), irgen_(irgen), declInit_(declInit) {
-    ast_ = ast;
-    base_ = base;
-    property_ = property;
-    thisValue_ = thisVal;
-    loadLoc_ = loadLoc;
-  }
+      : kind_(kind),
+        irgen_(irgen),
+        declInit_(declInit),
+        ast_(ast),
+        base_(base),
+        property_(property),
+        thisValue_(thisVal),
+        loadLoc_(loadLoc) {}
 
+  /// This constructor is used a destructuring LReference.
   LReference(ESTreeIRGen *irgen, bool declInit, ESTree::PatternNode *target)
-      : kind_(Kind::Destructuring), irgen_(irgen), declInit_(declInit) {
-    destructuringTarget_ = target;
-  }
+      : kind_(Kind::Destructuring),
+        irgen_(irgen),
+        declInit_(declInit),
+        ast_(target) {}
 
   bool isEmpty() const {
     return kind_ == Kind::Empty;
@@ -395,6 +418,11 @@ class LReference {
 
   Value *emitLoad();
   void emitStore(Value *value);
+
+  /// \return the AST node associated with this LReference.
+  ESTree::Node *getNode() const {
+    return ast_;
+  }
 
   /// \return true if it is known that \c emitStore() will not have any side
   ///   effects, including exceptions. This is not a sophisticated analysis,
@@ -415,25 +443,21 @@ class LReference {
   /// when storing.
   bool declInit_;
 
-  union {
-    struct {
-      /// The base AST node.
-      ESTree::Node *ast_;
+  /// The base AST node.
+  ESTree::Node *ast_;
 
-      /// The base of the object, or the variable we load from.
-      Value *base_;
-      /// The name/value of the field this reference accesses, or null if this
-      /// is a variable access.
-      Value *property_;
+  /// The base of the object, or the variable we load from. Not populated for
+  /// Destructuring assignments.
+  Value *base_;
 
-      /// Corresponds to [[ThisValue]] in ES15 6.2.5 Reference Record. Only
-      /// populated for super references.
-      Value *thisValue_;
-    };
+  /// The name/value of the field this reference accesses, or null if this
+  /// is a variable access. Not populated for Destructuring assignments.
+  Value *property_;
 
-    /// Destructuring assignment target.
-    ESTree::PatternNode *destructuringTarget_;
-  };
+  /// Corresponds to [[ThisValue]] in ES15 6.2.5 Reference Record. Only
+  /// populated for super references. Not populated for Destructuring
+  /// assignments.
+  Value *thisValue_;
 
   /// Debug position for loads. Must be outside of the union because it has a
   /// constructor.
@@ -445,6 +469,48 @@ class LReference {
 
 //===----------------------------------------------------------------------===//
 // ESTreeIRGen
+
+/// Holds the required state that ESTreeIRGen needs for private name
+/// declarations and usages which refer to functions- methods and accessors.
+class PrivateNameFunctionTable {
+ public:
+  /// All entries in the private name table need to contain at least the class
+  /// brand symbol, so this is defined here in a base class.
+  struct BaseEntry {
+    /// Class brand symbol.
+    Variable *classBrand;
+    BaseEntry(Variable *classBrand) : classBrand(classBrand) {}
+  };
+  /// Used for private names that define only a single function (methods or a
+  /// single getter/setter.)
+  struct SingleFunctionEntry : BaseEntry {
+    /// Closure value of function.
+    Variable *functionObject;
+    SingleFunctionEntry(Variable *classBrand, Variable *functionObject)
+        : BaseEntry(classBrand), functionObject(functionObject) {}
+  };
+  /// Used for private names that define both a getter and setter.
+  struct GetterSetterEntry : BaseEntry {
+    /// Closure value of the getter.
+    Variable *getterFunctionObject;
+    /// Closure value of the setter.
+    Variable *setterFunctionObject;
+    GetterSetterEntry(
+        Variable *classBrand,
+        Variable *getterFunctionObject,
+        Variable *setterFunctionObject)
+        : BaseEntry(classBrand),
+          getterFunctionObject(getterFunctionObject),
+          setterFunctionObject(setterFunctionObject) {}
+  };
+  // The following fields are declared as a deque so stable pointers can be
+  // taken to the elements. The custom data of private name decls will point to
+  // individual elements from these deques.
+  /// The list of single function entries.
+  std::deque<SingleFunctionEntry> singleFunctions;
+  /// The list of accessor entries.
+  std::deque<GetterSetterEntry> accessors;
+};
 
 /// Performs lowering of the JSON ESTree down to Hermes IR.
 class ESTreeIRGen {
@@ -468,6 +534,14 @@ class ESTreeIRGen {
   /// This points to the current function's context. It is saved and restored
   /// whenever we enter a nested function.
   FunctionContext *functionContext_{};
+
+  /// Make a new CreateScopeInst and update the curScope of the function
+  /// context.
+  CreateScopeInst *makeNewScope(VariableScope *varScope, Value *parentScope);
+
+  /// Set the curScope of the function context, and update the Builder's current
+  /// scope creation ID to match the ID from \p scope.
+  void restoreScope(CreateScopeInst *scope);
 
   /// The type of the key stored in \c compiledEntities_. It is a pair of an
   /// AST node pointer and an extra key, which is a small integer value.
@@ -578,6 +652,15 @@ class ESTreeIRGen {
   /// \param evalDataInst must not contain a null varScope.
   Function *doItInScope(EvalCompilationDataInst *evalDataInst);
 
+  /// \return the PrivateNameFunctionTable which is stored in SemContext. Lazily
+  /// initialize the table.
+  PrivateNameFunctionTable &privateNameTable() {
+    if (!semCtx_.customData1) {
+      semCtx_.customData1 = std::make_shared<PrivateNameFunctionTable>();
+    }
+    return *static_cast<PrivateNameFunctionTable *>(semCtx_.customData1.get());
+  }
+
   /// Perform IR generation for a given CJS module.
   void doCJSModule(
       sema::SemContext &semContext,
@@ -626,6 +709,7 @@ class ESTreeIRGen {
   void genForOfFastArrayStatement(
       ESTree::ForOfStatementNode *forOfStmt,
       flow::ArrayType *type);
+  void genAsyncForOfStatement(ESTree::ForOfStatementNode *forOfStmt);
   void genWhileLoop(ESTree::WhileStatementNode *loop);
   void genDoWhileLoop(ESTree::DoWhileStatementNode *loop);
 
@@ -695,6 +779,12 @@ class ESTreeIRGen {
   /// Generate IR for `this` in a derived legacy class constructor.
   Value *genLegacyDerivedThis();
 
+  /// Generate IR for a `return` statement in a base legacy class constructor.
+  /// This ensures that the returned value is an object.
+  Value *genLegacyBaseConstructorRet(
+      ESTree::ReturnStatementNode *node,
+      Value *returnValue);
+
   /// Generate IR for a `return` statement in a derived legacy class
   /// constructor. This makes sure that \p returnValue is undefined or an
   /// object, and performs the checks on `this` when required.
@@ -709,6 +799,10 @@ class ESTreeIRGen {
       ESTree::ClassLikeNode *legacyClassNode,
       Variable *homeObjectVar,
       const Identifier &consName);
+
+  /// Initialize the capturedState `this` for use in a base class constructor by
+  /// creating a Variable for it and creating the new object.
+  void emitLegacyBaseClassThisInit();
 
   /// Emit IR to invoke the instance elements initializer function for a legacy
   /// class.
@@ -757,6 +851,9 @@ class ESTreeIRGen {
   /// We currently provide names for functions that are assigned to a variable,
   /// or functions that are assigned to an object key. These are a subset of
   /// ES6, but not all of it.
+  /// WARNING: Do not call this for function expressions that are methods on
+  /// classes or object literals, because it passes nullptr as the parent of the
+  /// FunctionExpressionNode.
   Value *genExpression(ESTree::Node *expr, Identifier nameHint = Identifier{});
 
   /// A helper called only from \c genExpression. It performs the actual work.
@@ -969,6 +1066,12 @@ class ESTreeIRGen {
       ESTree::IdentifierNode *Iden,
       bool afterTypeOf);
 
+  /// Generate IR for the value of the private name. For fields, this is just
+  /// the value of the name itself. But for methods and accessors, this is the
+  /// class brand. The class is the class in which the private name of \p Iden
+  /// was declared.
+  Value *genPrivateNameValue(ESTree::IdentifierNode *Iden);
+
   Value *genMetaProperty(ESTree::MetaPropertyNode *MP);
 
   /// Generate the new.target of the current function.
@@ -1067,8 +1170,9 @@ class ESTreeIRGen {
   ///   ES5Function by default, but may also be ES6Constructor.
   /// \param homeObject will be set as the homeObject in the CapturedState of
   /// the function \p FE we are going to generate.
-  /// \param parentNode can optionally be set to the parent AST node of the
-  ///  function node.
+  /// \param parentNode can be set to the parent AST node of the
+  ///  function node. REQUIRED if the function is a method on a class or object
+  ///  literal.
   Value *genFunctionExpression(
       ESTree::FunctionExpressionNode *FE,
       Identifier nameHint,
@@ -1212,13 +1316,21 @@ class ESTreeIRGen {
       DoEmitDeclarations doEmitDeclarations,
       VariableScope *parentScope);
 
-  /// Declare all variables in the scope, except parameters (which are handled
-  /// separately). Variables that obey TDZ are initialized to empty.
-  /// Hoisted closures are recursively compiled and initialized. Imports are
-  /// code generated.
-  /// \param scope The lexical scope, nullabe. If null, there is no scope, so do
+  /// Declare all variables in the scope, except parameters and private names
+  /// (which are handled separately). Variables that obey TDZ are initialized to
+  /// empty. Hoisted closures are recursively compiled and initialized. Imports
+  /// are code generated. \param scope The lexical scope, nullabe. If null,
+  /// there is no scope, so do
   ///     nothing.
   void emitScopeDeclarations(sema::LexicalScope *scope);
+
+  /// Declare all private names in the class' scope. This will setup the
+  /// customData for all private name decls to point to the required state
+  /// needed for IRGen to handle usages involving that private name.
+  /// \param scope The lexical scope, can't be null.
+  void emitPrivateNameDeclarations(
+      sema::LexicalScope *scope,
+      Identifier className);
 
   /// Emit any lazy declarations in the global scope which haven't been emitted
   /// yet because they were found as the result of lazy compilation.
@@ -1305,6 +1417,13 @@ class ESTreeIRGen {
     return getDeclData(getIDDecl(id));
   }
 
+  /// Resolve the identifier node associated with the promoted function
+  /// to the corresponding global variable in expression context.
+  Value *resolveIdentifierPromoted(ESTree::IdentifierNode *id) {
+    auto *declPromoted = getIDDeclPromoted(id);
+    return declPromoted ? getDeclData(declPromoted) : nullptr;
+  }
+
   /// Cast the node to ESTree::IdentifierNode and resolve it to an expression
   /// decl.
   Value *resolveIdentifierFromID(ESTree::Node *id) {
@@ -1347,6 +1466,9 @@ class ESTreeIRGen {
   /// \return the internal value @@iterator
   Value *emitIteratorSymbol();
 
+  /// \return the internal value @@asyncIterator
+  Value *emitAsyncIteratorSymbol();
+
   /// IteratorRecord as defined in ES2018 7.4.1 GetIterator
   struct IteratorRecordSlow {
     Value *iterator;
@@ -1364,6 +1486,15 @@ class ESTreeIRGen {
   ///
   /// \return (iterator, nextMethod)
   IteratorRecordSlow emitGetIteratorSlow(Value *obj);
+
+  /// Call obj[@@asyncIterator], which should return an async iterator,
+  /// and return the iterator itself and its \c next() method.
+  ///
+  /// NOTE: This API is slow and should only be used if it is necessary to
+  /// provide a value to the `next()` method on the iterator.
+  ///
+  /// \return (iterator, nextMethod)
+  IteratorRecordSlow emitGetAsyncIteratorSlow(Value *obj);
 
   /// ES2018 7.4.2 IteratorNext
   /// https://www.ecma-international.org/ecma-262/9.0/index.html#sec-iteratornext
@@ -1386,13 +1517,35 @@ class ESTreeIRGen {
   /// \return \c iterResult.value
   Value *emitIteratorValueSlow(Value *iterResult);
 
+  /// A helper called only from \c emitIteratorCloseSlow or
+  /// emitAsyncIteratorCloseSlow. It performs the actual work.
+  void _emitIteratorCloseImpl(
+      ESTree::Node *astNode,
+      IteratorRecordSlow iteratorRecord,
+      bool ignoreInnerException,
+      bool isAsyncIterator);
+
   /// ES2018 7.4.6 IteratorClose
   /// https://www.ecma-international.org/ecma-262/9.0/index.html#sec-iteratorclose
   ///
+  /// \param astNode the caller AST node
   /// \param ignoreInnerException if set, exceptions thrown by the \c
   ///     iterator.return() method will be ignored and its result will not be
   ///     checked whether it is an object.
   void emitIteratorCloseSlow(
+      ESTree::Node *astNode,
+      IteratorRecordSlow iteratorRecord,
+      bool ignoreInnerException);
+
+  /// ES2018 7.4.7 AsyncIteratorClose
+  /// https://www.ecma-international.org/ecma-262/9.0/index.html#sec-asynciteratorclose
+  ///
+  /// \param astNode the caller AST node
+  /// \param ignoreInnerException if set, exceptions thrown by the \c
+  ///     async iterator.return() method will be ignored and its result will not
+  ///     be checked whether it is an object.
+  void emitAsyncIteratorCloseSlow(
+      ESTree::Node *astNode,
       IteratorRecordSlow iteratorRecord,
       bool ignoreInnerException);
 
@@ -1523,6 +1676,31 @@ class ESTreeIRGen {
   /// \return the instruction performing the store.
   Instruction *emitStore(Value *storedValue, Value *ptr, bool declInit);
 
+  /// Emit IR to perform a private brand check.
+  /// \param from is the value to query.
+  /// \param brandVal is the value of the private brand name. Brands are only
+  ///     associated with private methods and accessors, not fields.
+  void emitPrivateBrandCheck(Value *from, Value *brandVal);
+
+  /// Emit IR to load a private name.
+  /// \param from value to perform the lookup on.
+  /// \param nameVal is the value of the private name.
+  /// \param nameNode
+  Value *emitPrivateLookup(
+      Value *from,
+      Value *nameVal,
+      ESTree::PrivateNameNode *nameNode);
+
+  /// Emit IR to store to a private name.
+  /// \param from value to perform the store on.
+  /// \param nameVal is the value of the private name.
+  /// \param nameNode
+  void emitPrivateStore(
+      Value *from,
+      Value *storedValue,
+      Value *nameVal,
+      ESTree::PrivateNameNode *nameNode);
+
  private:
   /// Search for the specified AST node in \c compiledEntities_ and return the
   /// associated IR value, or nullptr if not found.
@@ -1558,6 +1736,21 @@ class ESTreeIRGen {
   /// Run all tasks in the compilation queue until it is empty.
   void drainCompilationQueue();
 
+  /// \return the customData field of \p lexScope, casted to VariableScope. May
+  /// be null.
+  VariableScope *getLexicalScopeData(sema::LexicalScope *lexScope) {
+    return getLexicalScopeCustomData(lexScope);
+  }
+
+  /// Set the customData field of \p lexScope, to \p varScope.
+  /// \param varScope cannot be null.
+  void setLexicalScopeData(
+      sema::LexicalScope *lexScope,
+      VariableScope *varScope) {
+    assert(varScope && "cannot set customData to null.");
+    lexScope->customData = varScope;
+  }
+
   /// Return the non-null expression sema::Decl associated with the identifier.
   sema::Decl *getIDDecl(ESTree::IdentifierNode *id) {
     assert(id && "IdentifierNode cannot be null");
@@ -1566,16 +1759,74 @@ class ESTreeIRGen {
     return decl;
   }
 
+  /// Return the global Decl associated with the promoted function identifier.
+  sema::Decl *getIDDeclPromoted(ESTree::IdentifierNode *id) {
+    assert(id && "IdentifierNode cannot be null");
+    sema::Decl *decl = semCtx_.getPromotedDecl(id);
+    return decl;
+  }
+
   /// Set the customData field of the declaration with the specified value.
   static void setDeclData(sema::Decl *decl, Value *value) {
     assert(decl);
     decl->customData = value;
   }
+  /// Set the customData field of the private name declaration with the
+  /// specified entry from the private name table.
+  static void setDeclDataPrivate(
+      sema::Decl *decl,
+      PrivateNameFunctionTable::SingleFunctionEntry *entry) {
+    assert(decl);
+    decl->customData = entry;
+  }
+  /// Set the customData field of the private name declaration with the
+  /// specified entry from the private name table.
+  static void setDeclDataPrivate(
+      sema::Decl *decl,
+      PrivateNameFunctionTable::GetterSetterEntry *entry) {
+    assert(decl);
+    decl->customData = entry;
+  }
+
   /// Extract the decl's custom data field, which must be a value.
   static Value *getDeclData(sema::Decl *decl) {
     assert(decl);
     assert(decl->customData);
-    return static_cast<Value *>(decl->customData);
+    return getDeclCustomData(decl);
+  }
+
+  // Add a template overload for the different PrivateNameFunctionTable pointer
+  // types that can be stored in private name decls.
+  template <typename T>
+  static T *getDeclDataPrivate(sema::Decl *decl) {
+    static_assert(
+        std::is_same_v<T, PrivateNameFunctionTable::BaseEntry> ||
+            std::is_same_v<T, PrivateNameFunctionTable::SingleFunctionEntry> ||
+            std::is_same_v<T, PrivateNameFunctionTable::GetterSetterEntry>,
+        "T must be a PrivateNameFunctionTable type");
+    assert(decl);
+    assert(decl->customData);
+    if constexpr (std::is_same_v<T, PrivateNameFunctionTable::BaseEntry>) {
+      assert(
+          decl->kind == sema::Decl::Kind::PrivateMethod ||
+          decl->kind == sema::Decl::Kind::PrivateGetter ||
+          decl->kind == sema::Decl::Kind::PrivateSetter ||
+          decl->kind == sema::Decl::Kind::PrivateGetterSetter);
+    }
+    if constexpr (std::is_same_v<
+                      T,
+                      PrivateNameFunctionTable::SingleFunctionEntry>) {
+      assert(
+          decl->kind == sema::Decl::Kind::PrivateMethod ||
+          decl->kind == sema::Decl::Kind::PrivateGetter ||
+          decl->kind == sema::Decl::Kind::PrivateSetter);
+    }
+    if constexpr (std::is_same_v<
+                      T,
+                      PrivateNameFunctionTable::GetterSetterEntry>) {
+      assert(decl->kind == sema::Decl::Kind::PrivateGetterSetter);
+    }
+    return static_cast<T *>(decl->customData);
   }
 };
 

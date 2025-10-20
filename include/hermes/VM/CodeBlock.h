@@ -11,6 +11,7 @@
 #include "JIT/Config.h"
 #include "hermes/BCGen/HBC/BCProvider.h"
 #include "hermes/BCGen/HBC/BytecodeFileFormat.h"
+#include "hermes/BCGen/HBC/HBC.h"
 #include "hermes/Inst/Inst.h"
 #include "hermes/Support/SourceErrorManager.h"
 #include "hermes/VM/HermesValue.h"
@@ -37,7 +38,8 @@ typedef HermesValue (*JITCompiledFunctionPtr)(Runtime *runtime);
 class CodeBlock final : private llvh::TrailingObjects<
                             CodeBlock,
                             ReadPropertyCacheEntry,
-                            WritePropertyCacheEntry> {
+                            WritePropertyCacheEntry,
+                            PrivateNameCacheEntry> {
   friend TrailingObjects;
   friend struct RuntimeOffsets;
 
@@ -80,27 +82,38 @@ class CodeBlock final : private llvh::TrailingObjects<
   const uint32_t readPropertyCacheSize_;
   const uint32_t writePropertyCacheSize_;
 
+  /// Total size of the private name cache.
+  const uint32_t privateNameCacheSize_;
+
   CodeBlock(
       RuntimeModule *runtimeModule,
       hbc::RuntimeFunctionHeader header,
       const uint8_t *bytecode,
       uint32_t functionID,
       uint32_t readCacheSize,
-      uint32_t writeCacheSize)
+      uint32_t writeCacheSize,
+      uint32_t privateNameCacheSize)
       : runtimeModule_(runtimeModule),
         functionHeader_(header),
         bytecode_(bytecode),
         functionID_(functionID),
         readPropertyCacheSize_(readCacheSize),
-        writePropertyCacheSize_(writeCacheSize) {
+        writePropertyCacheSize_(writeCacheSize),
+        privateNameCacheSize_(privateNameCacheSize) {
     std::uninitialized_fill_n(
         readPropertyCache(), readCacheSize, ReadPropertyCacheEntry{});
     std::uninitialized_fill_n(
         writePropertyCache(), writeCacheSize, WritePropertyCacheEntry{});
+    std::uninitialized_fill_n(
+        privateNameCache(), privateNameCacheSize, PrivateNameCacheEntry{});
   }
 
   size_t numTrailingObjects(OverloadToken<ReadPropertyCacheEntry>) const {
     return readPropertyCacheSize_;
+  }
+
+  size_t numTrailingObjects(OverloadToken<WritePropertyCacheEntry>) const {
+    return writePropertyCacheSize_;
   }
 
  public:
@@ -124,6 +137,11 @@ class CodeBlock final : private llvh::TrailingObjects<
 
   WritePropertyCacheEntry *writePropertyCache() {
     return getTrailingObjects<WritePropertyCacheEntry>();
+  }
+
+  /// \return the base pointer of the private name cache.
+  PrivateNameCacheEntry *privateNameCache() {
+    return getTrailingObjects<PrivateNameCacheEntry>();
   }
 
   uint32_t getParamCount() const {
@@ -197,8 +215,6 @@ class CodeBlock final : private llvh::TrailingObjects<
   /// with the current function if an entry is found, or llvh::None if not.
   OptValue<uint32_t> getFunctionSourceID() const;
 
-  OptValue<uint32_t> getDebugLexicalDataOffset() const;
-
   const inst::Inst *getOffsetPtr(uint32_t offset) const {
     assert(begin() + offset < end() && "offset out of bounds");
     return reinterpret_cast<const inst::Inst *>(begin() + offset);
@@ -227,15 +243,21 @@ class CodeBlock final : private llvh::TrailingObjects<
   bool coordsInLazyFunction(SMLoc loc) const;
 
   /// \return a vector representing the number of Variables for each depth
-  ///   of the VariableScope chain.
-  std::vector<uint32_t> getVariableCounts() const;
+  ///   of the VariableScope chain, starting from \p
+  ///   lexicalScopeIdxInParentFunction.
+  std::vector<uint32_t> getVariableCounts(
+      uint32_t lexicalScopeIdxInParentFunction) const;
 
   /// \param depth the depth of the VariableScope to lookup, 0 is the
   ///   the current CodeBlock.
   /// \param variableIndex the index of the Variable in the VariableScope.
-  /// \return the name of the Variable at a given index at the given depth.
-  llvh::StringRef getVariableNameAtDepth(uint32_t depth, uint32_t variableIndex)
-      const;
+  /// \param lexicalScopeIdxInParentFunction the lexical scope idx to start the
+  ///   search at.
+  ///   \return a tuple of <var name, env depth, slot in env>.
+  hbc::VariableInfoAtDepth getVariableInfoAtDepth(
+      uint32_t depth,
+      uint32_t variableIndex,
+      uint32_t lexicalScopeIdxInParentFunction) const;
 
 #if HERMESVM_JIT
   /// \return true if JIT is disabled for this function.
@@ -313,8 +335,15 @@ class CodeBlock final : private llvh::TrailingObjects<
     return &writePropertyCache()[idx];
   }
 
-  // Mark all hidden classes in the property cache as roots.
-  void markCachedHiddenClasses(Runtime &runtime, WeakRootAcceptor &acceptor);
+  inline PrivateNameCacheEntry *getPrivateNameCacheEntry(uint8_t idx) {
+    assert(idx < privateNameCacheSize_ && "idx out of PrivateNameCache bound");
+    return &privateNameCache()[idx];
+  }
+
+  /// Traverse through elements of the different caches in this code block and
+  /// mark any weak ones. This means all hidden classes in the property caches
+  /// and weak symbols in the private name cache.
+  void markWeakElementsInCaches(Runtime &runtime, WeakRootAcceptor &acceptor);
 
   /// Create a CodeBlock for a given runtime module \p runtimeModule.
   /// The result must be deallocated via the overridden delete operator,

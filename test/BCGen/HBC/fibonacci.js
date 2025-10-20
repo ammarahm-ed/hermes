@@ -23,6 +23,10 @@ function fibonacci(num) {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -36,25 +40,25 @@ function fibonacci(num) {
 // CHECK-NEXT:i1[ASCII, 6..14] #85794EA3: fibonacci
 
 // CHECK:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:[@ 0] DeclareGlobalVar 1<UInt32>
-// CHECK-NEXT:[@ 5] GetGlobalObject 1<Reg8>
+// CHECK-NEXT:[@ 5] GetGlobalObject 2<Reg8>
 // CHECK-NEXT:[@ 7] LoadConstUndefined 0<Reg8>
-// CHECK-NEXT:[@ 9] CreateClosure 2<Reg8>, 0<Reg8>, 1<UInt16>
-// CHECK-NEXT:[@ 14] PutByIdLoose 1<Reg8>, 2<Reg8>, 1<UInt8>, 1<UInt16>
+// CHECK-NEXT:[@ 9] CreateClosure 1<Reg8>, 0<Reg8>, 1<UInt16>
+// CHECK-NEXT:[@ 14] PutByIdLoose 2<Reg8>, 1<Reg8>, 0<UInt8>, 1<UInt16>
 // CHECK-NEXT:[@ 20] Ret 0<Reg8>
 
 // CHECK:Function<fibonacci>(2 params, 15 registers, 2 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x000a, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x000b
 // CHECK-NEXT:[@ 0] LoadParam 5<Reg8>, 1<UInt8>
 // CHECK-NEXT:[@ 3] LoadConstUInt8 1<Reg8>, 1<UInt8>
 // CHECK-NEXT:[@ 6] JLessEqual 45<Addr8>, 5<Reg8>, 1<Reg8>
 // CHECK-NEXT:[@ 10] GetGlobalObject 3<Reg8>
-// CHECK-NEXT:[@ 12] GetByIdShort 4<Reg8>, 3<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 12] GetByIdShort 4<Reg8>, 3<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 17] Sub 0<Reg8>, 5<Reg8>, 1<Reg8>
 // CHECK-NEXT:[@ 21] LoadConstUndefined 2<Reg8>
 // CHECK-NEXT:[@ 23] Call2 4<Reg8>, 4<Reg8>, 2<Reg8>, 0<Reg8>
-// CHECK-NEXT:[@ 28] GetByIdShort 3<Reg8>, 3<Reg8>, 1<UInt8>, 1<UInt8>
+// CHECK-NEXT:[@ 28] GetByIdShort 3<Reg8>, 3<Reg8>, 0<UInt8>, 1<UInt8>
 // CHECK-NEXT:[@ 33] LoadConstUInt8 0<Reg8>, 2<UInt8>
 // CHECK-NEXT:[@ 36] Sub 0<Reg8>, 5<Reg8>, 0<Reg8>
 // CHECK-NEXT:[@ 40] Call2 3<Reg8>, 3<Reg8>, 2<Reg8>, 0<Reg8>
@@ -72,7 +76,7 @@ function fibonacci(num) {
 // CHECK-NEXT:  0x0000  function idx 0, starts at line 10 col 1
 // CHECK-NEXT:    bc 0: line 10 col 1
 // CHECK-NEXT:    bc 14: line 10 col 1
-// CHECK-NEXT:  0x000a  function idx 1, starts at line 10 col 1
+// CHECK-NEXT:  0x000b  function idx 1, starts at line 10 col 1
 // CHECK-NEXT:    bc 6: line 11 col 3
 // CHECK-NEXT:    bc 12: line 13 col 10
 // CHECK-NEXT:    bc 17: line 13 col 20
@@ -81,4 +85,4 @@ function fibonacci(num) {
 // CHECK-NEXT:    bc 36: line 13 col 41
 // CHECK-NEXT:    bc 40: line 13 col 40
 // CHECK-NEXT:    bc 45: line 13 col 10
-// CHECK-NEXT:  0x0026  end of debug source table
+// CHECK-NEXT:  0x0028  end of debug source table

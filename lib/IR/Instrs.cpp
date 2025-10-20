@@ -54,12 +54,13 @@ const char *UnaryOperatorInst::opStringRepr[] =
     {"void", "-", "~", "!", "++", "--"};
 
 const char *BinaryOperatorInst::opStringRepr[] = {
-    "==", "!=", "===", "!==", "<", "<=", ">", ">=", "<<", ">>", ">>>",
-    "+",  "-",  "*",   "/",   "%", "|",  "^", "&",  "**", "in", "instanceof"};
+    "==", "!=", "===", "!==", "<",  "<=", ">",         ">=",
+    "<<", ">>", ">>>", "+",   "-",  "*",  "/",         "%",
+    "|",  "^",  "&",   "**",  "in", "in", "instanceof"};
 
 const char *BinaryOperatorInst::assignmentOpStringRepr[] = {
-    "",   "",   "",   "",   "",   "",   "",   "",   "<<=", ">>=", ">>>=",
-    "+=", "-=", "*=", "/=", "%=", "|=", "^=", "&=", "**=", "",    ""};
+    "",   "",   "",   "",   "",   "",   "",   "",    "<<=", ">>=", ">>>=", "+=",
+    "-=", "*=", "/=", "%=", "|=", "^=", "&=", "**=", "",    "",    ""};
 
 ValueKind UnaryOperatorInst::parseOperator(llvh::StringRef op) {
   for (int i = 0; i < HERMES_IR_CLASS_LENGTH(UnaryOperatorInst); ++i) {
@@ -115,6 +116,10 @@ SideEffect BinaryOperatorInst::getBinarySideEffect(
     case ValueKind::BinaryInInstKind:
     case ValueKind::BinaryInstanceOfInstKind:
       return SideEffect::createExecute();
+
+    // Checking for a private property cannot execute any JS, but it can throw.
+    case ValueKind::BinaryPrivateInInstKind:
+      return SideEffect{}.setThrow();
 
     // Strict equality does not throw or have other side effects (per
     // ES5 11.9.6).
@@ -214,7 +219,7 @@ unsigned SwitchInst::getNumCasePair() const {
 }
 
 std::pair<Literal *, BasicBlock *> SwitchInst::getCasePair(unsigned i) const {
-  // The values and lables are twined together. Find the index of the pair
+  // The values and labels are twined together. Find the index of the pair
   // that we are fetching and return the two values.
   unsigned base = i * 2 + FirstCaseIdx;
   return std::make_pair(
@@ -367,21 +372,32 @@ GetNextPNameInst::GetNextPNameInst(
   pushOperand(onSome);
 }
 
-SwitchImmInst::SwitchImmInst(
+BaseSwitchImmInst::BaseSwitchImmInst(
+    ValueKind kind,
+    Value *input,
+    BasicBlock *defaultBlock,
+    LiteralNumber *size)
+    : TerminatorInst(kind) {
+  pushOperand(input);
+  pushOperand(defaultBlock);
+  pushOperand(size);
+}
+
+UIntSwitchImmInst::UIntSwitchImmInst(
     Value *input,
     BasicBlock *defaultBlock,
     LiteralNumber *minValue,
     LiteralNumber *size,
     const ValueListType &values,
     const BasicBlockListType &blocks)
-    : TerminatorInst(ValueKind::SwitchImmInstKind) {
-  pushOperand(input);
-  pushOperand(defaultBlock);
-
+    : BaseSwitchImmInst(
+          ValueKind::UIntSwitchImmInstKind,
+          input,
+          defaultBlock,
+          size) {
   assert(minValue->isUInt32Representible() && "minValue must be uint32_t");
   pushOperand(minValue);
   assert(size->isUInt32Representible() && "size must be uint32_t");
-  pushOperand(size);
   assert(
       minValue->asUInt32() + size->asUInt32() >= minValue->asUInt32() &&
       "minValue + size must not overflow");
@@ -397,20 +413,41 @@ SwitchImmInst::SwitchImmInst(
   }
 }
 
-BasicBlock *SwitchImmInst::getSuccessorImpl(unsigned idx) const {
+StringSwitchImmInst::StringSwitchImmInst(
+    Value *input,
+    BasicBlock *defaultBlock,
+    LiteralNumber *size,
+    const ValueListType &values,
+    const BasicBlockListType &blocks)
+    : BaseSwitchImmInst(
+          ValueKind::StringSwitchImmInstKind,
+          input,
+          defaultBlock,
+          size) {
+  assert(blocks.size() && "Empty switch statement (no cases?)");
+  assert(values.size() == blocks.size() && "Block-value pairs mismatch");
+
+  // Push the switch targets.
+  for (size_t i = 0, e = values.size(); i < e; ++i) {
+    pushOperand(values[i]);
+    pushOperand(blocks[i]);
+  }
+}
+
+BasicBlock *BaseSwitchImmInst::getSuccessorImpl(unsigned idx) const {
   assert(idx < getNumSuccessorsImpl() && "getSuccessor out of bound!");
   if (idx == 0)
     return getDefaultDestination();
-  return getCasePair(idx - 1).second;
+  return getSwitchTarget(idx - 1);
 }
 
-void SwitchImmInst::setSuccessorImpl(unsigned idx, BasicBlock *B) {
+void BaseSwitchImmInst::setSuccessorImpl(unsigned idx, BasicBlock *B) {
   assert(idx < getNumSuccessorsImpl() && "setSuccessor out of bound!");
   if (idx == 0) {
     setOperand(B, DefaultBlockIdx);
     return;
   }
-  setOperand(B, FirstCaseIdx + (idx - 1) * 2 + 1);
+  setOperand(B, getFirstCaseIdx() + (idx - 1) * 2 + 1);
 }
 
 bool Instruction::isIdenticalTo(const Instruction *RHS) const {
@@ -442,7 +479,10 @@ class InstructionHashConstructor
 };
 } // namespace
 
-llvh::hash_code Instruction::getHashCode() const {
+llvh::hash_code Instruction::getSimpleHashCode() const {
+  assert(
+      getKind() != ValueKind::PhiInstKind &&
+      "Simple hash code doesn't handle Phi's, because they allow loops.");
   llvh::hash_code hc =
       llvh::hash_combine((unsigned)getKind(), getNumOperands());
 

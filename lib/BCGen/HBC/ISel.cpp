@@ -8,6 +8,8 @@
 #include "ISel.h"
 
 #include "BytecodeGenerator.h"
+#include "hermes/BCGen/HBC/BytecodeFileFormat.h"
+#include "hermes/BCGen/HBC/DebugInfo.h"
 #include "hermes/BCGen/HBC/HBC.h"
 #include "hermes/BCGen/HBC/HVMRegisterAllocator.h"
 #include "hermes/BCGen/MovElimination.h"
@@ -38,8 +40,6 @@ void HVMRegisterAllocator::allocateCallInst(BaseCallInst *I) {
 
 namespace {
 
-#define INCLUDE_HBC_INSTRS
-
 STATISTIC(NumJumpPass, "Number of passes to resolve all jump targets");
 STATISTIC(
     NumUncachedNodes,
@@ -53,6 +53,12 @@ STATISTIC(
 STATISTIC(
     NumPutCacheSlots,
     "Number of cache slots allocated for all put property instructions");
+STATISTIC(
+    NumFunctionsWithWriteCache,
+    "Number of functions with at least one put property instruction");
+STATISTIC(
+    NumFunctionsWithReadCache,
+    "Number of functions with at least one get property instruction");
 
 /// Given a list of basic blocks \p blocks linearized into the order they will
 /// be generated, \return the set of those basic blocks containing backwards
@@ -87,6 +93,8 @@ class HBCISel {
       DebugInfo,
       // Jump table dispatch
       JumpTableDispatch,
+      // String switch table dispatch
+      StringSwitchDispatch,
     };
 
     /// The current location of this relocation.
@@ -100,8 +108,9 @@ class HBCISel {
     Value *pointer;
   };
 
-  /// Info about a jump table instruction used during jump relocation.
-  struct SwitchImmInfo {
+  /// Info about a UIntSwitchImm (jump table) instruction, for use during jump
+  /// relocation.
+  struct UIntSwitchImmInfo {
     /// Offset of the instruction
     uint32_t offset;
 
@@ -112,6 +121,26 @@ class HBCISel {
     /// The i'th index indicates which basic block should be jumped to for value
     /// i
     std::vector<BasicBlock *> table;
+  };
+
+  /// Info for a case of an all-string-case switch statement.
+  struct StringSwitchCase {
+    StringID label;
+    BasicBlock *target;
+  };
+
+  /// Info about a StringSwitchImm instruction, for use during jump relocation.
+  struct StringSwitchImmInfo {
+    /// Offset of the instruction
+    uint32_t offset;
+
+    /// Block to jump to when no matching case is found.
+    BasicBlock *defaultTarget;
+
+    /// The actual string switch table.
+    /// The i'th index is a pair of the string label and basic block should be
+    /// jumped to for the ith case.
+    std::vector<StringSwitchCase> table;
   };
 
   /// The function that we are compiling.
@@ -144,10 +173,18 @@ class HBCISel {
   /// Bytecode generation options.
   const BytecodeGenerationOptions &bytecodeGenerationOptions_;
 
-  /// Map from SwitchImm -> (inst offset, default block, jump table).
-  llvh::DenseMap<SwitchImmInst *, SwitchImmInfo> switchImmInfo_{};
-  using switchInfoEntry =
-      llvh::DenseMap<SwitchImmInst *, SwitchImmInfo>::iterator::value_type;
+  /// Map from UIntSwitchImm -> (inst offset, default block, jump table).
+  llvh::DenseMap<UIntSwitchImmInst *, UIntSwitchImmInfo> uintSwitchImmInfo_{};
+  using uintSwitchInfoEntry = llvh::
+      DenseMap<UIntSwitchImmInst *, UIntSwitchImmInfo>::iterator::value_type;
+
+  /// Map from StringSwitchImm -> (inst offset, default block, string switch
+  /// table).
+  llvh::DenseMap<StringSwitchImmInst *, StringSwitchImmInfo>
+      stringSwitchImmInfo_{};
+  using stringSwitchInfoEntry =
+      llvh::DenseMap<StringSwitchImmInst *, StringSwitchImmInfo>::iterator::
+          value_type;
 
   /// Saved identifier of "__proto__" for fast comparisons.
   Identifier protoIdent_{};
@@ -163,14 +200,20 @@ class HBCISel {
   /// Add long jump instruction to the relocation list.
   void registerLongJump(offset_t loc, BasicBlock *target);
 
-  /// Add a jump table switch to relocation list.
-  void registerSwitchImm(offset_t loc, SwitchImmInst *target);
+  /// Add a UIntSwitchImm (jump table) switch to relocation list.
+  void registerUIntSwitchImm(offset_t loc, UIntSwitchImmInst *target);
+
+  /// Add a StringSwitchImm (string switch table) switch to relocation list.
+  void registerStringSwitchImm(offset_t loc, StringSwitchImmInst *target);
 
   /// Resolve all exception handlers.
   void resolveExceptionHandlers();
 
   /// Generate the jump table into the final representation.
   void generateJumpTable();
+
+  /// Generate the string switch table into the final representation.
+  void generateStringSwitchTable();
 
   /// Conveniently extract file/line/column from a SMLoc.
   /// Associate the source map script ID with the filename ID in the Module.
@@ -186,14 +229,11 @@ class HBCISel {
       unsigned bufId);
 
   /// Add applicable debug info.
-  void addDebugSourceLocationInfo(SourceMapGenerator *outSourceMap);
+  void addDebugSourceLocationInfo();
   void addDebugLexicalInfo();
 
   /// Populate Property caching metadata to the function.
   void populatePropertyCachingInfo();
-
-  /// Emit instructions at the entry block to handle several special cases.
-  void initialize() {}
 
   /// Emit a mov, or none if it would be a no-op.
   void emitMovIfNeeded(param_t dest, param_t src);
@@ -202,8 +242,12 @@ class HBCISel {
   void verifyCall(BaseCallInst *Inst);
 
   /// The last emitted property cache index.
-  uint8_t lastPropertyReadCacheIndex_{0};
-  uint8_t lastPropertyWriteCacheIndex_{0};
+  uint8_t nextPropertyReadCacheIndex_{0};
+  uint8_t nextPropertyWriteCacheIndex_{0};
+  uint8_t nextPrivateNameCacheIndex_{0};
+
+  /// The next index to use for CacheNewObject.
+  uint8_t numCacheNewObject_{0};
 
   /// This enum is used to provide extra, distinguishing information to the
   /// property reads that would otherwise share of cache index.
@@ -214,6 +258,13 @@ class HBCISel {
       propertyReadCacheIndexForId_;
   llvh::DenseMap<Identifier, uint8_t> propertyWriteCacheIndexForId_;
 
+  /// This enum is used to provide extra, distinguishing information to the
+  /// private name operations that would otherwise share a cache index.
+  enum class PrivateNameOperationKind : uint8_t { ReadWrite = 0, In };
+  /// Map from property name & kind to the private name cache index for that
+  /// name.
+  llvh::DenseMap<std::pair<Value *, int>, uint8_t> privateNameCacheIdx_;
+
   /// Compute and return the index to use for caching the read/write of a
   /// property with the given identifier name.
   /// \param k is the kind of property read cache being acquired.
@@ -221,6 +272,14 @@ class HBCISel {
       Identifier prop,
       PropCacheKind k = PropCacheKind::NormalIdentifier);
   uint8_t acquirePropertyWriteCacheIndex(Identifier prop);
+
+  /// Compute and return the index to use for caching some operation involving a
+  /// private name.
+  /// \param privateName is the symbol value of the private name.
+  /// \k is the kind of operation being performed.
+  uint8_t acquirePrivateNameCacheIndex(
+      Value *privateName,
+      PrivateNameOperationKind k);
 
   /// A cache mapping from buffer ID to filelname+source map.
   FileAndSourceMapIdCache &fileAndSourceMapIdCache_;
@@ -238,14 +297,12 @@ class HBCISel {
 
 /// This is the header declaration for all of the methods that emit opcodes
 /// for specific high-level IR instructions.
-#define INCLUDE_HBC_INSTRS
 #define DEF_VALUE(CLASS, PARENT) \
   void generate##CLASS(CLASS *Inst, BasicBlock *next);
 #define BEGIN_VALUE(CLASS, PARENT) DEF_VALUE(CLASS, PARENT)
 #include "hermes/IR/ValueKinds.def"
 #undef DEF_VALUE
 #undef MARK_VALUE
-#undef INCLUDE_HBC_INSTRS
 
  public:
   /// C'tor.
@@ -267,7 +324,7 @@ class HBCISel {
   }
 
   /// Generate the bytecode stream for the function.
-  void run(SourceMapGenerator *outSourceMap);
+  void run();
 };
 
 unsigned HBCISel::encodeValue(Value *value) {
@@ -286,9 +343,14 @@ void HBCISel::registerLongJump(offset_t loc, BasicBlock *target) {
       {loc, Relocation::RelocationType::LongJumpType, target});
 }
 
-void HBCISel::registerSwitchImm(offset_t loc, SwitchImmInst *inst) {
+void HBCISel::registerUIntSwitchImm(offset_t loc, UIntSwitchImmInst *inst) {
   relocations_.push_back(
       {loc, Relocation::RelocationType::JumpTableDispatch, inst});
+}
+
+void HBCISel::registerStringSwitchImm(offset_t loc, StringSwitchImmInst *inst) {
+  relocations_.push_back(
+      {loc, Relocation::RelocationType::StringSwitchDispatch, inst});
 }
 
 void HBCISel::resolveRelocations() {
@@ -335,14 +397,26 @@ void HBCISel::resolveRelocations() {
         case Relocation::DebugInfo:
           // Nothing, just keep track of the location.
           break;
-        case Relocation::JumpTableDispatch:
-          auto &switchImmInfo = switchImmInfo_[cast<SwitchImmInst>(pointer)];
+        case Relocation::JumpTableDispatch: {
+          auto &uintSwitchImmInfo =
+              uintSwitchImmInfo_[cast<UIntSwitchImmInst>(pointer)];
           // update default target jmp
-          BasicBlock *defaultBlock = switchImmInfo.defaultTarget;
+          BasicBlock *defaultBlock = uintSwitchImmInfo.defaultTarget;
           int defaultOffset = basicBlockMap_[defaultBlock].first - loc;
           BCFGen_->updateJumpTarget(loc + 1 + 1 + 4, defaultOffset, 4);
-          switchImmInfo_[cast<SwitchImmInst>(pointer)].offset = loc;
+          uintSwitchImmInfo_[cast<UIntSwitchImmInst>(pointer)].offset = loc;
           break;
+        }
+        case Relocation::StringSwitchDispatch: {
+          auto &stringSwitchImmInfo =
+              stringSwitchImmInfo_[cast<StringSwitchImmInst>(pointer)];
+          // update default target jmp
+          BasicBlock *defaultBlock = stringSwitchImmInfo.defaultTarget;
+          int defaultOffset = basicBlockMap_[defaultBlock].first - loc;
+          BCFGen_->updateJumpTarget(loc + 1 + 1 + 4 + 4, defaultOffset, 4);
+          stringSwitchImmInfo_[cast<StringSwitchImmInst>(pointer)].offset = loc;
+          break;
+        }
       }
 
       NumJumpPass++;
@@ -369,25 +443,25 @@ void HBCISel::resolveExceptionHandlers() {
 }
 
 void HBCISel::generateJumpTable() {
-  using SwitchInfoEntry =
-      llvh::DenseMap<SwitchImmInst *, SwitchImmInfo>::iterator::value_type;
+  using UIntSwitchInfoEntry = llvh::
+      DenseMap<UIntSwitchImmInst *, UIntSwitchImmInfo>::iterator::value_type;
 
-  if (switchImmInfo_.empty())
+  if (uintSwitchImmInfo_.empty())
     return;
 
   std::vector<uint32_t> res{};
 
   // Sort the jump table entries so iteration order is deterministic.
-  llvh::SmallVector<SwitchInfoEntry, 1> infoVector{
-      switchImmInfo_.begin(), switchImmInfo_.end()};
+  llvh::SmallVector<UIntSwitchInfoEntry, 1> infoVector{
+      uintSwitchImmInfo_.begin(), uintSwitchImmInfo_.end()};
   std::sort(
       infoVector.begin(),
       infoVector.end(),
-      [](SwitchInfoEntry &a, SwitchInfoEntry &b) {
+      [](UIntSwitchInfoEntry &a, UIntSwitchInfoEntry &b) {
         return a.second.offset < b.second.offset;
       });
 
-  // Fix up all SwitchImm instructions with correct offset.
+  // Fix up all UIntSwitchImm instructions with correct offset.
   for (auto &tuple : infoVector) {
     auto entry = tuple.second;
     uint32_t startOfTable = res.size();
@@ -395,14 +469,56 @@ void HBCISel::generateJumpTable() {
       res.push_back(basicBlockMap_[entry.table[jmpIdx]].first - entry.offset);
     }
 
-    BCFGen_->updateJumpTableOffset(
+    BCFGen_->updateTableOffset(
         // Offset is located two bytes from begining of instruction.
         entry.offset + 1 + 1,
-        startOfTable,
+        startOfTable * sizeof(uint32_t),
         entry.offset);
   }
 
   BCFGen_->setJumpTable(std::move(res));
+}
+
+void HBCISel::generateStringSwitchTable() {
+  using StringSwitchInfoEntry =
+      llvh::DenseMap<StringSwitchImmInst *, StringSwitchImmInfo>::iterator::
+          value_type;
+
+  if (stringSwitchImmInfo_.empty())
+    return;
+
+  std::vector<StringSwitchTableCase> res{};
+
+  // Sort the string switch table entries so iteration order is deterministic.
+  llvh::SmallVector<StringSwitchInfoEntry, 1> infoVector{
+      stringSwitchImmInfo_.begin(), stringSwitchImmInfo_.end()};
+  std::sort(
+      infoVector.begin(),
+      infoVector.end(),
+      [](StringSwitchInfoEntry &a, StringSwitchInfoEntry &b) {
+        return a.second.offset < b.second.offset;
+      });
+
+  // Fix up all StringSwitchImm instructions with correct offset.
+  for (auto &tuple : infoVector) {
+    auto entry = tuple.second;
+    uint32_t startOfTable = res.size();
+    for (const StringSwitchCase &stringSwitchCase : entry.table) {
+      res.emplace_back(
+          stringSwitchCase.label,
+          basicBlockMap_[stringSwitchCase.target].first - entry.offset);
+    }
+    BCFGen_->updateTableOffset(
+        // Offset is located 6 bytes from begining of instruction.
+        // (Opcode, value register, global index).
+        entry.offset + 1 + 1 + 4,
+        // baseOffset is the byte size of the jump table.
+        BCFGen_->jumpTableSize() * sizeof(uint32_t) +
+            startOfTable * sizeof(StringSwitchTableCase),
+        entry.offset);
+  }
+
+  BCFGen_->setStringSwitchTable(std::move(res));
 }
 
 bool HBCISel::getDebugSourceLocation(
@@ -471,10 +587,12 @@ inline FileAndSourceMapId HBCISel::obtainFileAndSourceMapId(
   return it->second;
 }
 
-void HBCISel::addDebugSourceLocationInfo(SourceMapGenerator *outSourceMap) {
+void HBCISel::addDebugSourceLocationInfo() {
   bool needDebugStatementNo =
       F_->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL ||
       F_->getContext().getDebugInfoSetting() == DebugInfoSetting::SOURCE_MAP;
+  bool needsScopingInfo =
+      F_->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL;
   auto &manager = F_->getContext().getSourceErrorManager();
   IRBuilder builder(F_);
 
@@ -507,6 +625,35 @@ void HBCISel::addDebugSourceLocationInfo(SourceMapGenerator *outSourceMap) {
       info.statement = 0;
     }
     info.address = reloc.loc;
+
+    // Set the scoping state for this debug source location.
+    auto envID = inst->getEnvironmentID();
+    auto *lexScope = inst->getLexicalScope();
+    if (!needsScopingInfo || envID == 0 || lexScope == nullptr) {
+      // If we aren't generating scoping info, or the envID/lexical scope wasn't
+      // tracked properly, then there is no scoping information we can generate.
+      // An index of 0 is reserved to indicate no scoping information.
+      info.envIdx = 0;
+    } else {
+      assert(
+          envID >= Instruction::kFirstScopeCreationIdIndex &&
+          "expected valid environment ID");
+      auto *implicitEnvOp = inst->getImplicitEnvOperand();
+      // If the implicit environment operand is a Variable, this means it
+      // was spilled to the parent environment because of the generator
+      // lowering pass.
+      // If the implicit environment operand is an Instruction, it is still
+      // reachable and reserved in a register.
+      DebugScopingInfo debInfo = llvh::isa<Variable>(implicitEnvOp)
+          ? DebugScopingInfo::forSpilledSlot(
+                llvh::cast<Variable>(implicitEnvOp)->getIndexInVariableList(),
+                lexScope->idxInParentFunction)
+          : DebugScopingInfo::forRegister(
+                encodeValue(llvh::cast<Instruction>(implicitEnvOp)),
+                lexScope->idxInParentFunction);
+      info.envIdx = BCFGen_->addScopingInfo(debInfo);
+    }
+
     BCFGen_->addDebugSourceLocation(info);
   }
 
@@ -536,8 +683,16 @@ void HBCISel::addDebugLexicalInfo() {
 }
 
 void HBCISel::populatePropertyCachingInfo() {
-  BCFGen_->setHighestReadCacheIndex(lastPropertyReadCacheIndex_);
-  BCFGen_->setHighestWriteCacheIndex(lastPropertyWriteCacheIndex_);
+  BCFGen_->setReadCacheSize(nextPropertyReadCacheIndex_);
+  BCFGen_->setWriteCacheSize(nextPropertyWriteCacheIndex_);
+  BCFGen_->setNumCacheNewObject(numCacheNewObject_);
+  BCFGen_->setPrivateNameCacheSize(nextPrivateNameCacheIndex_);
+  if (nextPropertyReadCacheIndex_ > 0) {
+    NumFunctionsWithReadCache++;
+  }
+  if (nextPropertyWriteCacheIndex_ > 0) {
+    NumFunctionsWithWriteCache++;
+  }
 }
 
 void HBCISel::generateDirectEvalInst(DirectEvalInst *Inst, BasicBlock *next) {
@@ -566,6 +721,15 @@ void HBCISel::generateToPropertyKeyInst(
   auto dst = encodeValue(Inst);
   auto src = encodeValue(Inst->getSingleOperand());
   BCFGen_->emitToPropertyKey(dst, src);
+}
+
+void HBCISel::generateCreatePrivateNameInst(
+    CreatePrivateNameInst *Inst,
+    BasicBlock *next) {
+  auto dst = encodeValue(Inst);
+  auto *descStr = llvh::cast<LiteralString>(Inst->getSingleOperand());
+  auto id = BCFGen_->getIdentifierID(descStr);
+  BCFGen_->emitCreatePrivateName(dst, id);
 }
 
 void HBCISel::generateAsNumberInst(AsNumberInst *Inst, BasicBlock *next) {
@@ -695,7 +859,6 @@ void HBCISel::generateUnaryOperatorInst(
     }
     default:
       llvm_unreachable("Can't handle this operation");
-      break;
   }
 }
 void HBCISel::generateLoadFrameInst(
@@ -791,7 +954,6 @@ void HBCISel::generateBinaryOperatorInst(
       break;
     case ValueKind::BinaryExponentiationInstKind: // ** (**=)
       llvm_unreachable("ExponentiationKind emits a HermesInternal call");
-      break;
     case ValueKind::BinaryModuloInstKind: // %   (%=)
       BCFGen_->emitMod(res, left, right);
       break;
@@ -806,6 +968,14 @@ void HBCISel::generateBinaryOperatorInst(
       break;
     case ValueKind::BinaryInInstKind: // "in"
       BCFGen_->emitIsIn(res, left, right);
+      break;
+    case ValueKind::BinaryPrivateInInstKind: // #privateName "in"
+      BCFGen_->emitPrivateIsIn(
+          res,
+          left,
+          right,
+          acquirePrivateNameCacheIndex(
+              Inst->getRightHandSide(), PrivateNameOperationKind::In));
       break;
     case ValueKind::BinaryInstanceOfInstKind: // instanceof
       BCFGen_->emitInstanceOf(res, left, right);
@@ -927,44 +1097,16 @@ void HBCISel::generateDefineOwnPropertyInst(
   auto valueReg = encodeValue(Inst->getStoredValue());
   auto objReg = encodeValue(Inst->getObject());
   Value *prop = Inst->getProperty();
-  bool isEnumerable = Inst->getIsEnumerable();
 
   // If the property is a LiteralNumber, the property is enumerable, and it is a
   // valid array index, it is coming from an array initialization and we will
   // emit it as DefineOwnByIndex.
   auto *numProp = llvh::dyn_cast<LiteralNumber>(prop);
-  if (numProp && isEnumerable) {
-    if (auto arrayIndex = numProp->convertToArrayIndex()) {
-      uint32_t index = arrayIndex.getValue();
-      if (index <= UINT8_MAX) {
-        BCFGen_->emitDefineOwnByIndex(objReg, valueReg, index);
-      } else {
-        BCFGen_->emitDefineOwnByIndexL(objReg, valueReg, index);
-      }
-
-      return;
-    }
-  }
-
-  // It is a register operand.
-  auto propReg = encodeValue(Inst->getProperty());
-  BCFGen_->emitDefineOwnByVal(
-      objReg, valueReg, propReg, Inst->getIsEnumerable());
-}
-
-void HBCISel::generateDefineNewOwnPropertyInst(
-    DefineNewOwnPropertyInst *Inst,
-    BasicBlock *next) {
-  auto valueReg = encodeValue(Inst->getStoredValue());
-  auto objReg = encodeValue(Inst->getObject());
-  auto prop = Inst->getProperty();
-  bool isEnumerable = Inst->getIsEnumerable();
-
-  if (auto *numProp = llvh::dyn_cast<LiteralNumber>(prop)) {
+  if (numProp) {
     assert(
-        isEnumerable &&
-        "No way to generate non-enumerable indexed DefineNewOwnPropertyInst.");
-    uint32_t index = *numProp->convertToArrayIndex();
+        Inst->getIsEnumerable() &&
+        "Non-enumerable properties with literal keys should be handled by LoadConstants");
+    uint32_t index = numProp->convertToArrayIndex().getValue();
     if (index <= UINT8_MAX) {
       BCFGen_->emitDefineOwnByIndex(objReg, valueReg, index);
     } else {
@@ -973,24 +1115,72 @@ void HBCISel::generateDefineNewOwnPropertyInst(
     return;
   }
 
-  auto strProp = cast<LiteralString>(prop);
-  auto id = BCFGen_->getIdentifierID(strProp);
-
-  if (isEnumerable) {
-    if (id > UINT16_MAX) {
-      BCFGen_->emitPutNewOwnByIdLong(objReg, valueReg, id);
-    } else if (id > UINT8_MAX) {
-      BCFGen_->emitPutNewOwnById(objReg, valueReg, id);
+  if (auto *Lit = llvh::dyn_cast<LiteralString>(prop)) {
+    assert(
+        Inst->getIsEnumerable() &&
+        "Non-enumerable properties with literal keys should be handled by LoadConstants");
+    auto id = BCFGen_->getIdentifierID(Lit);
+    if (id <= UINT16_MAX) {
+      BCFGen_->emitDefineOwnById(
+          objReg,
+          valueReg,
+          acquirePropertyWriteCacheIndex(Lit->getValue()),
+          id);
     } else {
-      BCFGen_->emitPutNewOwnByIdShort(objReg, valueReg, id);
+      BCFGen_->emitDefineOwnByIdLong(
+          objReg,
+          valueReg,
+          acquirePropertyWriteCacheIndex(Lit->getValue()),
+          id);
     }
-  } else {
-    if (id > UINT16_MAX) {
-      BCFGen_->emitPutNewOwnNEByIdLong(objReg, valueReg, id);
-    } else {
-      BCFGen_->emitPutNewOwnNEById(objReg, valueReg, id);
-    }
+    return;
   }
+
+  // It is a register operand.
+  auto propReg = encodeValue(Inst->getProperty());
+  BCFGen_->emitDefineOwnByVal(
+      objReg, valueReg, propReg, Inst->getIsEnumerable());
+}
+
+void HBCISel::generateDefineOwnInDenseArrayInst(
+    DefineOwnInDenseArrayInst *Inst,
+    BasicBlock *next) {
+  auto valueReg = encodeValue(Inst->getStoredValue());
+  auto objReg = encodeValue(Inst->getArray());
+  LiteralNumber *arrayIndex = Inst->getArrayIndex();
+  uint32_t index = arrayIndex->asUInt32();
+  if (index <= UINT8_MAX) {
+    BCFGen_->emitDefineOwnInDenseArray(objReg, valueReg, index);
+  } else if (index <= UINT16_MAX) {
+    // Dense arrays can only be UINT16_MAX because NewArray doesn't accept
+    // lengths over UINT16_MAX.
+    BCFGen_->emitDefineOwnInDenseArrayL(objReg, valueReg, index);
+  } else {
+    // Fallback: use DefineOwnByIndex.
+    BCFGen_->emitDefineOwnByIndexL(objReg, valueReg, index);
+  }
+}
+
+void HBCISel::generateStoreOwnPrivateFieldInst(
+    StoreOwnPrivateFieldInst *Inst,
+    BasicBlock *next) {
+  auto objReg = encodeValue(Inst->getObject());
+  auto valueReg = encodeValue(Inst->getStoredValue());
+  auto prop = Inst->getProperty();
+  auto propReg = encodeValue(prop);
+  uint32_t privateNameCacheIdx = acquirePrivateNameCacheIndex(
+      Inst->getProperty(), PrivateNameOperationKind::ReadWrite);
+  BCFGen_->emitPutOwnPrivateBySym(
+      objReg, valueReg, privateNameCacheIdx, propReg);
+}
+
+void HBCISel::generateAddOwnPrivateFieldInst(
+    AddOwnPrivateFieldInst *Inst,
+    BasicBlock *next) {
+  auto objReg = encodeValue(Inst->getObject());
+  auto valueReg = encodeValue(Inst->getStoredValue());
+  auto symReg = encodeValue(Inst->getProperty());
+  BCFGen_->emitAddOwnPrivateBySym(objReg, valueReg, symReg);
 }
 
 void HBCISel::generateDefineOwnGetterSetterInst(
@@ -1065,6 +1255,18 @@ void HBCISel::generateLoadPropertyInst(
 
   auto propReg = encodeValue(prop);
   BCFGen_->emitGetByVal(resultReg, objReg, propReg);
+}
+void HBCISel::generateLoadOwnPrivateFieldInst(
+    LoadOwnPrivateFieldInst *Inst,
+    BasicBlock *next) {
+  auto resultReg = encodeValue(Inst);
+  auto objReg = encodeValue(Inst->getObject());
+  auto prop = Inst->getProperty();
+  auto propReg = encodeValue(prop);
+  uint32_t privateNameCacheIdx = acquirePrivateNameCacheIndex(
+      Inst->getProperty(), PrivateNameOperationKind::ReadWrite);
+  BCFGen_->emitGetOwnPrivateBySym(
+      resultReg, objReg, privateNameCacheIdx, propReg);
 }
 
 void HBCISel::generateLoadPropertyWithReceiverInst(
@@ -1141,7 +1343,21 @@ void HBCISel::generateAllocObjectLiteralInst(
   auto result = encodeValue(Inst);
   assert(
       Inst->getKeyValuePairCount() == 0 &&
-      "AllocObjectLiteralInst with properties should be lowered to HBCAllocObjectFromBufferInst");
+      "AllocObjectLiteralInst with properties should be lowered to LIRAllocObjectFromBufferInst");
+  if (llvh::isa<EmptySentinel>(Inst->getParentObject())) {
+    BCFGen_->emitNewObject(result);
+  } else {
+    auto parentReg = encodeValue(Inst->getParentObject());
+    BCFGen_->emitNewObjectWithParent(result, parentReg);
+  }
+}
+void HBCISel::generateAllocTypedObjectInst(
+    AllocTypedObjectInst *Inst,
+    BasicBlock *) {
+  auto result = encodeValue(Inst);
+  assert(
+      Inst->getKeyValuePairCount() == 0 &&
+      "AllocTypedObjectInst with properties should be lowered to LIRAllocObjectFromBufferInst");
   if (llvh::isa<EmptySentinel>(Inst->getParentObject())) {
     BCFGen_->emitNewObject(result);
   } else {
@@ -1194,13 +1410,20 @@ void HBCISel::generateCreateFunctionInst(
   }
 }
 
-void HBCISel::generateHBCAllocObjectFromBufferInst(
-    HBCAllocObjectFromBufferInst *Inst,
+void HBCISel::generateLIRAllocObjectFromBufferInst(
+    LIRAllocObjectFromBufferInst *Inst,
     BasicBlock *next) {
   auto result = encodeValue(Inst);
   auto buffIdxs =
       BCFGen_->getBytecodeModuleGenerator().serializedLiteralOffsetFor(Inst);
-  if (buffIdxs.shapeTableIdx <= UINT16_MAX &&
+  if (!llvh::isa<EmptySentinel>(Inst->getParentObject())) {
+    BCFGen_->emitNewObjectWithBufferAndParent(
+        result,
+        encodeValue(Inst->getParentObject()),
+        buffIdxs.shapeTableIdx,
+        buffIdxs.valueBufferOffset);
+  } else if (
+      buffIdxs.shapeTableIdx <= UINT16_MAX &&
       buffIdxs.valueBufferOffset <= UINT16_MAX) {
     BCFGen_->emitNewObjectWithBuffer(
         result, buffIdxs.shapeTableIdx, buffIdxs.valueBufferOffset);
@@ -1284,10 +1507,16 @@ void HBCISel::generateThrowIfInst(
     hermes::ThrowIfInst *Inst,
     hermes::BasicBlock *next) {
   assert(
-      Inst->getInvalidTypes()->getData().isEmptyType() &&
-      "Only Empty supported");
-  BCFGen_->emitThrowIfEmpty(
-      encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+      (Inst->getInvalidTypes()->getData().isEmptyType() ||
+       Inst->getInvalidTypes()->getData().isUninitType()) &&
+      "Only Empty/Undefined supported");
+  if (Inst->getInvalidTypes()->getData().isEmptyType()) {
+    BCFGen_->emitThrowIfEmpty(
+        encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+  } else {
+    BCFGen_->emitThrowIfUndefined(
+        encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+  }
 }
 void HBCISel::generateThrowIfThisInitializedInst(
     hermes::ThrowIfThisInitializedInst *Inst,
@@ -1297,6 +1526,11 @@ void HBCISel::generateThrowIfThisInitializedInst(
 }
 void HBCISel::generateSwitchInst(SwitchInst *Inst, BasicBlock *next) {
   llvm_unreachable("SwitchInst should have been lowered");
+}
+void HBCISel::generateBaseSwitchImmInst(
+    BaseSwitchImmInst *Inst,
+    BasicBlock *next) {
+  llvm_unreachable("Not a concrete instruction");
 }
 void HBCISel::generateSaveAndYieldInst(
     SaveAndYieldInst *Inst,
@@ -1315,11 +1549,6 @@ void HBCISel::generateCreateGeneratorInst(
   } else {
     BCFGen_->emitCreateGeneratorLongIndex(output, env, code);
   }
-}
-void HBCISel::generateStartGeneratorInst(
-    StartGeneratorInst *Inst,
-    BasicBlock *next) {
-  llvm_unreachable("StartGeneratorInst should have been lowered");
 }
 void HBCISel::generateResumeGeneratorInst(
     ResumeGeneratorInst *Inst,
@@ -1430,7 +1659,6 @@ void HBCISel::generateHBCCompareBranchInst(
 
     default:
       llvm_unreachable("invalid compare+branch operator");
-      break;
   }
 
   registerLongJump(loc, trueBlock);
@@ -1671,8 +1899,8 @@ void HBCISel::generateGetClosureScopeInst(
   BCFGen_->emitGetClosureEnvironment(output, closure);
 }
 
-void HBCISel::generateHBCLoadConstInst(
-    hermes::HBCLoadConstInst *Inst,
+void HBCISel::generateLIRLoadConstInst(
+    hermes::LIRLoadConstInst *Inst,
     hermes::BasicBlock *next) {
   auto output = encodeValue(Inst);
   Literal *literal = Inst->getConst();
@@ -1798,8 +2026,8 @@ void HBCISel::generateHBCProfilePointInst(
   BCFGen_->emitProfilePoint(Inst->getPointIndex());
 }
 
-void HBCISel::generateHBCGetGlobalObjectInst(
-    hermes::HBCGetGlobalObjectInst *Inst,
+void HBCISel::generateLIRGetGlobalObjectInst(
+    hermes::LIRGetGlobalObjectInst *Inst,
     hermes::BasicBlock *next) {
   auto dstReg = encodeValue(Inst);
   BCFGen_->emitGetGlobalObject(dstReg);
@@ -1825,37 +2053,37 @@ void HBCISel::generateCoerceThisNSInst(
   auto src = encodeValue(Inst->getSingleOperand());
   BCFGen_->emitCoerceThisNS(dst, src);
 }
-void HBCISel::generateHBCGetArgumentsLengthInst(
-    hermes::HBCGetArgumentsLengthInst *Inst,
+void HBCISel::generateLIRGetArgumentsLengthInst(
+    hermes::LIRGetArgumentsLengthInst *Inst,
     hermes::BasicBlock *next) {
   auto output = encodeValue(Inst);
   auto reg = encodeValue(Inst->getLazyRegister());
   BCFGen_->emitGetArgumentsLength(output, reg);
 }
-void HBCISel::generateHBCGetArgumentsPropByValLooseInst(
-    hermes::HBCGetArgumentsPropByValLooseInst *Inst,
+void HBCISel::generateLIRGetArgumentsPropByValLooseInst(
+    hermes::LIRGetArgumentsPropByValLooseInst *Inst,
     hermes::BasicBlock *next) {
   auto output = encodeValue(Inst);
   auto index = encodeValue(Inst->getIndex());
   auto reg = encodeValue(Inst->getLazyRegister());
   BCFGen_->emitGetArgumentsPropByValLoose(output, index, reg);
 }
-void HBCISel::generateHBCGetArgumentsPropByValStrictInst(
-    hermes::HBCGetArgumentsPropByValStrictInst *Inst,
+void HBCISel::generateLIRGetArgumentsPropByValStrictInst(
+    hermes::LIRGetArgumentsPropByValStrictInst *Inst,
     hermes::BasicBlock *next) {
   auto output = encodeValue(Inst);
   auto index = encodeValue(Inst->getIndex());
   auto reg = encodeValue(Inst->getLazyRegister());
   BCFGen_->emitGetArgumentsPropByValStrict(output, index, reg);
 }
-void HBCISel::generateHBCReifyArgumentsLooseInst(
-    hermes::HBCReifyArgumentsLooseInst *Inst,
+void HBCISel::generateLIRReifyArgumentsLooseInst(
+    hermes::LIRReifyArgumentsLooseInst *Inst,
     hermes::BasicBlock *next) {
   auto reg = encodeValue(Inst->getLazyRegister());
   BCFGen_->emitReifyArgumentsLoose(reg);
 }
-void HBCISel::generateHBCReifyArgumentsStrictInst(
-    hermes::HBCReifyArgumentsStrictInst *Inst,
+void HBCISel::generateLIRReifyArgumentsStrictInst(
+    hermes::LIRReifyArgumentsStrictInst *Inst,
     hermes::BasicBlock *next) {
   auto reg = encodeValue(Inst->getLazyRegister());
   BCFGen_->emitReifyArgumentsStrict(reg);
@@ -1863,7 +2091,7 @@ void HBCISel::generateHBCReifyArgumentsStrictInst(
 void HBCISel::generateCreateThisInst(CreateThisInst *Inst, BasicBlock *next) {
   auto output = encodeValue(Inst);
   auto closure = encodeValue(Inst->getClosure());
-  if (llvh::isa<EmptySentinel>(Inst->getNewTarget())) {
+  if (Inst->getNewTarget() == Inst->getClosure()) {
     BCFGen_->emitCreateThisForNew(
         output, closure, acquirePropertyReadCacheIndex(prototypeIdent_));
   } else {
@@ -1883,7 +2111,7 @@ void HBCISel::generateGetConstructedObjectInst(
   auto constructed = encodeValue(Inst->getConstructorReturnValue());
   BCFGen_->emitSelectObject(output, thisValue, constructed);
 }
-void HBCISel::generateHBCSpillMovInst(HBCSpillMovInst *Inst, BasicBlock *next) {
+void HBCISel::generateLIRSpillMovInst(LIRSpillMovInst *Inst, BasicBlock *next) {
   auto dst = encodeValue(Inst);
   auto src = encodeValue(Inst->getValue());
   emitMovIfNeeded(dst, src);
@@ -1925,10 +2153,17 @@ void HBCISel::generateCacheNewObjectInst(
     hermes::CacheNewObjectInst *Inst,
     hermes::BasicBlock *next) {
   auto thisReg = encodeValue(Inst->getThis());
+  auto newTargetReg = encodeValue(Inst->getNewTarget());
 
   auto bufIndex =
       BCFGen_->getBytecodeModuleGenerator().serializedLiteralOffsetFor(Inst);
-  BCFGen_->emitCacheNewObject(thisReg, bufIndex.shapeTableIdx);
+  // We only have 8 bits for the total number of CacheNewObject entries, so the
+  // maximum entry index is UINT8_MAX - 1. If we exceed that, we can just skip
+  // this instruction, since it is purely an optimization.
+  if (numCacheNewObject_ < UINT8_MAX) {
+    BCFGen_->emitCacheNewObject(
+        thisReg, newTargetReg, bufIndex.shapeTableIdx, numCacheNewObject_++);
+  }
 }
 
 void HBCISel::generateCreateClassInst(CreateClassInst *Inst, BasicBlock *next) {
@@ -1954,8 +2189,8 @@ void HBCISel::generateCreateClassInst(CreateClassInst *Inst, BasicBlock *next) {
   }
 }
 
-void HBCISel::generateSwitchImmInst(
-    hermes::SwitchImmInst *Inst,
+void HBCISel::generateUIntSwitchImmInst(
+    hermes::UIntSwitchImmInst *Inst,
     hermes::BasicBlock *next) {
   uint32_t min = Inst->getMinValue();
   uint32_t size = Inst->getSize();
@@ -1978,11 +2213,39 @@ void HBCISel::generateSwitchImmInst(
       jmpTable[idx] = Inst->getDefaultDestination();
   }
 
-  registerSwitchImm(
-      BCFGen_->emitSwitchImm(
+  registerUIntSwitchImm(
+      BCFGen_->emitUIntSwitchImm(
           encodeValue(Inst->getInputValue()), 0, 0, min, max),
       Inst);
-  switchImmInfo_[Inst] = {0, Inst->getDefaultDestination(), jmpTable};
+  uintSwitchImmInfo_[Inst] = {0, Inst->getDefaultDestination(), jmpTable};
+}
+
+void HBCISel::generateStringSwitchImmInst(
+    hermes::StringSwitchImmInst *Inst,
+    hermes::BasicBlock *next) {
+  uint32_t size = Inst->getSize();
+
+  std::vector<StringSwitchCase> stringSwitchTable;
+  stringSwitchTable.resize(size);
+
+  // fill string switch table entries.
+  for (uint32_t caseIdx = 0; caseIdx < Inst->getNumCasePair(); caseIdx++) {
+    auto casePair = Inst->getCasePair(caseIdx);
+    auto &caseInTable = stringSwitchTable[caseIdx];
+    caseInTable.label = BCFGen_->getStringID(casePair.first);
+    caseInTable.target = casePair.second;
+  }
+
+  registerStringSwitchImm(
+      BCFGen_->emitStringSwitchImm(
+          encodeValue(Inst->getInputValue()),
+          BCFGen_->getBytecodeModuleGenerator().addStringSwitchImmInstr(),
+          0,
+          0,
+          stringSwitchTable.size()),
+      Inst);
+  stringSwitchImmInfo_[Inst] = {
+      0, Inst->getDefaultDestination(), stringSwitchTable};
 }
 
 void HBCISel::generateLoadParentNoTrapsInst(
@@ -2037,7 +2300,6 @@ void HBCISel::generateFCompareInst(FCompareInst *Inst, BasicBlock *) {
       break;
     default:
       hermes_fatal("invalid kind for FCompareInst");
-      break;
   }
 }
 void HBCISel::generateHBCFCompareBranchInst(
@@ -2118,7 +2380,6 @@ void HBCISel::generateFBinaryMathInst(FBinaryMathInst *Inst, BasicBlock *) {
       break;
     default:
       hermes_fatal("invalid kind for FBinaryMathInst");
-      break;
   }
 }
 void HBCISel::generateFUnaryMathInst(FUnaryMathInst *Inst, BasicBlock *) {
@@ -2130,7 +2391,6 @@ void HBCISel::generateFUnaryMathInst(FUnaryMathInst *Inst, BasicBlock *) {
       break;
     default:
       hermes_fatal("invalid kind for FUnaryMathInst");
-      break;
   }
 }
 void HBCISel::generateTypedLoadParentInst(
@@ -2147,13 +2407,6 @@ void HBCISel::generateGetNativeRuntimeInst(
     hermes::GetNativeRuntimeInst *Inst,
     hermes::BasicBlock *next) {
   hermes_fatal("GetNativeRuntimeInst not supported.");
-}
-void HBCISel::generateTypedStoreParentInst(
-    TypedStoreParentInst *Inst,
-    BasicBlock *) {
-  auto storedValue = encodeValue(Inst->getStoredValue());
-  auto object = encodeValue(Inst->getObject());
-  BCFGen_->emitTypedStoreParent(storedValue, object);
 }
 void HBCISel::generateLIRDeadValueInst(LIRDeadValueInst *, BasicBlock *) {
   hermes_fatal("LIRDeadValueInst not supported.");
@@ -2253,10 +2506,6 @@ void HBCISel::generateBB(BasicBlock *BB, BasicBlock *next) {
       {begin_loc, Relocation::RelocationType::BasicBlockType, BB});
   basicBlockMap_[BB] = std::make_pair(begin_loc, next);
 
-  if (BB == &F_->front()) {
-    initialize();
-  }
-
   // Emit an async break check before the terminator if necessary.
   // We do this at the end of the block so that we come after any
   // CreateEnvironment instruction.
@@ -2329,7 +2578,7 @@ void HBCISel::generateInst(Instruction *ii, BasicBlock *next) {
   }
 }
 
-void HBCISel::run(SourceMapGenerator *outSourceMap) {
+void HBCISel::run() {
   auto PO = postOrderAnalysis(F_);
 
   /// The order of the blocks is reverse-post-order, which is a simply
@@ -2356,50 +2605,88 @@ void HBCISel::run(SourceMapGenerator *outSourceMap) {
 
   resolveRelocations();
   resolveExceptionHandlers();
-  addDebugSourceLocationInfo(outSourceMap);
+  addDebugSourceLocationInfo();
   generateJumpTable();
+  generateStringSwitchTable();
   addDebugLexicalInfo();
   populatePropertyCachingInfo();
   BCFGen_->bytecodeGenerationComplete();
 }
 
-uint8_t HBCISel::acquirePropertyReadCacheIndex(
-    Identifier prop,
-    PropCacheKind k) {
+uint8_t HBCISel::acquirePrivateNameCacheIndex(
+    Value *privateName,
+    PrivateNameOperationKind k) {
   const bool reuse = F_->getContext().getOptimizationSettings().reusePropCache;
-  // Zero is reserved for indicating no-cache, so cannot be a value in the map.
-  uint8_t dummyZero = 0;
-  auto &idx = reuse ? propertyReadCacheIndexForId_[{prop, (int)k}] : dummyZero;
-  if (idx) {
-    ++NumCachedNodes;
-    return idx;
+  Value *cacheKey = privateName;
+  // Ideally we want to be returning the same cache index (when reuse is true)
+  // for usages of the same private name. Most usages of private names will be
+  // via a LoadFrame. Each LoadFrame is a different instruction, so we would
+  // never get matches on those `Value*`s. So instead, use the underlying
+  // variable as the Value* key, as that will be shared across different
+  // LoadFrames.
+  if (auto *LFI = llvh::dyn_cast<LoadFrameInst>(privateName)) {
+    cacheKey = LFI->getLoadVariable();
+  }
+  if (reuse) {
+    auto iter = privateNameCacheIdx_.find({cacheKey, (int)k});
+    if (iter != privateNameCacheIdx_.end()) {
+      ++NumCachedNodes;
+      return iter->second;
+    }
   }
 
-  if (LLVM_UNLIKELY(
-          lastPropertyReadCacheIndex_ == std::numeric_limits<uint8_t>::max())) {
+  if (LLVM_UNLIKELY(nextPrivateNameCacheIndex_ == PROPERTY_CACHING_DISABLED)) {
     ++NumUncachedNodes;
     return PROPERTY_CACHING_DISABLED;
   }
 
   ++NumCachedNodes;
   ++NumCacheSlots;
-  idx = ++lastPropertyReadCacheIndex_;
+  uint8_t idx = nextPrivateNameCacheIndex_++;
+  if (reuse) {
+    privateNameCacheIdx_[{cacheKey, (int)k}] = idx;
+  }
+  return idx;
+}
+
+uint8_t HBCISel::acquirePropertyReadCacheIndex(
+    Identifier prop,
+    PropCacheKind k) {
+  const bool reuse = F_->getContext().getOptimizationSettings().reusePropCache;
+  if (reuse) {
+    auto iter = propertyReadCacheIndexForId_.find({prop, (int)k});
+    if (iter != propertyReadCacheIndexForId_.end()) {
+      ++NumCachedNodes;
+      return iter->second;
+    }
+  }
+
+  if (LLVM_UNLIKELY(nextPropertyReadCacheIndex_ == PROPERTY_CACHING_DISABLED)) {
+    ++NumUncachedNodes;
+    return PROPERTY_CACHING_DISABLED;
+  }
+
+  ++NumCachedNodes;
+  ++NumCacheSlots;
+  int8_t idx = nextPropertyReadCacheIndex_++;
+  if (reuse) {
+    propertyReadCacheIndexForId_[{prop, (int)k}] = idx;
+  }
   return idx;
 }
 
 uint8_t HBCISel::acquirePropertyWriteCacheIndex(Identifier prop) {
   const bool reuse = F_->getContext().getOptimizationSettings().reusePropCache;
-  // Zero is reserved for indicating no-cache, so cannot be a value in the map.
-  uint8_t dummyZero = 0;
-  auto &idx = reuse ? propertyWriteCacheIndexForId_[prop] : dummyZero;
-  if (idx) {
-    ++NumCachedNodes;
-    return idx;
+  if (reuse) {
+    auto iter = propertyWriteCacheIndexForId_.find(prop);
+    if (iter != propertyWriteCacheIndexForId_.end()) {
+      ++NumCachedNodes;
+      return iter->second;
+    }
   }
 
   if (LLVM_UNLIKELY(
-          lastPropertyWriteCacheIndex_ ==
-          std::numeric_limits<uint8_t>::max())) {
+          nextPropertyWriteCacheIndex_ == PROPERTY_CACHING_DISABLED)) {
     ++NumUncachedNodes;
     return PROPERTY_CACHING_DISABLED;
   }
@@ -2407,7 +2694,10 @@ uint8_t HBCISel::acquirePropertyWriteCacheIndex(Identifier prop) {
   ++NumCachedNodes;
   ++NumCacheSlots;
   ++NumPutCacheSlots;
-  idx = ++lastPropertyWriteCacheIndex_;
+  uint8_t idx = nextPropertyWriteCacheIndex_++;
+  if (reuse) {
+    propertyWriteCacheIndexForId_[prop] = idx;
+  }
   return idx;
 }
 
@@ -2418,9 +2708,8 @@ void runHBCISel(
     BytecodeFunctionGenerator *BCFGen,
     HVMRegisterAllocator &RA,
     const BytecodeGenerationOptions &options,
-    FileAndSourceMapIdCache &debugIdCache,
-    SourceMapGenerator *outSourceMap) {
-  HBCISel{F, BCFGen, RA, options, debugIdCache}.run(outSourceMap);
+    FileAndSourceMapIdCache &debugIdCache) {
+  HBCISel{F, BCFGen, RA, options, debugIdCache}.run();
 }
 
 } // namespace hbc

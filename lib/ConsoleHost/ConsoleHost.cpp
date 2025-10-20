@@ -33,24 +33,61 @@ ConsoleHostContext::ConsoleHostContext(vm::Runtime &runtime) {
 }
 
 /// Raises an uncatchable quit exception.
-static vm::CallResult<vm::HermesValue>
-quit(void *, vm::Runtime &runtime, vm::NativeArgs) {
+static vm::CallResult<vm::HermesValue> quit(void *, vm::Runtime &runtime) {
   return runtime.raiseQuitError();
 }
 
-static void printStats(vm::Runtime &runtime, llvh::raw_ostream &os) {
+static void printStats(
+    vm::Runtime &runtime,
+    llvh::raw_ostream &os,
+    const std::vector<vm::GCAnalyticsEvent> *gcAnalyticsEvents) {
   std::string stats;
   {
     llvh::raw_string_ostream tmp{stats};
     runtime.printHeapStats(tmp);
   }
   vm::instrumentation::PerfEvents::endAndInsertStats(stats);
+
+  if (gcAnalyticsEvents) {
+    llvh::raw_string_ostream tmp{stats};
+    tmp << "Collections:\n";
+    ::hermes::JSONEmitter json{tmp, /*pretty*/ true};
+    json.openArray();
+    for (const auto &event : *gcAnalyticsEvents) {
+      json.openDict();
+      json.emitKeyValue("runtimeDescription", event.runtimeDescription);
+      json.emitKeyValue("gcKind", event.gcKind);
+      json.emitKeyValue("collectionType", event.collectionType);
+      json.emitKeyValue("cause", event.cause);
+      json.emitKeyValue("duration", event.duration.count());
+      json.emitKeyValue("cpuDuration", event.cpuDuration.count());
+      json.emitKeyValue("preAllocated", event.allocated.before);
+      json.emitKeyValue("postAllocated", event.allocated.after);
+      json.emitKeyValue("preSize", event.size.before);
+      json.emitKeyValue("postSize", event.size.after);
+      json.emitKeyValue("preExternal", event.external.before);
+      json.emitKeyValue("postExternal", event.external.after);
+      json.emitKeyValue("survivalRatio", event.survivalRatio);
+      json.emitKey("tags");
+      json.openArray();
+      for (const auto &tag : event.tags) {
+        json.emitValue(tag);
+      }
+      json.closeArray();
+      json.closeDict();
+    }
+    json.closeArray();
+    tmp << "\n";
+  }
+
   os << stats;
 }
 
-static vm::CallResult<vm::HermesValue>
-createHeapSnapshot(void *, vm::Runtime &runtime, vm::NativeArgs args) {
+static vm::CallResult<vm::HermesValue> createHeapSnapshot(
+    void *,
+    vm::Runtime &runtime) {
 #ifdef HERMES_MEMORY_INSTRUMENTATION
+  vm::NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   using namespace vm;
   std::string fileName;
   if (args.getArgCount() >= 1 && !args.getArg(0).isUndefined()) {
@@ -92,8 +129,10 @@ createHeapSnapshot(void *, vm::Runtime &runtime, vm::NativeArgs args) {
 #endif // !defined(HERMES_MEMORY_INSTRUMENTATION)
 }
 
-static vm::CallResult<vm::HermesValue>
-loadSegment(void *ctx, vm::Runtime &runtime, vm::NativeArgs args) {
+static vm::CallResult<vm::HermesValue> loadSegment(
+    void *ctx,
+    vm::Runtime &runtime) {
+  vm::NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   using namespace hermes::vm;
   const auto *baseFilename = reinterpret_cast<std::string *>(ctx);
 
@@ -131,8 +170,10 @@ loadSegment(void *ctx, vm::Runtime &runtime, vm::NativeArgs args) {
   return HermesValue::encodeUndefinedValue();
 }
 
-static vm::CallResult<vm::HermesValue>
-setTimeout(void *ctx, vm::Runtime &runtime, vm::NativeArgs args) {
+static vm::CallResult<vm::HermesValue> setTimeout(
+    void *ctx,
+    vm::Runtime &runtime) {
+  vm::NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   ConsoleHostContext *consoleHost = (ConsoleHostContext *)ctx;
   using namespace hermes::vm;
   Handle<Callable> callable = args.dyncastArg<Callable>(0);
@@ -148,8 +189,10 @@ setTimeout(void *ctx, vm::Runtime &runtime, vm::NativeArgs args) {
   return HermesValue::encodeTrustedNumberValue(taskId);
 }
 
-static vm::CallResult<vm::HermesValue>
-clearTimeout(void *ctx, vm::Runtime &runtime, vm::NativeArgs args) {
+static vm::CallResult<vm::HermesValue> clearTimeout(
+    void *ctx,
+    vm::Runtime &runtime) {
+  vm::NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   ConsoleHostContext *consoleHost = (ConsoleHostContext *)ctx;
   using namespace hermes::vm;
   if (!args.getArg(0).isNumber()) {
@@ -275,8 +318,15 @@ void installConsoleBindings(
                               void *context,
                               unsigned paramCount) -> void {
     vm::GCScopeMarkerRAII marker{runtime};
-    auto func = vm::NativeFunction::createWithoutPrototype(
-        runtime, context, functionPtr, name, paramCount);
+    auto func = vm::NativeFunction::create(
+        runtime,
+        runtime.functionPrototype,
+        vm::Runtime::makeNullHandle<vm::Environment>(),
+        context,
+        functionPtr,
+        name,
+        paramCount,
+        vm::Runtime::makeNullHandle<vm::JSObject>());
     auto res = vm::JSObject::defineOwnProperty(
         runtime.getGlobal(), runtime, name, normalDPF, func);
     (void)res;
@@ -405,6 +455,14 @@ bool executeHBCBytecodeImpl(
   runtime->getJITContext().setDumpJITCode(options.dumpJITCode);
   runtime->getJITContext().setCrashOnError(options.jitCrashOnError);
   runtime->getJITContext().setEmitAsserts(options.jitEmitAsserts);
+  runtime->getJITContext().setEmitCounters(options.jitEmitCounters);
+
+  if (options.perfProfJitDumpFd != -1) {
+    runtime->getJITContext().initPerfProfData(
+        options.perfProfJitDumpFd,
+        options.perfProfDebugInfoFd,
+        options.perfProfDebugInfoFile);
+  }
 
   if (options.timeLimit > 0) {
     runtime->timeLimitMonitor = vm::TimeLimitMonitor::getOrCreate();
@@ -551,7 +609,16 @@ bool executeHBCBytecodeImpl(
     if (options.forceGCBeforeStats) {
       runtime->collect("forced for stats");
     }
-    printStats(*runtime, llvh::errs());
+    printStats(*runtime, llvh::errs(), options.gcAnalyticsEvents);
+  }
+
+  if (options.runtimeConfig.getTrackIO()) {
+    runtime->getIOTrackingInfoJSON(llvh::errs());
+  }
+
+  if (options.jitEmitCounters) {
+    llvh::errs() << "JIT counters:\n";
+    runtime->getJITContext().dumpCounters(llvh::errs());
   }
 
 #ifdef HERMESVM_PROFILER_BB

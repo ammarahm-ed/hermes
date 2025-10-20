@@ -24,7 +24,7 @@ Handle<JSObject> createDebuggerInternalObject(Runtime &runtime) {
       runtime,
       intern,
       runtime.getIdentifierTable().registerLazyIdentifier(
-          createASCIIRef("isDebuggerAttached")),
+          runtime, createASCIIRef("isDebuggerAttached")),
       nullptr,
       isDebuggerAttached,
       nullptr,
@@ -37,7 +37,7 @@ Handle<JSObject> createDebuggerInternalObject(Runtime &runtime) {
       runtime,
       intern,
       runtime.getIdentifierTable().registerLazyIdentifier(
-          createASCIIRef("shouldPauseOnThrow")),
+          runtime, createASCIIRef("shouldPauseOnThrow")),
       nullptr,
       shouldPauseOnThrow,
       nullptr,
@@ -49,14 +49,12 @@ Handle<JSObject> createDebuggerInternalObject(Runtime &runtime) {
   return intern;
 }
 
-CallResult<HermesValue>
-isDebuggerAttached(void *ctx, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> isDebuggerAttached(void *ctx, Runtime &runtime) {
   return HermesValue::encodeBoolValue(
       runtime.getDebugger().getIsDebuggerAttached());
 }
 
-CallResult<HermesValue>
-shouldPauseOnThrow(void *ctx, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> shouldPauseOnThrow(void *ctx, Runtime &runtime) {
   bool shouldPauseOnThrow = runtime.getDebugger().getPauseOnThrowMode() !=
       facebook::hermes::debugger::PauseOnThrowMode::None;
   return HermesValue::encodeBoolValue(shouldPauseOnThrow);

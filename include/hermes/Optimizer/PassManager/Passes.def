@@ -47,17 +47,13 @@ PASS(
 PASS(
     ObjectMergeNewStores,
     "objectmergenewstores",
-    "Merge DefineNewOwnPropertyInsts into AllocObjectLiteral")
+    "Merge DefineOwnPropertyInsts into AllocObjectLiteral")
 PASS(SimplifyCFG, "simplifycfg", "Simplify CFG")
 PASS(TypeInference, "typeinference", "Type inference")
 PASS(FunctionAnalysis, "functionanalysis", "Function analysis")
 PASS(Inlining, "inlining", "Inlining")
 PASS(ResolveStaticRequire, "staticrequire", "Resolve static require")
 PASS(MetroRequire, "metrorequire", "Optimize Metro require calls")
-PASS(
-    HoistStartGenerator,
-    "hoiststartgenerator",
-    "Move StartGenerator to start of function")
 PASS(Auditor, "auditor", "Auditor")
 PASS(TDZDedup, "tdzdedup", "TDZ Deduplication")
 PASS(StripDebugInsts, "stripdebug", "Strip debug instructions")

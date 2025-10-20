@@ -6,11 +6,12 @@
 add_hermes_library(hermesAST
     ASTBuilder.cpp
     ASTUtils.cpp
-    ES6Class.cpp
+    AsyncGenerator.cpp
     ESTree.cpp
     ESTreeJSONDumper.cpp
     CommonJS.cpp
     TS2Flow.cpp
+    TransformAST.cpp
     Context.cpp
     NativeContext.cpp
     LINK_OBJLIBS

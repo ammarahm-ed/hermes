@@ -77,6 +77,8 @@ class BytecodeFunction {
   llvh::Optional<std::string> lazyCompileError_{};
 
  public:
+  std::vector<DebugScopingInfo> scopingInfo;
+
   /// Used during serialization. \p opcodes will be swapped after this call.
   explicit BytecodeFunction(
       std::vector<opcode_atom_t> &&opcodesAndJumpTables,
@@ -146,8 +148,7 @@ class BytecodeFunction {
   void setDebugOffsets(DebugOffsets offsets) {
     debugOffsets_ = offsets;
     header_.flags.setHasDebugInfo(
-        debugOffsets_.sourceLocations != DebugOffsets::NO_OFFSET ||
-        debugOffsets_.lexicalData != DebugOffsets::NO_OFFSET);
+        debugOffsets_.sourceLocations != DebugOffsets::NO_OFFSET);
   }
 
   void setFunctionIR(Function *functionIR) {
@@ -234,6 +235,9 @@ class BytecodeModule {
   /// which were compiled at the same time (and will correspond to a set of
   /// RuntimeModules in a Domain).
   uint32_t segmentID_;
+
+  /// The number of StringSwitchImm instructions in the BytecodeModule.
+  uint32_t numStringSwitchImm_{0};
 
   /// Table which indicates where to find the different CommonJS modules.
   /// Mapping from {filename ID => function index}.
@@ -400,6 +404,17 @@ class BytecodeModule {
     return segmentID_;
   }
 
+  /// Returns the total number of StringSwitchImm instructions in the module.
+  uint32_t getNumStringSwitchImmInstrs() const {
+    return numStringSwitchImm_;
+  }
+  /// Notes that a new StringSwitchImm instruction has been created.
+  /// Counts the number created, returning a unique 0-based index for
+  /// each such instruction.
+  uint32_t addStringSwitchImmInstr() {
+    return numStringSwitchImm_++;
+  }
+
   void addCJSModule(uint32_t functionID, uint32_t nameID) {
     assert(
         cjsModuleTableStatic_.empty() &&
@@ -433,10 +448,6 @@ class BytecodeModule {
 
   DebugInfo &getDebugInfo() {
     return debugInfo_;
-  }
-
-  void setDebugInfo(DebugInfo info) {
-    debugInfo_ = std::move(info);
   }
 
   /// Initialize the literal buffers.

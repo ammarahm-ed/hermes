@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "hermes/VM/HermesValue.h"
+#include "hermes/VM/RuntimeModule.h"
 #include "hermes/VM/sh_legacy_value.h"
 #include "hermes/VM/static_h.h"
 
@@ -15,6 +17,11 @@ typedef struct SHRuntimeModule SHRuntimeModule;
 typedef struct SHCodeBlock SHCodeBlock;
 
 namespace hermes::vm {
+
+class Runtime;
+class CodeBlock;
+class JSObject;
+class PinnedHermesValue;
 
 /// Create a JSFunction closure. The properties of the function (name, etc.)
 /// will be populated lazily.
@@ -50,6 +57,12 @@ SHLegacyValue _sh_ljs_get_bytecode_bigint(
 SHLegacyValue _interpreter_create_object_from_buffer(
     SHRuntime *shr,
     SHCodeBlock *codeBlock,
+    uint32_t shapeTableIndex,
+    uint32_t valBufferOffset);
+SHLegacyValue _interpreter_create_object_from_buffer_with_parent(
+    SHRuntime *shr,
+    SHCodeBlock *codeBlock,
+    SHLegacyValue *parent,
     uint32_t shapeTableIndex,
     uint32_t valBufferOffset);
 
@@ -89,10 +102,24 @@ void _sh_print_function_entry_exit(bool enter, const char *msg);
 SHLegacyValue
 _sh_ljs_string_add(SHRuntime *shr, SHLegacyValue *left, SHLegacyValue *right);
 
+/// Create a new empty object for the given shape table index.
+/// The properties will have to be populated by the caller afterwards.
+/// \param tmp a FR pointer on the JS stack used to avoid having to allocate
+///   Locals internally. May be overwritten.
+JSObject *_jit_new_empty_object_for_buffer(
+    Runtime &runtime,
+    CodeBlock *codeBlock,
+    uint32_t shapeTableIndex,
+    PinnedHermesValue *tmp);
+
 #ifdef HERMESVM_PROFILER_BB
 /// Register BB execution for BB profiler based on the current callee CodeBlock.
 void _interpreter_register_bb_execution(SHRuntime *shr, uint16_t pointIndex);
 #endif
+
+/// Run the direct eval on \p text and return the result.
+HermesValue
+_jit_direct_eval(Runtime &runtime, PinnedHermesValue *text, bool strictCaller);
 
 /// Only valid to call from the longjmp catch handler in the JIT,
 /// prior to running the Catch instruction itself.
@@ -116,8 +143,34 @@ void *_jit_find_catch_target(
 /// Throw a register stack overflow exception.
 [[noreturn]] void _sh_throw_register_stack_overflow(SHRuntime *shr);
 
-/// Call the closure stored in the outgoing registers of the current frame. The
-/// caller is responsible for setting up the outgoing registers.
-SHLegacyValue _jit_dispatch_call(SHRuntime *, SHLegacyValue *callTargetSHLV);
+/// Raise an exception that the target of a call is not callable. The outgoing
+/// registers must already have been set up.
+[[noreturn]] void _jit_throw_non_object_call(SHRuntime *shr);
+
+/// Calls the builtin with index \p builtinMethodID. The new frame is at the top
+/// of the stack. The arguments (excluding 'this') must be populated.
+SHLegacyValue _jit_call_builtin(
+    SHRuntime *shr,
+    SHLegacyValue *frame,
+    uint32_t argCount,
+    uint32_t builtinMethodID);
+
+void _jit_put_by_id(
+    SHRuntime *shr,
+    SHCodeBlock *codeBlock,
+    SHLegacyValue *base,
+    SHLegacyValue *value,
+    uint8_t cacheIdx,
+    SHSymbolID symID,
+    bool strictMode,
+    bool tryProp);
+
+/// Assumes that \p table is an initialized string switch runtime table.
+/// If \p switchValue is found as a case in that table, returns the
+/// corresponding JIT code target for that case.  Otherwise, returns nullptr.
+/// (This assumes that nullptr is not a valid branch target.)
+void *_jit_string_switch_imm_table_lookup(
+    StringSwitchDenseMap *table,
+    SHLegacyValue *switchValue);
 
 } // namespace hermes::vm

@@ -18,6 +18,8 @@
 #include "hermes/Sema/SemContext.h"
 #include "hermes/Support/StackExecutor.h"
 
+#if HERMES_PARSE_FLOW
+
 namespace hermes {
 namespace flow {
 
@@ -850,7 +852,7 @@ Type *FlowChecker::processTupleTypeAnnotation(
     ESTree::TupleTypeAnnotationNode *node,
     AnnotationCB cb) {
   llvh::SmallVector<Type *, 4> types{};
-  for (auto &n : node->_types) {
+  for (auto &n : node->_elementTypes) {
     if (llvh::isa<ESTree::TupleTypeSpreadElementNode>(&n)) {
       sm_.error(n.getSourceRange(), "ft: tuple spread unsupported");
       continue;
@@ -963,4 +965,5 @@ Type *FlowChecker::processObjectTypeAnnotation(
 } // namespace flow
 } // namespace hermes
 
-#endif
+#endif // HERMES_PARSE_FLOW
+#endif // HERMES_SEMA_FLOWCHECKER_H

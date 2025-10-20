@@ -137,9 +137,6 @@ uint64_t jsonStringToUint64(const ::hermes::parser::JSONValue *val) {
     ::hermes::hermes_fatal("gcConfig should be an object");
   }
   auto *gcConfig = llvh::cast<JSONObject>(val);
-  if (auto *sz = gcConfig->get("minHeapSize")) {
-    gcconf.withMinHeapSize(getNumberAs<::hermes::vm::gcheapsize_t>(sz));
-  }
   if (auto *sz = gcConfig->get("initHeapSize")) {
     gcconf.withInitHeapSize(getNumberAs<::hermes::vm::gcheapsize_t>(sz));
   }
@@ -178,9 +175,6 @@ uint64_t jsonStringToUint64(const ::hermes::parser::JSONValue *val) {
 
   if (auto *maxNumRegisters = rtConfig->get("maxNumRegisters")) {
     conf.withMaxNumRegisters(getNumberAs<unsigned>(maxNumRegisters));
-  }
-  if (auto *promise = rtConfig->get("ES6Promise")) {
-    conf.withES6Promise(llvh::cast<JSONBoolean>(promise)->getValue());
   }
   if (auto *proxy = rtConfig->get("ES6Proxy")) {
     conf.withES6Proxy(llvh::cast<JSONBoolean>(proxy)->getValue());
@@ -490,6 +484,13 @@ SynthTrace getTrace(
 #endif
         );
         break;
+      case RecordType::DeleteProperty: {
+        trace.emplace_back<SynthTrace::DeletePropertyRecord>(
+            timeFromStart,
+            objID->getValue(),
+            SynthTrace::decode(propID->str()));
+        break;
+      }
       case RecordType::GetPropertyNames: {
         trace.emplace_back<SynthTrace::GetPropertyNamesRecord>(
             timeFromStart, objID->getValue());

@@ -34,7 +34,8 @@ const static uint64_t MAGIC = 0x1F1903C103BC1FC6;
 const static uint64_t DELTA_MAGIC = ~MAGIC;
 
 /// Property cache index which indicates no caching.
-static constexpr uint8_t PROPERTY_CACHING_DISABLED = 0;
+static constexpr uint8_t PROPERTY_CACHING_DISABLED =
+    std::numeric_limits<uint8_t>::max();
 
 /// Alignment of data structures of in file.
 static constexpr size_t BYTECODE_ALIGNMENT = alignof(uint32_t);
@@ -58,7 +59,6 @@ struct BytecodeOptions {
       bool,
       CjsModulesStaticallyResolved,
       1);
-  HERMES_NEXT_BITFIELD(CjsModulesStaticallyResolved, flags, bool, HasAsync, 1);
 
   BytecodeOptions() : _flags(0) {}
 };
@@ -91,6 +91,7 @@ struct BytecodeFileHeader {
   uint32_t literalValueBufferSize;
   uint32_t objKeyBufferSize;
   uint32_t objShapeTableCount; // Number of elements in the shape table.
+  uint32_t numStringSwitchImms; // Number of StringSwitchImm instructions.
   uint32_t segmentID; // The ID of this segment.
   uint32_t cjsModuleCount; // Number of modules.
   uint32_t functionSourceCount; // Number of function sources preserved.
@@ -99,7 +100,7 @@ struct BytecodeFileHeader {
 
   // Insert any padding to make function headers that follow this file header
   // less likely to cross cache lines.
-  uint8_t padding[19];
+  uint8_t padding[15];
 
   BytecodeFileHeader(
       uint64_t magic,
@@ -120,6 +121,7 @@ struct BytecodeFileHeader {
       uint32_t literalValueBufferSize,
       uint32_t objKeyBufferSize,
       uint32_t objShapeTableCount,
+      uint32_t numStringSwitchImms,
       uint32_t segmentID,
       uint32_t cjsModuleCount,
       uint32_t functionSourceCount,
@@ -143,6 +145,7 @@ struct BytecodeFileHeader {
         literalValueBufferSize(literalValueBufferSize),
         objKeyBufferSize(objKeyBufferSize),
         objShapeTableCount(objShapeTableCount),
+        numStringSwitchImms(numStringSwitchImms),
         segmentID(segmentID),
         cjsModuleCount(cjsModuleCount),
         functionSourceCount(functionSourceCount),
@@ -261,8 +264,10 @@ static_assert(
   N(NumberRegCount, w2, uint32_t, NonPtrRegCount, 5)    \
   /* third word, with flags below */                    \
   F(uint8_t, b1, uint32_t, FrameSize, 8)                \
-  F(uint8_t, b2, uint8_t, HighestReadCacheIndex, 8)     \
-  F(uint8_t, b3, uint8_t, HighestWriteCacheIndex, 8)
+  F(uint8_t, b2, uint8_t, ReadCacheSize, 8)             \
+  F(uint8_t, b3, uint8_t, WriteCacheSize, 6)            \
+  N(WriteCacheSize, b3, uint8_t, NumCacheNewObject, 1)  \
+  N(NumCacheNewObject, b3, uint8_t, PrivateNameCacheSize, 1)
 
 /**
  * Metadata of a function.
@@ -291,8 +296,10 @@ struct FunctionHeader {
       uint32_t numberRegCount,
       uint32_t nonPtrRegCount,
       uint32_t functionNameID,
-      uint8_t hiRCacheIndex,
-      uint8_t hiWCacheIndex) {
+      uint8_t readCacheSize,
+      uint8_t writeCacheSize,
+      uint8_t numCacheNewObject,
+      uint8_t privateCacheSize) {
     setOffset(0);
     setParamCount(paramCount);
     setLoopDepth(loopDepth);
@@ -301,8 +308,10 @@ struct FunctionHeader {
     setNumberRegCount(numberRegCount);
     setNonPtrRegCount(nonPtrRegCount);
     setFrameSize(frameSize);
-    setHighestReadCacheIndex(hiRCacheIndex);
-    setHighestWriteCacheIndex(hiWCacheIndex);
+    setReadCacheSize(readCacheSize);
+    setWriteCacheSize(writeCacheSize);
+    setNumCacheNewObject(numCacheNewObject);
+    setPrivateNameCacheSize(privateCacheSize);
   }
 };
 
@@ -320,6 +329,12 @@ struct SmallFuncHeader {
   FUNC_HEADER_FIELDS(HERMES_FIRST_BITFIELD, HERMES_NEXT_BITFIELD)
 
   FunctionHeaderFlag flags{};
+
+#define M(storageTypeOrPrevField, storageName, apiType, name, bits) \
+  static constexpr apiType name##Max =                              \
+      std::numeric_limits<apiType>::max() >> (sizeof(apiType) * 8 - bits);
+  FUNC_HEADER_FIELDS(M, M)
+#undef M
 
   /// Make a small header equivalent to \p large, which is known to fit.
   SmallFuncHeader(const FunctionHeader &large) {
@@ -403,8 +418,6 @@ struct DebugInfoHeader {
 
   // Count of the file table.
   uint32_t fileRegionCount;
-  // Byte offset in the debug data for the lexical data.
-  uint32_t lexicalDataOffset;
   // Size in bytes of the debug data.
   uint32_t debugDataSize;
 };
@@ -417,6 +430,25 @@ struct DebugFileRegion {
 };
 
 LLVM_PACKED_END
+
+/// The information for a case in a string switch table.  (Note:
+/// instances of this in the bytecode file are always aligned to the
+/// struct's alignment, and thus don't need to be packed.)
+struct StringSwitchTableCase {
+  /// Index in the string table of the string case label.
+  uint32_t caseLabelStringID;
+  /// target to branch to for the case.
+  int32_t target;
+
+  StringSwitchTableCase(uint32_t caseLabelStringID, int32_t target)
+      : caseLabelStringID(caseLabelStringID), target(target) {}
+};
+
+/// A function may have jump tables and/or string switch tables appended.
+/// If both are present, the jump table comes first.  We add padding to
+/// ensure that the first table, of whichever kind, is aligned.  Therefore,
+/// the alignment constraint of both tables must be the same.
+static_assert(alignof(StringSwitchTableCase) == sizeof(uint32_t));
 
 /// Visit each segment in a bytecode file in order.
 /// This function defines the order of the bytecode file segments.

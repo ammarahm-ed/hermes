@@ -11,10 +11,14 @@
 
 #include "hermes/ADT/DenseUInt64.h"
 #include "hermes/ADT/SimpleLRU.h"
-#include "hermes/BCGen/HBC/StackFrameLayout.h"
 #include "hermes/Support/OptValue.h"
 #include "hermes/VM/CodeBlock.h"
+#include "hermes/VM/JIT/JIT.h"
+#include "hermes/VM/JIT/PerfJitDump.h"
+#include "hermes/VM/JIT/arm64/JIT.h"
+#include "hermes/VM/RuntimeModule.h"
 #include "hermes/VM/static_h.h"
+#include "hermes/VMLayouts/StackFrameLayout.h"
 
 #include "llvh/ADT/DenseMap.h"
 
@@ -284,12 +288,20 @@ class TempRegAlloc {
 };
 
 class Emitter {
+  Runtime &runtime_;
+  JITContext::Impl &jitImpl_;
+
   /// Level of dumping JIT code. Bit 0 indicates code printing on or off.
   unsigned const dumpJitCode_;
   /// Whether to emit asserts in the JIT'ed code.
   bool const emitAsserts_;
+  /// Whether to emit counters in the JIT'ed code.
+  bool const emitCounters_;
 
+#ifndef ASMJIT_NO_LOGGING
   std::unique_ptr<asmjit::Logger> logger_{};
+#endif
+
   std::unique_ptr<asmjit::ErrorHandler> errorHandler_;
   asmjit::Error expectedError_ = asmjit::kErrorOk;
 
@@ -321,6 +333,10 @@ class Emitter {
     bool invert;
     /// Whether to pass arguments by value to the slow path.
     bool passArgsByVal;
+    /// Some number or index that needs to be passed to the slow path.
+    unsigned sizeOrIdx;
+    /// Another number or index that needs to be passed to the slow path.
+    unsigned sizeOrIdx2;
 
     /// Pointer to the slow path function that must be called.
     void *slowCall;
@@ -365,6 +381,11 @@ class Emitter {
   /// Invalid if there's no try/catch in the function.
   asmjit::Label catchTableLabel_{};
 
+  /// Label to branch to when attempting to call a non-object. The callee and
+  /// saved IP must already be in the right position on the stack. This is
+  /// initialized lazily by the first call, and shared across all calls.
+  asmjit::Label nonObjCallLabel_{};
+
   /// The bytecode codeblock.
   CodeBlock *const codeBlock_;
 
@@ -374,9 +395,12 @@ class Emitter {
   /// Offset in RODATA of the pointer to the start of the read property
   /// cache.
   int32_t roOfsReadPropertyCachePtr_;
-  /// Offset in RODATA of the pointer to the start of the read property
+  /// Offset in RODATA of the pointer to the start of the write property
   /// cache.
   int32_t roOfsWritePropertyCachePtr_;
+  /// Offset in RODATA of the pointer to the start of the private name
+  /// cache.
+  int32_t roOfsPrivateNameCachePtr_;
 
   unsigned gpSaveCount_ = 0;
   unsigned vecSaveCount_ = 0;
@@ -390,13 +414,13 @@ class Emitter {
   /// Create an Emitter, but do not emit any actual code.
   /// Use \c enter to set up the stack frame before emitting the actual code.
   explicit Emitter(
-      asmjit::JitRuntime &jitRT,
+      Runtime &runtime,
+      JITContext::Impl &jitImpl,
       unsigned dumpJitCode,
       bool emitAsserts,
+      bool emitCounters,
+      PerfJitDump *perfJitDump,
       CodeBlock *codeBlock,
-      ReadPropertyCacheEntry *readPropertyCache,
-      WritePropertyCacheEntry *writePropertyCache,
-      uint32_t numFrameRegs,
       const std::function<void(std::string &&message)> &longjmpError);
 
   /// Add the jitted function to the JIT runtime and return a pointer to it.
@@ -430,6 +454,8 @@ class Emitter {
 
   /// Emit profiling information if profiling is enabled.
   void profilePoint(uint16_t point);
+
+  void directEval(FR frRes, FR frText, bool strictCaller);
 
   /// Call a JS function.
   void call(FR frRes, FR frCallee, uint32_t argc);
@@ -574,6 +600,10 @@ class Emitter {
 
   void toPropertyKey(FR frRes, FR frVal);
 
+  void privateIsIn(FR frRes, FR frPrivateName, FR frTarget, uint8_t cacheIdx);
+
+  void createPrivateName(FR frRes, SHSymbolID symID);
+
 #define DECL_COMPARE(                                                   \
     methodName, commentStr, slowCall, condCode, invSlow, passArgsByVal) \
   void methodName(FR rRes, FR rLeft, FR rRight) {                       \
@@ -605,16 +635,15 @@ class Emitter {
       false,
       false)
   DECL_COMPARE(equal, "Eq", _sh_ljs_equal_rjs, kEQ, false, false)
-  DECL_COMPARE(strictEqual, "StrictEq", _sh_ljs_strict_equal, kEQ, false, true)
   DECL_COMPARE(notEqual, "Neq", _sh_ljs_equal_rjs, kNE, true, false)
-  DECL_COMPARE(
-      strictNotEqual,
-      "StrictNeq",
-      _sh_ljs_strict_equal,
-      kNE,
-      true,
-      true)
 #undef DECL_COMPARE
+
+  void strictEqual(FR frRes, FR frLeft, FR frRight) {
+    strictEqualImpl(false, frRes, frLeft, frRight);
+  }
+  void strictNotEqual(FR frRes, FR frLeft, FR frRight) {
+    strictEqualImpl(true, frRes, frLeft, frRight);
+  }
 
 #define DECL_JCOND(                                                      \
     methodName, forceNum, passArgsByVal, commentStr, slowCall, condCode) \
@@ -657,7 +686,6 @@ class Emitter {
       _sh_ljs_less_equal_rjs,
       kLS)
   DECL_JCOND(jEqual, false, false, "eq", _sh_ljs_equal_rjs, kEQ)
-  DECL_JCOND(jStrictEqual, false, true, "strict_eq", _sh_ljs_strict_equal, kEQ)
 #undef DECL_JCOND
 
   void
@@ -665,12 +693,33 @@ class Emitter {
 
   void typeOfIs(FR frRes, FR frInput, TypeOfIsTypes types);
 
-  void switchImm(
+  void
+  jStrictEqual(bool invert, const asmjit::Label &target, FR frLeft, FR frRight);
+
+  void uintSwitchImm(
       FR frInput,
       const asmjit::Label &defaultLabel,
       llvh::ArrayRef<const asmjit::Label *> labels,
       uint32_t minVal,
       uint32_t maxVal);
+
+  /// Information for a case of a StringSwitchImm instruction.
+  struct StringSwitchCase {
+    // The string id of the case label.
+    uint32_t caseLabelStringId;
+    // A JIT label for the start of JITted code for the the basic block
+    // corresponding to the case.
+    const asmjit::Label *target;
+
+    StringSwitchCase(uint32_t caseLabelStringId, const asmjit::Label *target)
+        : caseLabelStringId(caseLabelStringId), target(target) {}
+  };
+
+  void stringSwitchImm(
+      FR frInput,
+      const StringSwitchDenseMap &table,
+      const asmjit::Label &defaultLabel,
+      llvh::ArrayRef<StringSwitchCase> cases);
 
   void getByVal(FR frRes, FR frSource, FR frKey);
   void getByIndex(FR frRes, FR frSource, uint32_t key);
@@ -709,23 +758,21 @@ class Emitter {
   DECL_GET_BY_ID(getById, "getById", _sh_ljs_get_by_id_rjs)
   DECL_GET_BY_ID(tryGetById, "tryGetById", _sh_ljs_try_get_by_id_rjs)
 
-#define DECL_PUT_BY_ID(methodName, commentStr, shFn)                          \
-  void methodName(                                                            \
-      FR frTarget, SHSymbolID symID, FR frValue, uint8_t cacheIdx) {          \
-    putByIdImpl(frTarget, symID, frValue, cacheIdx, commentStr, shFn, #shFn); \
+#define DECL_PUT_BY_ID(methodName, strictMode, tryProp)                   \
+  void methodName(                                                        \
+      FR frTarget, SHSymbolID symID, FR frValue, uint8_t cacheIdx) {      \
+    putByIdImpl(frTarget, symID, frValue, cacheIdx, strictMode, tryProp); \
   }
 
-  DECL_PUT_BY_ID(putByIdLoose, "putByIdLoose", _sh_ljs_put_by_id_loose_rjs);
-  DECL_PUT_BY_ID(putByIdStrict, "putByIdStrict", _sh_ljs_put_by_id_strict_rjs);
-  DECL_PUT_BY_ID(
-      tryPutByIdLoose,
-      "tryPutByIdLoose",
-      _sh_ljs_try_put_by_id_loose_rjs);
-  DECL_PUT_BY_ID(
-      tryPutByIdStrict,
-      "tryPutByIdStrict",
-      _sh_ljs_try_put_by_id_strict_rjs);
+  DECL_PUT_BY_ID(putByIdLoose, false, false);
+  DECL_PUT_BY_ID(putByIdStrict, true, false);
+  DECL_PUT_BY_ID(tryPutByIdLoose, false, true);
+  DECL_PUT_BY_ID(tryPutByIdStrict, true, true);
 
+  void defineOwnInDenseArray(FR frArray, FR frProp, uint32_t idx);
+
+  void
+  defineOwnById(FR frTarget, SHSymbolID symID, FR frValue, uint8_t cacheIdx);
   void defineOwnByIndex(FR frTarget, FR frValue, uint32_t key);
   void defineOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable);
   void defineOwnGetterSetterByVal(
@@ -735,12 +782,16 @@ class Emitter {
       FR frSetter,
       bool enumerable);
 
-  void putNewOwnById(FR frTarget, FR frValue, SHSymbolID key, bool enumerable);
-
   void getOwnBySlotIdx(FR frRes, FR frTarget, uint32_t slotIdx);
   void putOwnBySlotIdx(FR frTarget, FR frValue, uint32_t slotIdx);
 
   void delByVal(FR frRes, FR frTarget, FR frKey, bool strict);
+
+  void addOwnPrivateBySym(FR frTarget, FR frKey, FR frValue);
+
+  void getOwnPrivateBySym(FR frRes, FR frTarget, FR frKey, uint8_t cacheIdx);
+
+  void putOwnPrivateBySym(FR frTarget, FR frKey, FR frValue, uint8_t cacheIdx);
 
   void instanceOf(FR frRes, FR frLeft, FR frRight);
   void isIn(FR frRes, FR frLeft, FR frRight);
@@ -751,6 +802,11 @@ class Emitter {
   void newObjectWithParent(FR frRes, FR frParent);
   void newObjectWithBuffer(
       FR frRes,
+      uint32_t shapeTableIndex,
+      uint32_t valBufferOffset);
+  void newObjectWithBufferAndParent(
+      FR frRes,
+      FR frParent,
       uint32_t shapeTableIndex,
       uint32_t valBufferOffset);
 
@@ -774,6 +830,7 @@ class Emitter {
   void createFunctionEnvironment(FR frRes, uint32_t size);
   void createEnvironment(FR frRes, FR frParent, uint32_t size);
   void getParentEnvironment(FR frRes, uint32_t level);
+  void getEnvironment(FR frRes, FR frSource, uint32_t level);
   void getClosureEnvironment(FR frRes, FR frClosure);
   void loadFromEnvironment(FR frRes, FR frEnv, uint32_t slot);
   void storeToEnvironment(bool np, FR frEnv, uint32_t slot, FR frValue);
@@ -828,7 +885,12 @@ class Emitter {
 
   void debugger();
   void throwInst(FR frInput);
-  void throwIfEmpty(FR frRes, FR frInput);
+  void throwIfEmpty(FR frRes, FR frInput) {
+    throwIfEmptyUndefinedImpl(frRes, frInput, true);
+  }
+  void throwIfUndefined(FR frRes, FR frInput) {
+    throwIfEmptyUndefinedImpl(frRes, frInput, false);
+  }
   void throwIfThisInitialized(FR frInput);
 
   void createRegExp(
@@ -839,7 +901,6 @@ class Emitter {
 
   void loadParentNoTraps(FR frRes, FR frObj);
   void typedLoadParent(FR frRes, FR frObj);
-  void typedStoreParent(FR frStoredValue, FR frObj);
 
  private:
   /// Create an a64::Mem to a specifc frame register.
@@ -850,9 +911,34 @@ class Emitter {
     return a64::Mem(xFrame, ofs);
   }
 
+  /// Return true if we are logging, false otherwise.
+  bool hasLogger() {
+#ifndef ASMJIT_NO_LOGGING
+    return logger_ != nullptr;
+#else
+    return false;
+#endif
+  }
+
   /// Load an arbitrary bit pattern into a Gp.
   template <typename REG>
   void loadBits64InGp(const REG &dest, uint64_t bits, const char *constName);
+
+  /// Load a SmallHermesValue into a Gp.
+  void loadSmallHermesValueInGpX(
+      a64::GpX &dest,
+      SmallHermesValue shv,
+      const char *constName);
+
+  /// Load the StringPrimitive for \p id as a pointer into \p xOut.
+  /// The StringPrimitive must already be known to be allocated in the
+  /// IdentifierTable at JIT time.
+  /// \param xTemp is a temporary register, must not be the same as \p xOut.
+  ///   xTemp may not be modified in practice, based on the value of \p id.
+  void loadConstStringInGpX(
+      SymbolID id,
+      const a64::GpX &xOut,
+      const a64::GpX &xTemp);
 
   void _loadFrame(HWReg dest, FR rFrom) {
     // FIXME: check if the offset fits
@@ -987,6 +1073,14 @@ class Emitter {
   /// \return true if the FR is currently known to contain a number.
   bool isFRKnownNumber(FR fr) const {
     return isFRKnownType(fr, FRType::Number);
+  }
+  /// \return true if the FR is currently known to contain a number.
+  bool isFRKnownBool(FR fr) const {
+    return isFRKnownType(fr, FRType::Bool);
+  }
+  /// \return true if the FR is currently known to contain an OtherNonPtr.
+  bool isFRKnownOtherNonPtr(FR fr) const {
+    return isFRKnownType(fr, FRType::OtherNonPtr);
   }
 
   /// Get the current bytecode IP in \p xOut.
@@ -1143,6 +1237,8 @@ class Emitter {
       bool invSlow,
       bool passArgsByVal);
 
+  void strictEqualImpl(bool invert, FR frRes, FR frLeft, FR frRight);
+
   void jCond(
       bool forceNumber,
       bool invert,
@@ -1167,6 +1263,7 @@ class Emitter {
           SHLegacyValue *value),
       const char *shImplName);
 
+  class GetByIdImpl;
   void getByIdImpl(
       FR frRes,
       SHSymbolID symID,
@@ -1185,14 +1282,8 @@ class Emitter {
       SHSymbolID symID,
       FR frValue,
       uint8_t cacheIdx,
-      const char *name,
-      void (*shImpl)(
-          SHRuntime *shr,
-          SHLegacyValue *target,
-          SHSymbolID symID,
-          SHLegacyValue *value,
-          SHWritePropertyCacheEntry *propCacheEntry),
-      const char *shImplName);
+      bool strictMode,
+      bool tryProp);
 
   void getArgumentsPropByValImpl(
       FR frRes,
@@ -1207,6 +1298,86 @@ class Emitter {
       const char *shImplName);
 
   void reifyArgumentsImpl(FR frLazyReg, bool strict, const char *name);
+
+  void throwIfEmptyUndefinedImpl(FR frRes, FR frInput, bool empty);
+
+  /// Bump allocate \p sz bytes on the GC heap and store the result in \p xOut.
+  /// If not possible, jump to the \p slowPathLab.
+  /// \param sz is the aligned number of bytes to bump the pointer by.
+  /// \param xOut is the register to store the address of the new object.
+  /// \param xTemp1 is a temporary register.
+  /// \param xTemp2 is a temporary register.
+  /// \param slowPathLab is the label to jump to if the allocation fails.
+  void bumpAllocAndUnpoison(
+      uint32_t sz,
+      const a64::GpX &xOut,
+      const a64::GpX &xTemp1,
+      const a64::GpX &xTemp2,
+      const asmjit::Label &slowPathLab);
+
+  /// Initialize a GCCell at the pointer given.
+  /// \param kind the CellKind to populate.
+  /// \param sz the aligned total size of the cell.
+  /// \param xCell pointer to the start of the cell.
+  /// \param xTemp1 is a temporary, must not be the same as xCell.
+  void initGCCell(
+      CellKind kind,
+      uint32_t sz,
+      const a64::GpX &xCell,
+      const a64::GpX &xTemp1);
+
+  /// Emit the code to perform an allocation in the young generation, populating
+  /// the fields of the new GCCell.
+  /// \param kind is the CellKind of object to allocate.
+  /// \param sz is the size of the object to allocate.
+  /// \param xOut is the register to store the address of the new object.
+  /// \param xTemp1 is a temporary register.
+  /// \param xTemp2 is a temporary register.
+  /// \param slowPathLab is the label to jump to if the allocation fails.
+  void allocInYoung(
+      CellKind kind,
+      uint32_t sz,
+      const a64::GpX &xOut,
+      const a64::GpX &xTemp1,
+      const a64::GpX &xTemp2,
+      const asmjit::Label &slowPathLab);
+
+  /// Emit the code to perform an allocation in the young generation, populating
+  /// the fields of the new GCCell.
+  /// \param kind1 is the CellKind of object 1 to allocate.
+  /// \param sz1 is the size of the object 1 to allocate.
+  /// \param kind2 is the CellKind of object 2 to allocate.
+  /// \param sz2 is the size of the object 2 to allocate.
+  /// \param xOut1 is the register to store the address of the first object.
+  /// \param xOut2 is the register to store the address of the second object.
+  /// \param xTemp is a temporary register.
+  /// \param slowPathLab is the label to jump to if the allocation fails.
+  void alloc2InYoung(
+      CellKind kind1,
+      uint32_t sz1,
+      CellKind kind2,
+      uint32_t sz2,
+      const a64::GpX &xOut1,
+      const a64::GpX &xOut2,
+      const a64::GpX &xTemp,
+      const asmjit::Label &slowPathLab);
+
+  /// Slow version of newObjectWithBuffer.
+  /// Used temporarily while full functionality is being added to
+  /// newObjectWithBuffer.
+  void newObjectWithBufferSlow(
+      FR frRes,
+      uint32_t shapeTableIndex,
+      uint32_t valBufferOffset);
+
+  /// If counters are enabled, emit code to increment \p counter.
+  void emitIncrementCounter(JitCounter counter);
+
+  /// Initialize or obtain an existing lazy JIT ID for the given hidden class.
+  /// NOTE: this call performs GC allocations, to the HC might move. The raw
+  /// pointer MUST NOT be used after this call.
+  /// \return 0 if too many IDs have been assigned.
+  uint16_t initHCLazyIDMayAlloc(HiddenClass *hc);
 }; // class Emitter
 
 } // namespace hermes::vm::arm64

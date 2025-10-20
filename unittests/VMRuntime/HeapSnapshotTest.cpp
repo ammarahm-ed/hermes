@@ -435,18 +435,21 @@ TEST(HeapSnapshotTest, IDReversibleTest) {
                                           .build());
   DummyRuntime &rt = *runtime;
   auto &gc = rt.getHeap();
-  GCScope gcScope(rt);
+  struct : Locals {
+    PinnedValue<DummyObject> obj;
+  } lv;
+  DummyLocalsRAII lraii{rt, &lv};
 
   // Make a dummy object.
-  auto obj = rt.makeHandle(DummyObject::create(gc, rt));
-  const auto objID = gc.getObjectID(obj.get());
+  lv.obj = DummyObject::create(gc, rt);
+  const auto objID = gc.getObjectID(lv.obj.get());
   // Make sure the ID can be translated back to the object pointer.
-  EXPECT_EQ(obj.get(), gc.getObjectForID(objID));
+  EXPECT_EQ(lv.obj.get(), gc.getObjectForID(objID));
   // Run a collection to move things around.
   gc.collect("test");
   // Test that the ID is the same and it can be reversed.
-  EXPECT_EQ(objID, gc.getObjectID(obj.get()));
-  EXPECT_EQ(obj.get(), gc.getObjectForID(objID));
+  EXPECT_EQ(objID, gc.getObjectID(lv.obj.get()));
+  EXPECT_EQ(lv.obj.get(), gc.getObjectForID(objID));
 }
 
 TEST(HeapSnapshotTest, HeaderTest) {
@@ -594,12 +597,15 @@ TEST(HeapSnapshotTest, TestNodesAndEdgesForDummyObjects) {
                                           .build());
   DummyRuntime &rt = *runtime;
   auto &gc = rt.getHeap();
-  GCScope gcScope(rt);
+  struct : Locals {
+    PinnedValue<DummyObject> dummy;
+  } lv;
+  DummyLocalsRAII lraii{rt, &lv};
 
-  auto dummy = rt.makeHandle(DummyObject::create(gc, rt));
+  lv.dummy = DummyObject::create(gc, rt);
   auto *dummy2 = DummyObject::create(gc, rt);
-  dummy->setPointer(gc, dummy2);
-  const auto blockSize = dummy->getAllocatedSize();
+  lv.dummy->setPointer(gc, dummy2);
+  const auto blockSize = lv.dummy->getAllocatedSize();
 
   JSONObject *root = TAKE_SNAPSHOT(gc, jsonFactory, true);
   ASSERT_TRUE(root != nullptr);
@@ -616,8 +622,8 @@ TEST(HeapSnapshotTest, TestNodesAndEdgesForDummyObjects) {
 
   Node firstDummy{
       HeapSnapshot::NodeType::Object,
-      cellKindStr(dummy->getKind()),
-      gc.getObjectID(dummy.get()),
+      cellKindStr(lv.dummy->getKind()),
+      gc.getObjectID(lv.dummy.get()),
       blockSize,
       // One edge to the second dummy, 5 for primitive singletons, and a WeakRef
       // to self.
@@ -643,13 +649,13 @@ TEST(HeapSnapshotTest, TestNodesAndEdgesForDummyObjects) {
   Node numberNode{
       HeapSnapshot::NodeType::Number,
       "3.14",
-      gc.getIDTracker().getNumberID(dummy->hvDouble.getNumber()),
+      gc.getIDTracker().getNumberID(lv.dummy->hvDouble.getNumber()),
       0,
       0};
   Node nativeValueNode{
       HeapSnapshot::NodeType::Number,
       "",
-      gc.getIDTracker().getNumberID(dummy->hvNative.getNumber()),
+      gc.getIDTracker().getNumberID(lv.dummy->hvNative.getNumber()),
       0,
       0};
   Node falseNode{
@@ -660,8 +666,8 @@ TEST(HeapSnapshotTest, TestNodesAndEdgesForDummyObjects) {
       0};
   Node secondDummy{
       HeapSnapshot::NodeType::Object,
-      cellKindStr(dummy->getKind()),
-      gc.getObjectID(dummy->other),
+      cellKindStr(lv.dummy->getKind()),
+      gc.getObjectID(lv.dummy->other),
       blockSize,
       // No edges except for the primitive singletons and the WeakRef to self.
       6};
@@ -705,14 +711,14 @@ TEST(HeapSnapshotTest, TestNodesAndEdgesForDummyObjects) {
               Edge{HeapSnapshot::EdgeType::Weak, "weak", secondDummy.id}}));
 }
 
-#if defined(HERMESVM_GC_HADES) || defined(HERMESVM_GC_RUNTIME)
+#if defined(HERMESVM_GC_HADES) && !defined(HERMESVM_SANITIZE_HANDLES)
 // This test relies on the implementation details of Hades GC.
 TEST(HeapSnapshotTest, SnapshotFromCallbackContextRunInMiddleYG) {
   // The GC Heap can have at most two segments.
   const GCConfig testGCConfig =
       GCConfig::Builder(kTestGCConfigBaseBuilder)
-          .withInitHeapSize(AlignedHeapSegment::kSize)
-          .withMaxHeapSize(AlignedHeapSegment::kSize * 2)
+          .withInitHeapSize(FixedSizeHeapSegment::kSize)
+          .withMaxHeapSize(FixedSizeHeapSegment::kSize * 2)
           .build();
   bool triggeredTripwire = false;
   auto runtime = DummyRuntime::create(
@@ -727,34 +733,40 @@ TEST(HeapSnapshotTest, SnapshotFromCallbackContextRunInMiddleYG) {
                   })
                   .build())
           .build());
-  using LargeCell = EmptyCell<AlignedHeapSegment::maxSize() / 2>;
+  using LargeCell = EmptyCell<FixedSizeHeapSegment::maxSize() / 2>;
   DummyRuntime &rt = *runtime;
-  GCScope scope{rt};
+  struct : Locals {
+    PinnedValue<LargeCell> cell1;
+    PinnedValue<LargeCell> cell2;
+    PinnedValue<LargeCell> cell3;
+    PinnedValue<LargeCell> cell4;
+    PinnedValue<DummyObject> cell5;
+  } lv;
+  DummyLocalsRAII lraii{rt, &lv};
 
   // Create a cell in OG and make it dead. It won't be freed until Sweep phase.
-  auto cell1 = rt.makeMutableHandle(LargeCell::createLongLived(rt));
-  cell1.set(nullptr);
+  lv.cell1 = LargeCell::createLongLived(rt);
+  lv.cell1 = nullptr;
 
   // Create two cells to make YG full. Make them dead so that they won't be
   // evacuated in next YG collection.
-  auto cell2 = rt.makeMutableHandle(LargeCell::create(rt));
-  auto cell3 = rt.makeMutableHandle(LargeCell::create(rt));
-  cell2.set(nullptr);
-  cell3.set(nullptr);
+  lv.cell2 = LargeCell::create(rt);
+  lv.cell3 = LargeCell::create(rt);
+  lv.cell2 = nullptr;
+  lv.cell3 = nullptr;
   // Trigger a YG collection, which starts an OG collection.
-  [[maybe_unused]] auto cell4 = rt.makeHandle(LargeCell::create(rt));
+  lv.cell4 = LargeCell::create(rt);
 
   // Add a small cell, so that it won't trigger YG collection due to HadesGC
   // updating YG effectiveEnd.
-  [[maybe_unused]] auto cell5 =
-      rt.makeHandle(DummyObject::create(rt.getHeap(), rt));
+  lv.cell5 = DummyObject::create(rt.getHeap(), rt);
   // Create another cell, this should trigger YG again, and wait for OG to
   // finish in the middle of YG. Both cell4 and cell5 need to be moved to OG,
   // but OG won't have enough space. So it'll wait for OG collection to finish,
   // which frees cell1. If the tripwire callback is called at this point, it'll
   // crash since YG has moved one object and its KindAndSize is no longer valid
   // (it stores the forwarding pointer instead).
-  rt.makeHandle(LargeCell::create(rt));
+  LargeCell::create(rt);
   EXPECT_TRUE(triggeredTripwire);
 }
 #endif
@@ -774,9 +786,12 @@ TEST(HeapSnapshotTest, SnapshotFromCallbackContext) {
                                   .build())
           .build());
   DummyRuntime &rt = *runtime;
-  GCScope scope{rt};
-  auto dummy = rt.makeHandle(DummyObject::create(rt.getHeap(), rt));
-  const auto dummyID = rt.getHeap().getObjectID(dummy.get());
+  struct : Locals {
+    PinnedValue<DummyObject> dummy;
+  } lv;
+  DummyLocalsRAII lraii{rt, &lv};
+  lv.dummy = DummyObject::create(rt.getHeap(), rt);
+  const auto dummyID = rt.getHeap().getObjectID(lv.dummy.get());
   rt.collect();
   ASSERT_TRUE(triggeredTripwire);
 
@@ -794,7 +809,7 @@ TEST(HeapSnapshotTest, SnapshotFromCallbackContext) {
       HeapSnapshot::NodeType::Object,
       "DummyObject",
       dummyID,
-      dummy->getAllocatedSize(),
+      lv.dummy->getAllocatedSize(),
       6};
   EXPECT_EQ(dummyNode, expected);
 }
@@ -941,7 +956,7 @@ TEST_F(HeapSnapshotRuntimeTest, WeakMapTest) {
   Handle<JSObject> key = runtime.makeHandle(JSObject::create(runtime));
   Handle<JSObject> value = runtime.makeHandle(JSObject::create(runtime));
   // Add a key so the DenseMap will exist.
-  ASSERT_FALSE(isException(JSWeakMap::setValue(map, runtime, key, value)));
+  JSWeakMap::setValue(map, runtime, key, value);
 
   JSONObject *root = TAKE_SNAPSHOT(runtime.getHeap(), jsonFactory, true);
   ASSERT_TRUE(root != nullptr);
@@ -988,49 +1003,55 @@ TEST_F(HeapSnapshotRuntimeTest, WeakMapTest) {
 TEST_F(HeapSnapshotRuntimeTest, PropertyUpdatesTest) {
   JSONFactory::Allocator alloc;
   JSONFactory jsonFactory{alloc};
-  Handle<JSObject> obj = runtime.makeHandle(JSObject::create(runtime));
-  SymbolID fooSym, barSym;
+  struct : Locals {
+    PinnedValue<JSObject> obj;
+    PinnedValue<SymbolID> fooSym;
+    PinnedValue<SymbolID> barSym;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
+
+  lv.obj = JSObject::create(runtime);
   {
     vm::GCScope gcScope(runtime);
-    fooSym = vm::stringToSymbolID(
-                 runtime, vm::StringPrimitive::createNoThrow(runtime, "foo"))
-                 ->getHermesValue()
-                 .getSymbol();
-    barSym = vm::stringToSymbolID(
-                 runtime, vm::StringPrimitive::createNoThrow(runtime, "bar"))
-                 ->getHermesValue()
-                 .getSymbol();
+    lv.fooSym = vm::stringToSymbolID(
+                    runtime, vm::StringPrimitive::createNoThrow(runtime, "foo"))
+                    ->getHermesValue()
+                    .getSymbol();
+    lv.barSym = vm::stringToSymbolID(
+                    runtime, vm::StringPrimitive::createNoThrow(runtime, "bar"))
+                    ->getHermesValue()
+                    .getSymbol();
   }
   DefinePropertyFlags dpf = DefinePropertyFlags::getDefaultNewPropertyFlags();
   // Add two properties to the hidden class chain.
   ASSERT_FALSE(isException(JSObject::defineOwnProperty(
-      obj,
+      lv.obj,
       runtime,
-      fooSym,
+      *lv.fooSym,
       dpf,
       runtime.makeHandle(HermesValue::encodeTrustedNumberValue(100)))));
   ASSERT_FALSE(isException(JSObject::defineOwnProperty(
-      obj,
+      lv.obj,
       runtime,
-      barSym,
+      *lv.barSym,
       dpf,
       runtime.makeHandle(HermesValue::encodeTrustedNumberValue(200)))));
   // Trigger update transitions for both properties.
   dpf.writable = false;
   ASSERT_FALSE(isException(JSObject::defineOwnProperty(
-      obj,
+      lv.obj,
       runtime,
-      fooSym,
+      *lv.fooSym,
       dpf,
       runtime.makeHandle(HermesValue::encodeTrustedNumberValue(100)))));
   ASSERT_FALSE(isException(JSObject::defineOwnProperty(
-      obj,
+      lv.obj,
       runtime,
-      barSym,
+      *lv.barSym,
       dpf,
       runtime.makeHandle(HermesValue::encodeTrustedNumberValue(200)))));
   // Forcibly clear the final hidden class's property map.
-  auto *clazz = obj->getClass(runtime);
+  auto *clazz = lv.obj->getClass(runtime);
   clazz->clearPropertyMap(runtime.getHeap());
 
   JSONObject *root = TAKE_SNAPSHOT(runtime.getHeap(), jsonFactory, true);
@@ -1039,7 +1060,7 @@ TEST_F(HeapSnapshotRuntimeTest, PropertyUpdatesTest) {
   const JSONArray &edges = *llvh::cast<JSONArray>(root->at("edges"));
   const JSONArray &strings = *llvh::cast<JSONArray>(root->at("strings"));
 
-  const auto objID = runtime.getHeap().getObjectID(obj.get());
+  const auto objID = runtime.getHeap().getObjectID(lv.obj.get());
   auto nodesAndEdges = FIND_NODE_AND_EDGES_FOR_ID(objID, nodes, edges, strings);
 
   const auto FIRST_NAMED_PROPERTY_EDGE = firstNamedPropertyEdge<JSObject>();
@@ -1050,7 +1071,7 @@ TEST_F(HeapSnapshotRuntimeTest, PropertyUpdatesTest) {
           HeapSnapshot::NodeType::Object,
           "JSObject(foo, bar)",
           objID,
-          obj->getAllocatedSize(),
+          lv.obj->getAllocatedSize(),
           FIRST_NAMED_PROPERTY_EDGE + 2));
   EXPECT_EQ(nodesAndEdges.second.size(), FIRST_NAMED_PROPERTY_EDGE + 2);
 
@@ -1540,8 +1561,8 @@ objects[0];
       R"#(
 (root)(0) @ (0):0:0
 global(1) @ test.js(2):2:1
-global(10) @ test.js(2):15:2
-A(11) @ test.js(2):4:4
+global(11) @ test.js(2):15:2
+A(12) @ test.js(2):4:4
 B(4) @ test.js(2):7:15)#");
 }
 

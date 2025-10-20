@@ -59,6 +59,7 @@
 #include "llvh/ADT/DenseMap.h"
 #endif
 
+#include <cstring>
 #include <future>
 
 #ifdef __EMSCRIPTEN__
@@ -159,7 +160,7 @@ std::shared_ptr<Runtime> Runtime::create(const RuntimeConfig &runtimeConfig) {
   uint64_t maxHeapSize = runtimeConfig.getGCConfig().getMaxHeapSize();
   // Allow some extra segments for the runtime, and as a buffer for the GC.
   uint64_t providerSize = std::min<uint64_t>(
-      1ULL << 32, maxHeapSize + AlignedHeapSegment::storageSize() * 4);
+      1ULL << 32, maxHeapSize + FixedSizeHeapSegment::storageSize() * 4);
   std::shared_ptr<StorageProvider> sp =
       StorageProvider::contiguousVAProvider(providerSize);
   auto rt = HeapRuntime<Runtime>::create(sp);
@@ -181,22 +182,24 @@ CallResult<PseudoHandle<>> Runtime::getNamed(
   if (LLVM_LIKELY(cacheEntry->clazz == clazzPtr)) {
     // The slot is cached, so it is safe to use the Internal function.
     return createPseudoHandle(
-        JSObject::getNamedSlotValueUnsafe(*obj, *this, cacheEntry->slot)
+        JSObject::getNamedSlotValueUnsafe(*obj, *this, cacheEntry->getSlot())
             .unboxToHV(*this));
   }
   auto sym = Predefined::getSymbolID(fixedPropCacheNames[static_cast<int>(id)]);
   NamedPropertyDescriptor desc;
   // Check writable and internalSetter flags since the cache slot is shared for
   // get/put.
-  if (LLVM_LIKELY(
-          JSObject::tryGetOwnNamedDescriptorFast(*obj, *this, sym, desc)) &&
-      !desc.flags.accessor && desc.flags.writable &&
-      !desc.flags.internalSetter) {
+  OptValue<bool> hasOwnProp =
+      JSObject::tryGetOwnNamedDescriptorFast(*obj, *this, sym, desc);
+  if (LLVM_LIKELY(hasOwnProp && *hasOwnProp) && !desc.flags.accessor &&
+      desc.flags.writable && !desc.flags.internalSetter) {
     HiddenClass *clazz = vmcast<HiddenClass>(clazzPtr.getNonNull(*this));
-    if (LLVM_LIKELY(!clazz->isDictionary())) {
+    if (LLVM_LIKELY(
+            !clazz->isDictionaryNoCache() &&
+            desc.slot <= ReadPropertyCacheEntry::kMaxSlot)) {
       // Cache the class, id and property slot.
       cacheEntry->clazz = clazzPtr;
-      cacheEntry->slot = desc.slot;
+      cacheEntry->setSlot(desc.slot);
     }
     return JSObject::getNamedSlotValue(createPseudoHandle(*obj), *this, desc);
   }
@@ -210,20 +213,24 @@ ExecutionStatus Runtime::putNamedThrowOnError(
   CompressedPointer clazzPtr{obj->getClassGCPtr()};
   auto *cacheEntry = &fixedWritePropCache_[static_cast<int>(id)];
   if (LLVM_LIKELY(cacheEntry->clazz == clazzPtr)) {
-    JSObject::setNamedSlotValueUnsafe(*obj, *this, cacheEntry->slot, shv);
+    JSObject::setNamedSlotValueUnsafe(*obj, *this, cacheEntry->getSlot(), shv);
     return ExecutionStatus::RETURNED;
   }
   auto sym = Predefined::getSymbolID(fixedPropCacheNames[static_cast<int>(id)]);
   NamedPropertyDescriptor desc;
-  if (LLVM_LIKELY(
-          JSObject::tryGetOwnNamedDescriptorFast(*obj, *this, sym, desc)) &&
-      !desc.flags.accessor && desc.flags.writable &&
-      !desc.flags.internalSetter) {
+  OptValue<bool> hasOwnProp =
+      JSObject::tryGetOwnNamedDescriptorFast(*obj, *this, sym, desc);
+  if (LLVM_LIKELY(hasOwnProp && *hasOwnProp) && !desc.flags.accessor &&
+      desc.flags.writable && !desc.flags.internalSetter) {
     HiddenClass *clazz = vmcast<HiddenClass>(clazzPtr.getNonNull(*this));
-    if (LLVM_LIKELY(!clazz->isDictionary())) {
+    if (LLVM_LIKELY(!clazz->isDictionaryNoCache()) &&
+        LLVM_LIKELY(desc.slot <= WritePropertyCacheEntry::kMaxSlot)) {
       // Cache the class and property slot.
+      assert(
+          cacheEntry->getAddCacheIndex() == 0 &&
+          "fixedWritePropCache_ has no corresponding add cache");
       cacheEntry->clazz = clazzPtr;
-      cacheEntry->slot = desc.slot;
+      cacheEntry->setSlot(desc.slot);
     }
     JSObject::setNamedSlotValueUnsafe(*obj, *this, desc.slot, shv);
     return ExecutionStatus::RETURNED;
@@ -252,7 +259,12 @@ void RuntimeBase::registerHeapSegment(unsigned idx, void *lowLim) {
       reinterpret_cast<char *>(lowLim) - (idx << AlignedHeapSegment::kLogSize);
   segmentMap[idx] = bias;
 #endif
-  assert(lowLim == AlignedHeapSegment::storageStart(lowLim) && "Precondition");
+  // Ideally we need to assert that lowLim is the start address of the segment,
+  // but the approach for computing segment start address does not work for
+  // JumboHeapSegment.
+  assert(
+      (uintptr_t)(lowLim) % AlignedHeapSegment::kSegmentUnitSize == 0 &&
+      "Segment start address should be aligned to kSegmentUnitSize");
   AlignedHeapSegment::setSegmentIndexFromStart(lowLim, idx);
 }
 
@@ -268,7 +280,7 @@ Runtime::Runtime(
       asyncBreakCheckInEval(runtimeConfig.getAsyncBreakCheckInEval()),
       traceMode(runtimeConfig.getSynthTraceMode()),
       gcCallbacksWrapper_(*this),
-      heapStorage_(
+      heap_(
           gcCallbacksWrapper_,
           *this,
           runtimeConfig.getGCConfig(),
@@ -276,12 +288,10 @@ Runtime::Runtime(
           std::move(provider),
           runtimeConfig.getVMExperimentFlags()),
       jitContext_(runtimeConfig.getEnableJIT()),
-      hasES6Promise_(runtimeConfig.getES6Promise()),
       hasES6Proxy_(runtimeConfig.getES6Proxy()),
-      hasES6Class_(runtimeConfig.getES6Class()),
+      hasAsyncGenerators_(runtimeConfig.getEnableAsyncGenerators()),
       hasES6BlockScoping_(runtimeConfig.getES6BlockScoping()),
       hasIntl_(runtimeConfig.getIntl()),
-      hasArrayBuffer_(runtimeConfig.getArrayBuffer()),
       hasMicrotaskQueue_(runtimeConfig.getMicrotaskQueue()),
       shouldRandomizeMemoryLayout_(runtimeConfig.getRandomizeMemoryLayout()),
       bytecodeWarmupPercent_(runtimeConfig.getBytecodeWarmupPercent()),
@@ -307,10 +317,6 @@ Runtime::Runtime(
   assert(
       (void *)this == (void *)(PointerBase *)this &&
       "cast to PointerBase should be no-op");
-#ifdef HERMES_FACEBOOK_BUILD
-  const bool isSnapshot = std::strstr(__FILE__, "hermes-snapshot");
-  crashMgr_->setCustomData("HermesIsSnapshot", isSnapshot ? "true" : "false");
-#endif
   crashMgr_->registerMemory(this, sizeof(Runtime));
   auto maxNumRegisters = runtimeConfig.getMaxNumRegisters();
   if (LLVM_UNLIKELY(maxNumRegisters > kMaxSupportedNumRegisters)) {
@@ -348,9 +354,7 @@ Runtime::Runtime(
   // Setup the "root" stack frame.
   setCurrentFrameToTopOfStack();
   // Allocate the "reserved" registers in the root frame.
-  allocStack(
-      StackFrameLayout::CalleeExtraRegistersAtStart,
-      HermesValue::encodeUndefinedValue());
+  allocStack(StackFrameLayout::CalleeExtraRegistersAtStart);
 
   // Initialize Predefined Strings.
   // This function does not do any allocations.
@@ -410,26 +414,29 @@ Runtime::Runtime(
     // are actually populated.
     lazyObjectClass = clazz;
 
-    for (unsigned i = 1; i <= std::max(
-                                  {JSObject::numOverlapSlots<JSProxy>(),
-                                   JSObject::numOverlapSlots<JSCallableProxy>(),
-                                   JSObject::numOverlapSlots<HostObject>()});
-         ++i) {
-      auto addResult = HiddenClass::reserveSlot(clazz, *this);
-      assert(
-          addResult != ExecutionStatus::EXCEPTION &&
-          "Could not possibly grow larger than the limit");
-      clazz = *addResult->first;
+    constexpr unsigned maxNumOverlapSlots = std::max(
+        {JSObject::numOverlapSlots<JSProxy>(),
+         JSObject::numOverlapSlots<JSCallableProxy>(),
+         JSObject::numOverlapSlots<HostObject>()});
+    for (unsigned i = 0;; ++i) {
       if (i == JSObject::numOverlapSlots<JSProxy>())
         proxyClass = clazz;
       if (i == JSObject::numOverlapSlots<JSCallableProxy>())
         callableProxyClass = clazz;
       if (i == JSObject::numOverlapSlots<HostObject>())
         hostObjectClass = clazz;
+      if (i == maxNumOverlapSlots)
+        break;
+      auto addResult = HiddenClass::reserveSlot(clazz, *this);
+      assert(
+          addResult != ExecutionStatus::EXCEPTION &&
+          "Could not possibly grow larger than the limit");
+      clazz = *addResult->first;
     }
   }
 
-  global_ = JSObject::create(*this, makeNullHandle<JSObject>());
+  global_ =
+      JSObject::create(*this, makeNullHandle<JSObject>()).getHermesValue();
 
   JSLibFlags jsLibFlags{};
   jsLibFlags.enableHermesInternal = runtimeConfig.getEnableHermesInternal();
@@ -444,7 +451,7 @@ Runtime::Runtime(
   // Set the prototype of the global object to the standard object prototype,
   // which has now been defined.
   ignoreAllocationFailure(JSObject::setParent(
-      *global_, *this, *objectPrototype, PropOpFlags().plusThrowOnError()));
+      *getGlobal(), *this, *objectPrototype, PropOpFlags().plusThrowOnError()));
 
   symbolRegistry_.init(*this);
 
@@ -545,9 +552,7 @@ class Runtime::MarkRootsPhaseTimer {
   std::chrono::time_point<std::chrono::steady_clock> start_;
 };
 
-void Runtime::markRoots(
-    RootAndSlotAcceptorWithNames &acceptor,
-    bool markLongLived) {
+void Runtime::markRoots(RootAcceptorWithNames &acceptor, bool markLongLived) {
   // The body of markRoots should be sequence of blocks, each of which starts
   // with the declaration of an appropriate RootSection instance.
   {
@@ -583,12 +588,17 @@ void Runtime::markRoots(
     acceptor.beginRootSection(RootAcceptor::Section::RuntimeFields);
     for (auto &clazz : rootClazzes_)
       acceptor.accept(clazz, "rootClass");
+#define SHRUNTIME_HV_FIELD(name) acceptor.acceptNullable(*toPHV(&name));
+#include "hermes/VM/SHRuntimeHermesValueFields.def"
 #define RUNTIME_HV_FIELD(name, type) acceptor.acceptNullablePV(name);
 #include "hermes/VM/RuntimeHermesValueFields.def"
+#define RUNTIME_PHV_FIELD(name) acceptor.acceptNullable(name);
+#include "hermes/VM/RuntimePHVFields.def"
     acceptor.acceptPtr(objectPrototypeRawPtr, "objectPrototype");
     acceptor.acceptPtr(functionPrototypeRawPtr, "functionPrototype");
     for (auto &rm : runtimeModuleList_)
       rm.markRoots(acceptor, markLongLived);
+    jitContext_.markRoots(acceptor, markLongLived);
     acceptor.endRootSection();
   }
 
@@ -721,12 +731,12 @@ void Runtime::markWeakRoots(WeakRootAcceptor &acceptor, bool markLongLived) {
     for (auto &entry : fixedReadPropCache_) {
       acceptor.acceptWeak(entry.clazz);
     }
-    for (auto &rm : runtimeModuleList_)
-      rm.markLongLivedWeakRoots(acceptor);
-    for (SHUnit *unit : units)
-      if (unit)
-        sh_unit_mark_long_lived_weak_roots(unit, acceptor);
   }
+  for (auto &rm : runtimeModuleList_)
+    rm.markWeakRoots(acceptor, markLongLived);
+  for (SHUnit *unit : units)
+    if (unit)
+      sh_unit_mark_weak_roots(unit, acceptor, markLongLived);
   for (auto &fn : customMarkWeakRootFuncs_)
     fn(&getHeap(), acceptor);
   acceptor.endRootSection();
@@ -757,8 +767,7 @@ void Runtime::markDomainRefInRuntimeModules(WeakRootAcceptor &acceptor) {
   }
 }
 
-void Runtime::markRootsForCompleteMarking(
-    RootAndSlotAcceptorWithNames &acceptor) {
+void Runtime::markRootsForCompleteMarking(RootAcceptorWithNames &acceptor) {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   MarkRootsPhaseTimer timer(*this, RootAcceptor::Section::SamplingProfiler);
   acceptor.beginRootSection(RootAcceptor::Section::SamplingProfiler);
@@ -776,6 +785,15 @@ void Runtime::visitIdentifiers(
 
 std::string Runtime::convertSymbolToUTF8(SymbolID id) {
   return identifierTable_.convertSymbolToUTF8(id);
+}
+
+void Runtime::invalidateAllAddCacheEntries() {
+  for (auto &rm : runtimeModuleList_) {
+    for (size_t i = 0, e = rm.numAddCacheEntries(); i < e; ++i) {
+      AddPropertyCacheEntry &entry = rm.getAddCacheEntry(i);
+      entry.startClazz = CompressedPointer(nullptr);
+    }
+  }
 }
 
 void Runtime::printRuntimeGCStats(JSONEmitter &json) const {
@@ -802,9 +820,6 @@ void Runtime::printHeapStats(llvh::raw_ostream &os) {
 #ifndef NDEBUG
   printArrayCensus(os);
 #endif
-  if (trackIO_) {
-    getIOTrackingInfoJSON(os);
-  }
 }
 
 void Runtime::getIOTrackingInfoJSON(llvh::raw_ostream &os) {
@@ -839,10 +854,29 @@ void Runtime::assertTopCodeBlockContainsIP(const inst::Inst *ip) const {
       assert(codeBlock->contains(ip) && "IP not in CodeBlock");
 }
 
+void Runtime::validateSavedIPBeforeCall() const {
+  // If this is the first frame, there is nothing to save.
+  if (currentFrame_ == StackFramePtr(registerStackStart_))
+    return;
+
+  auto *codeBlock = currentFrame_.getCalleeCodeBlock();
+  // If the current function is not bytecode, the IP does not need to be saved.
+  if (!codeBlock)
+    return;
+
+  auto *ip = StackFramePtr(stackPointer_).getSavedIP();
+  // Validate that the IP is correct.
+  assert(ip && "Saved IP is null");
+  assert(codeBlock->contains(ip) && "Saved IP not in CodeBlock");
+  assert(ip == getCurrentIP() && "IP mismatch");
+}
+
 void Runtime::printArrayCensus(llvh::raw_ostream &os) {
+  if (!getHeap().shouldRecordGCStats())
+    return;
   // Do array capacity histogram.
   // Map from array size to number of arrays that are that size.
-  // Arrays includes ArrayStorage and SegmentedArray.
+  // Arrays includes ArrayStorage.
   std::map<std::pair<size_t, size_t>, std::pair<size_t, size_t>>
       arraySizeToCountAndWastedSlots;
   auto printTable = [&os](const std::map<
@@ -895,7 +929,8 @@ void Runtime::printArrayCensus(llvh::raw_ostream &os) {
   getHeap().forAllObjs([&arraySizeToCountAndWastedSlots](GCCell *cell) {
     if (cell->getKind() == CellKind::ArrayStorageKind) {
       ArrayStorage *arr = vmcast<ArrayStorage>(cell);
-      const auto key = std::make_pair(arr->capacity(), arr->getAllocatedSize());
+      const auto key =
+          std::make_pair(arr->capacity(), arr->getAllocatedSizeSlow());
       arraySizeToCountAndWastedSlots[key].first++;
       arraySizeToCountAndWastedSlots[key].second +=
           arr->capacity() - arr->size();
@@ -907,49 +942,14 @@ void Runtime::printArrayCensus(llvh::raw_ostream &os) {
     printTable(arraySizeToCountAndWastedSlots);
   }
 
-  os << "Array Census for SegmentedArray:\n";
-  arraySizeToCountAndWastedSlots.clear();
-  getHeap().forAllObjs([&arraySizeToCountAndWastedSlots, this](GCCell *cell) {
-    if (cell->getKind() == CellKind::SegmentedArrayKind) {
-      SegmentedArray *arr = vmcast<SegmentedArray>(cell);
-      const auto key =
-          std::make_pair(arr->totalCapacityOfSpine(), arr->getAllocatedSize());
-      arraySizeToCountAndWastedSlots[key].first++;
-      arraySizeToCountAndWastedSlots[key].second +=
-          arr->totalCapacityOfSpine() - arr->size(*this);
-    }
-  });
-  if (arraySizeToCountAndWastedSlots.empty()) {
-    os << "\tNo SegmentedArrays\n\n";
-  } else {
-    printTable(arraySizeToCountAndWastedSlots);
-  }
-
-  os << "Array Census for Segment:\n";
-  arraySizeToCountAndWastedSlots.clear();
-  getHeap().forAllObjs([&arraySizeToCountAndWastedSlots](GCCell *cell) {
-    if (cell->getKind() == CellKind::SegmentKind) {
-      SegmentedArray::Segment *seg = vmcast<SegmentedArray::Segment>(cell);
-      const auto key = std::make_pair(seg->length(), seg->getAllocatedSize());
-      arraySizeToCountAndWastedSlots[key].first++;
-      arraySizeToCountAndWastedSlots[key].second +=
-          SegmentedArray::Segment::kMaxLength - seg->length();
-    }
-  });
-  if (arraySizeToCountAndWastedSlots.empty()) {
-    os << "\tNo Segments\n\n";
-  } else {
-    printTable(arraySizeToCountAndWastedSlots);
-  }
-
   os << "Array Census for JSArray:\n";
   arraySizeToCountAndWastedSlots.clear();
   getHeap().forAllObjs([&arraySizeToCountAndWastedSlots, this](GCCell *cell) {
     if (JSArray *arr = dyn_vmcast<JSArray>(cell)) {
-      JSArray::StorageType *storage = arr->getIndexedStorage(*this);
-      const auto capacity = storage ? storage->totalCapacityOfSpine() : 0;
-      const auto sz = storage ? storage->size(*this) : 0;
-      const auto key = std::make_pair(capacity, arr->getAllocatedSize());
+      JSArray::StorageType *storage = arr->getIndexedStorageNullable(*this);
+      const auto capacity = storage ? storage->capacity() : 0;
+      const auto sz = storage ? storage->size() : 0;
+      const auto key = std::make_pair(capacity, arr->getAllocatedSizeSlow());
       arraySizeToCountAndWastedSlots[key].first++;
       arraySizeToCountAndWastedSlots[key].second += capacity - sz;
     }
@@ -968,11 +968,7 @@ unsigned Runtime::getSymbolsEnd() const {
   return identifierTable_.getSymbolsEnd();
 }
 
-void Runtime::unmarkSymbols() {
-  identifierTable_.unmarkSymbols();
-}
-
-void Runtime::freeSymbols(const llvh::BitVector &markedSymbols) {
+void Runtime::freeSymbols(llvh::BitVector &markedSymbols) {
   identifierTable_.freeUnmarkedSymbols(markedSymbols, getHeap().getIDTracker());
 }
 
@@ -1077,11 +1073,6 @@ CallResult<HermesValue> Runtime::runBytecode(
     }
     freezeBuiltins();
     assert(builtinsFrozen_ && "Builtins must be frozen by now.");
-  }
-
-  if (bytecode->getBytecodeOptions().getHasAsync() && !hasES6Promise_) {
-    return raiseTypeError(
-        "Cannot execute a bytecode having async functions when Promise is disabled.");
   }
 
   if (flags.persistent) {
@@ -1205,7 +1196,18 @@ Handle<JSObject> Runtime::runInternalJavaScript() {
     return makeHandle<JSObject>(HermesValue::fromRaw(resOrExc.raw));
   hermes_fatal("Error evaluating internal unit.");
 #else
-  auto module = getInternalBytecode();
+  llvh::ArrayRef<uint8_t> module = getInternalBytecode();
+
+#ifdef HERMES_ENABLE_DEBUGGER
+  // If the debugger is enabled we need to be able to set breakpoints in
+  // internal bytecode. Copy it into the heap to allow mutating it.
+  // Copy module into internalBytecodeCopy_ and use that instead.
+  internalBytecodeCopy_.reset(
+      static_cast<uint8_t *>(checkedMalloc(module.size())));
+  std::memcpy(internalBytecodeCopy_.get(), module.data(), module.size());
+  module = {internalBytecodeCopy_.get(), module.size()};
+#endif
+
   std::pair<std::unique_ptr<hbc::BCProvider>, std::string> bcResult =
       hbc::BCProviderFromBuffer::createBCProviderFromBuffer(
           std::make_unique<Buffer>(module.data(), module.size()));
@@ -1308,7 +1310,7 @@ void Runtime::printException(llvh::raw_ostream &os, Handle<> valueHandle) {
 }
 
 Handle<JSObject> Runtime::getGlobal() {
-  return Handle<JSObject>::vmcast(&global_);
+  return Handle<JSObject>::vmcast(toPHV(&global_));
 }
 
 std::vector<llvh::ArrayRef<uint8_t>> Runtime::getEpilogues() {
@@ -1599,7 +1601,7 @@ void Runtime::initPredefinedStrings() {
       "Arrays should have same length");
   for (uint32_t idx = 0; idx < strCount; idx++) {
     SymbolID sym = identifierTable_.registerLazyIdentifier(
-        ASCIIRef{&buffer[offset], strLengths[idx]}, hashes[idx]);
+        *this, ASCIIRef{&buffer[offset], strLengths[idx]}, hashes[idx]);
 
     assert(sym == Predefined::getSymbolID((Predefined::Str)registered++));
     (void)sym;
@@ -1798,11 +1800,8 @@ static const struct JSBuiltin {
 #define NORMAL_METHOD(object, method)
 #define BUILTIN_METHOD(object, method)
 #define PRIVATE_BUILTIN(name)
-#define JS_BUILTIN(name)                                \
-  {                                                     \
-    (uint16_t) Predefined::name,                        \
-        (uint16_t)BuiltinMethod::HermesBuiltin##_##name \
-  }
+#define JS_BUILTIN(name) \
+  {(uint16_t)Predefined::name, (uint16_t)BuiltinMethod::HermesBuiltin##_##name},
 #include "hermes/FrontEndDefs/Builtins.def"
 };
 
@@ -1814,7 +1813,10 @@ void Runtime::initJSBuiltins(Handle<JSObject> jsBuiltinsObj) {
     // Try to get the JS function from jsBuiltinsObj.
     auto getRes = JSObject::getNamed_RJS(
         jsBuiltinsObj, *this, Predefined::getSymbolID((Predefined::Str)symID));
-    assert(getRes == ExecutionStatus::RETURNED && "Failed to get JS builtin.");
+    assert(
+        getRes == ExecutionStatus::RETURNED &&
+        !getRes.getValue()->isUndefined() && "Failed to get JS builtin.");
+
     Callable *jsFunc = vmcast<Callable>(getRes->getHermesValue());
 
     registerBuiltin((BuiltinMethod::Enum)builtinIndex, jsFunc);
@@ -1950,7 +1952,10 @@ ExecutionStatus Runtime::drainJobs() {
   return ExecutionStatus::RETURNED;
 }
 
-ExecutionStatus Runtime::addToKeptObjects(Handle<JSObject> obj) {
+ExecutionStatus Runtime::addToKeptObjects(Handle<> obj) {
+  assert(
+      canBeHeldWeakly(*this, *obj) &&
+      "obj must hold an Object or non-registered Symbol");
   // Lazily create the map for keptObjects_
   if (*keptObjects_ == nullptr) {
     keptObjects_ = JSSet::create(*this, mapPrototype);
@@ -1968,54 +1973,45 @@ void Runtime::clearKeptObjects() {
   keptObjects_ = nullptr;
 }
 
-uint64_t Runtime::gcStableHashHermesValue(Handle<HermesValue> value) {
-  switch (value->getTag()) {
+uint64_t Runtime::gcStableHashHermesValue(HermesValue value) {
+  switch (value.getTag()) {
     case HermesValue::Tag::Object: {
-      // For objects, because pointers can move, we need a unique ID
-      // that does not change for each object.
-      return JSObject::getObjectID(vmcast<JSObject>(*value), *this);
+      return gcStableHashJSObject(vmcast<JSObject>(value));
     }
     case HermesValue::Tag::BigInt: {
       // For bigints, we hash the string content.
-      auto bytes = Handle<BigIntPrimitive>::vmcast(value)->getRawDataCompact();
+      auto bytes = vmcast<BigIntPrimitive>(value)->getRawDataCompact();
       return llvh::hash_combine_range(bytes.begin(), bytes.end());
     }
     case HermesValue::Tag::Str: {
       // For strings, we hash the string content.
-      auto strHandle = Handle<StringPrimitive>::vmcast(value);
-      return strHandle->getOrComputeHash();
+      return vmcast<StringPrimitive>(value)->getOrComputeHash();
     }
     default:
-      assert(!value->isPointer() && "Unhandled pointer type");
-      if (value->isNumber()) {
+      assert(!value.isPointer() && "Unhandled pointer type");
+      if (value.isNumber()) {
         // We need to check for NaNs because they may differ in the sign bit,
         // but they should have the same hash value.
-        if (LLVM_UNLIKELY(value->isNaN()))
+        if (LLVM_UNLIKELY(value.isNaN()))
           return llvh::hash_value(HermesValue::encodeNaNValue().getRaw());
         // To normalize -0 to 0.
-        if (value->getNumber() == 0)
+        if (value.getNumber() == 0)
           return 0;
       }
       // For everything else, we just take advantage of HermesValue.
-      return llvh::hash_value(value->getRaw());
+      return llvh::hash_value(value.getRaw());
   }
+}
+
+uint64_t Runtime::gcStableHashJSObject(JSObject *object) {
+  // For objects, because pointers can move, we need a unique ID
+  // that does not change for each object.
+  return JSObject::getObjectID(vmcast<JSObject>(object), *this);
 }
 
 bool Runtime::symbolEqualsToStringPrim(SymbolID id, StringPrimitive *strPrim) {
   auto view = identifierTable_.getStringView(*this, id);
   return strPrim->equals(view);
-}
-
-LLVM_ATTRIBUTE_NOINLINE
-void Runtime::allocStack(uint32_t count, HermesValue initValue) {
-  // Note: it is important that allocStack be defined out-of-line. If inline,
-  // constants are propagated into initValue, which enables clang to use
-  // memset_pattern_16. This ends up being a significant loss as it is an
-  // indirect call.
-  auto *oldStackPointer = stackPointer_;
-  allocUninitializedStack(count);
-  // Initialize the new registers.
-  std::uninitialized_fill_n(oldStackPointer, count, initValue);
 }
 
 void Runtime::dumpCallFrames(llvh::raw_ostream &OS) {

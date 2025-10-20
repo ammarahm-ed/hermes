@@ -216,6 +216,7 @@ Value *ESTreeIRGen::_genExpressionImpl(
         flowTypeToIRType(flowContext_.getNodeTypeOrAny(ICK)));
   }
 
+#if HERMES_PARSE_FLOW
   if (auto *TC = llvh::dyn_cast<ESTree::TypeCastExpressionNode>(expr)) {
     return Builder.createCheckedTypeCastInst(
         genExpression(TC->_expression, nameHint),
@@ -226,6 +227,7 @@ Value *ESTreeIRGen::_genExpressionImpl(
         genExpression(TC->_expression, nameHint),
         flowTypeToIRType(flowContext_.getNodeTypeOrAny(TC)));
   }
+#endif
 
   Builder.getModule()->getContext().getSourceErrorManager().error(
       expr->getSourceRange(), Twine("Invalid expression encountered"));
@@ -307,7 +309,9 @@ Value *ESTreeIRGen::genArrayFromElements(ESTree::NodeList &list) {
 
   // If we have a variable length array, then we store the next index in
   // a stack location `nextIndex`, to be updated when we encounter spread
-  // elements. Otherwise, we simply count them in `count`.
+  // elements.
+
+  // `count` is the number of elements of the list we've seen so far.
   unsigned count = 0;
   AllocStackInst *nextIndex = nullptr;
   if (variableLength) {
@@ -318,6 +322,8 @@ Value *ESTreeIRGen::genArrayFromElements(ESTree::NodeList &list) {
   }
 
   bool consecutive = true;
+  // Whether we've seen the first spread element yet.
+  bool seenSpread = false;
   AllocArrayInst *allocArrayInst = nullptr;
   for (auto &E : list) {
     Value *value{nullptr};
@@ -325,6 +331,7 @@ Value *ESTreeIRGen::genArrayFromElements(ESTree::NodeList &list) {
     if (!llvh::isa<ESTree::EmptyNode>(&E)) {
       if (auto *spread = llvh::dyn_cast<ESTree::SpreadElementNode>(&E)) {
         isSpread = true;
+        seenSpread = true;
         value = genExpression(spread->_argument);
       } else {
         value = genExpression(&E);
@@ -356,12 +363,15 @@ Value *ESTreeIRGen::genArrayFromElements(ESTree::NodeList &list) {
     if (value) {
       if (consecutive) {
         elements.push_back(value);
+      } else if (!seenSpread) {
+        Builder.createDefineOwnInDenseArrayInst(
+            value, allocArrayInst, Builder.getLiteralNumber(count));
       } else {
+        assert(variableLength && "seen spread so it must be variable length");
         Builder.createDefineOwnPropertyInst(
             value,
             allocArrayInst,
-            variableLength ? cast<Value>(Builder.createLoadStackInst(nextIndex))
-                           : cast<Value>(Builder.getLiteralNumber(count)),
+            cast<Value>(Builder.createLoadStackInst(nextIndex)),
             IRBuilder::PropEnumerable::Yes);
       }
     }
@@ -377,9 +387,8 @@ Value *ESTreeIRGen::genArrayFromElements(ESTree::NodeList &list) {
               Builder.createLoadStackInst(nextIndex),
               Builder.getLiteralNumber(1)),
           nextIndex);
-    } else {
-      count++;
     }
+    count++;
   }
 
   if (!allocArrayInst) {
@@ -947,14 +956,27 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitMemberLoad(
       auto optFieldLookup = classType->findField(propName);
       if (optFieldLookup) {
         size_t fieldIndex = optFieldLookup->getField()->layoutSlotIR;
-        return MemberExpressionResult{
-            Builder.createPrLoadInst(
-                baseValue,
-                fieldIndex,
-                Builder.getLiteralString(propName),
-                flowTypeToIRType(optFieldLookup->getField()->type)),
-            nullptr,
-            baseValue};
+        Type irType = flowTypeToIRType(optFieldLookup->getField()->type);
+        Instruction *inst;
+        if (irType.canBePrimitive()) {
+          // If the type can be a primitive, it will have a default value that
+          // doesn't need IDZ.
+          inst = Builder.createPrLoadInst(
+              baseValue,
+              fieldIndex,
+              Builder.getLiteralString(propName),
+              irType);
+        } else {
+          // IDZ needed for object types.
+          inst = Builder.createThrowIfInst(
+              Builder.createPrLoadInst(
+                  baseValue,
+                  fieldIndex,
+                  Builder.getLiteralString(propName),
+                  Type::unionTy(irType, Type::createUninit())),
+              Type::createUninit());
+        }
+        return MemberExpressionResult{inst, nullptr, baseValue};
       }
       // Failed to find a class field, check the home object for methods.
       auto optMethodLookup =
@@ -1037,10 +1059,14 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitMemberLoad(
     }
     Mod->getContext().getSourceErrorManager().error(
         mem->getSourceRange(), "invalid tuple access");
+  };
+  Value *loadProp;
+  if (auto *PN = llvh::dyn_cast<ESTree::PrivateNameNode>(getProperty(mem))) {
+    loadProp = emitPrivateLookup(baseValue, propValue, PN);
+  } else {
+    loadProp = Builder.createLoadPropertyInst(baseValue, propValue);
   }
-
-  return MemberExpressionResult{
-      Builder.createLoadPropertyInst(baseValue, propValue), nullptr, baseValue};
+  return MemberExpressionResult{loadProp, nullptr, baseValue};
 }
 
 ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitTypedSuperLoad(
@@ -1180,7 +1206,11 @@ void ESTreeIRGen::emitMemberStore(
         mem->getSourceRange(), "invalid tuple access");
   }
 
-  Builder.createStorePropertyInst(storedValue, baseValue, propValue);
+  if (auto *PN = llvh::dyn_cast<ESTree::PrivateNameNode>(getProperty(mem))) {
+    emitPrivateStore(baseValue, storedValue, propValue, PN);
+  } else {
+    Builder.createStorePropertyInst(storedValue, baseValue, propValue);
+  }
 }
 
 ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genOptionalMemberExpression(
@@ -1188,6 +1218,7 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genOptionalMemberExpression(
     BasicBlock *shortCircuitBB,
     MemberExpressionOperation op) {
   PhiInst::ValueListType values;
+  PhiInst::ValueListType baseValues;
   PhiInst::BasicBlockListType blocks;
 
   // true when this is the genOptionalMemberExpression call containing
@@ -1207,6 +1238,10 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genOptionalMemberExpression(
     shortCircuitBB = Builder.createBasicBlock(Builder.getFunction());
     Builder.setInsertionBlock(shortCircuitBB);
     values.push_back(Builder.getLiteralUndefined());
+    // When short circuiting, just use 'undefined' as this, because the short
+    // circuit will result in an attempt to call 'undefined' that will throw
+    // anyway.
+    baseValues.push_back(Builder.getLiteralUndefined());
     blocks.push_back(shortCircuitBB);
     Builder.createBranchInst(continueBB);
     Builder.setInsertionBlock(insertionBB);
@@ -1247,7 +1282,12 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genOptionalMemberExpression(
   Value *result = nullptr;
   switch (op) {
     case MemberExpressionOperation::Load:
-      result = Builder.createLoadPropertyInst(baseValue, prop);
+      if (auto *PN =
+              llvh::dyn_cast<ESTree::PrivateNameNode>(getProperty(mem))) {
+        result = emitPrivateLookup(baseValue, prop, PN);
+      } else {
+        result = Builder.createLoadPropertyInst(baseValue, prop);
+      }
       break;
     case MemberExpressionOperation::Delete:
       result = Builder.createDeletePropertyInst(baseValue, prop);
@@ -1257,11 +1297,14 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genOptionalMemberExpression(
 
   if (isFirstOptional) {
     values.push_back(result);
+    baseValues.push_back(baseValue);
     blocks.push_back(Builder.getInsertionBlock());
     Builder.createBranchInst(continueBB);
 
     Builder.setInsertionBlock(continueBB);
-    return {Builder.createPhiInst(values, blocks), nullptr, baseValue};
+    PhiInst *valuePhi = Builder.createPhiInst(values, blocks);
+    PhiInst *basePhi = Builder.createPhiInst(baseValues, blocks);
+    return {valuePhi, nullptr, basePhi};
   }
 
   // If this isn't the first optional, no Phi needed, just return the result.
@@ -1329,47 +1372,43 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
     enum { None, Placeholder, IRGenerated } state{None};
     /// The value, if this is a regular property
     ESTree::Node *valueNode{};
+    /// Getter PropertyNode, if this is an accessor property.
+    ESTree::PropertyNode *getterProp{};
     /// Getter accessor, if this is an accessor property.
     ESTree::FunctionExpressionNode *getterNode{};
+    /// Setter PropertyNode, if this is an accessor property.
+    ESTree::PropertyNode *setterProp{};
     /// Setter accessor, if this is an accessor property.
     ESTree::FunctionExpressionNode *setterNode{};
-
-    SMRange getSourceRange() {
-      if (valueNode) {
-        return valueNode->getSourceRange();
-      }
-
-      if (getterNode) {
-        return getterNode->getSourceRange();
-      }
-
-      if (setterNode) {
-        return setterNode->getSourceRange();
-      }
-
-      llvm_unreachable("Unset node has no location info");
-    }
 
     void setValue(ESTree::Node *val) {
       isAccessor = false;
       valueNode = val;
       getterNode = setterNode = nullptr;
     }
-    void setGetter(ESTree::FunctionExpressionNode *get) {
+    void setGetter(
+        ESTree::FunctionExpressionNode *get,
+        ESTree::PropertyNode *prop) {
       if (!isAccessor) {
         valueNode = nullptr;
         setterNode = nullptr;
+        setterProp = nullptr;
         isAccessor = true;
       }
       getterNode = get;
+      getterProp = prop;
     }
-    void setSetter(ESTree::FunctionExpressionNode *set) {
+    void setSetter(
+        ESTree::FunctionExpressionNode *set,
+        ESTree::PropertyNode *prop) {
       if (!isAccessor) {
         valueNode = nullptr;
         getterNode = nullptr;
+        getterProp = nullptr;
         isAccessor = true;
       }
       setterNode = set;
+      setterProp = prop;
     }
   };
 
@@ -1384,9 +1423,9 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
   llvh::SmallVector<char, 32> stringStorage;
   /// The optional __proto__ property.
   ESTree::PropertyNode *protoProperty = nullptr;
-  // Keep track of if we've seen a method property. This is used to decide if we
-  // should capture the object literal we are building in a variable.
-  bool hasMethodProp = false;
+  // True if we need to capture the object literal being built into a Variable.
+  // This is in order to support the `super` references.
+  bool shouldCaptureObjForHomeObject = false;
 
   for (auto &P : Expr->_properties) {
     if (llvh::isa<ESTree::SpreadElementNode>(&P)) {
@@ -1398,7 +1437,8 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
     stringStorage.clear();
 
     auto *prop = cast<ESTree::PropertyNode>(&P);
-    hasMethodProp |= prop->_method;
+    shouldCaptureObjForHomeObject |= prop->_method ||
+        prop->_kind->str() == "set" || prop->_kind->str() == "get";
     if (prop->_computed) {
       // Can't store any useful information if the name is computed.
       // Just generate the code in the next loop.
@@ -1425,9 +1465,11 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
 
     PropertyValue *propValue = &propMap[propName];
     if (prop->_kind->str() == "get") {
-      propValue->setGetter(cast<ESTree::FunctionExpressionNode>(prop->_value));
+      propValue->setGetter(
+          cast<ESTree::FunctionExpressionNode>(prop->_value), prop);
     } else if (prop->_kind->str() == "set") {
-      propValue->setSetter(cast<ESTree::FunctionExpressionNode>(prop->_value));
+      propValue->setSetter(
+          cast<ESTree::FunctionExpressionNode>(prop->_value), prop);
     } else {
       assert(prop->_kind->str() == "init" && "invalid PropertyNode kind");
       // We record the propValue if this is a regular property
@@ -1464,23 +1506,16 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
   // Allocate a new javascript object on the heap.
   auto Obj = Builder.createAllocObjectLiteralInst({}, objectParent);
   Variable *capturedObj = nullptr;
-  // If we see a method, there may be a super property reference. We need to
-  // capture the value of this object literal, which will become the home object
-  // for any methods defined in this literal.
-  if (hasMethodProp) {
+  if (shouldCaptureObjForHomeObject) {
+    // Capture the value of this object literal, which will become the home
+    // object for any methods/accessors defined in this literal.
     capturedObj = Builder.createVariable(
-        curFunction()->curScope->getVariableScope(),
+        curFunction()->curScope()->getVariableScope(),
         "?obj",
         Type::createObject(),
         true);
-    Builder.createStoreFrameInst(curFunction()->curScope, Obj, capturedObj);
+    Builder.createStoreFrameInst(curFunction()->curScope(), Obj, capturedObj);
   }
-
-  // haveSeenComputedProp tracks whether we have processed a computed property.
-  // Once we do, for all future properties, we can no longer generate
-  // DefineNewOwnPropertyInst because the computed property could have already
-  // defined any property.
-  bool haveSeenComputedProp = false;
 
   // Initialize all properties. We check whether the value of each property
   // will be overwritten (by comparing against what we have saved in propMap).
@@ -1493,7 +1528,6 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
       genBuiltinCall(
           BuiltinMethod::HermesBuiltin_copyDataProperties,
           {Obj, genExpression(spread->_argument)});
-      haveSeenComputedProp = true;
       continue;
     }
 
@@ -1507,14 +1541,26 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
       // TODO (T46136220): Set the .name property for anonymous functions that
       // are values for computed property keys.
       auto *key = genExpression(prop->_key);
-      auto *value = prop->_method
-          ? genFunctionExpression(
-                llvh::cast<ESTree::FunctionExpressionNode>(prop->_value),
-                Identifier{},
-                nullptr,
-                Function::DefinitionKind::ES6Method,
-                capturedObj)
-          : genExpression(prop->_value, Identifier{});
+      Value *value;
+      if (prop->_method) {
+        value = genFunctionExpression(
+            llvh::cast<ESTree::FunctionExpressionNode>(prop->_value),
+            Identifier{},
+            nullptr,
+            Function::DefinitionKind::ES6Method,
+            capturedObj,
+            prop);
+      } else if (prop->_kind->str() == "set" || prop->_kind->str() == "get") {
+        value = genFunctionExpression(
+            llvh::cast<ESTree::FunctionExpressionNode>(prop->_value),
+            Identifier{},
+            /* superClassNode */ nullptr,
+            Function::DefinitionKind::ES5Function,
+            /* homeObject */ capturedObj,
+            /* parentNode */ prop);
+      } else {
+        value = genExpression(prop->_value, Identifier{});
+      }
       if (prop->_kind->str() == "get") {
         Builder.createDefineOwnGetterSetterInst(
             value,
@@ -1533,7 +1579,6 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
         Builder.createDefineOwnPropertyInst(
             value, Obj, key, IRBuilder::PropEnumerable::Yes);
       }
-      haveSeenComputedProp = true;
       continue;
     }
 
@@ -1571,19 +1616,8 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
       if (propValue->state == PropertyValue::None) {
         // This value is going to be overwritten, but insert a placeholder in
         // order to maintain insertion order.
-        if (haveSeenComputedProp) {
-          Builder.createDefineOwnPropertyInst(
-              Builder.getLiteralNull(),
-              Obj,
-              Key,
-              IRBuilder::PropEnumerable::Yes);
-        } else {
-          Builder.createDefineNewOwnPropertyInst(
-              Builder.getLiteralNull(),
-              Obj,
-              Key,
-              IRBuilder::PropEnumerable::Yes);
-        }
+        Builder.createDefineOwnPropertyInst(
+            Builder.getLiteralNull(), Obj, Key, IRBuilder::PropEnumerable::Yes);
         propValue->state = PropertyValue::Placeholder;
       }
     };
@@ -1602,15 +1636,25 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
       Value *setter = Builder.getLiteralUndefined();
 
       if (propValue->getterNode) {
-        getter = genExpression(
+        assert(propValue->getterProp && "PropertyNode must exist");
+        getter = genFunctionExpression(
             propValue->getterNode,
-            Builder.createIdentifier("get " + keyStr.str()));
+            Builder.createIdentifier("get " + keyStr.str()),
+            /* superClassNode */ nullptr,
+            Function::DefinitionKind::ES5Function,
+            /* homeObject */ nullptr,
+            /* parentNode */ propValue->getterProp);
       }
 
       if (propValue->setterNode) {
-        setter = genExpression(
+        assert(propValue->setterProp && "PropertyNode must exist");
+        setter = genFunctionExpression(
             propValue->setterNode,
-            Builder.createIdentifier("set " + keyStr.str()));
+            Builder.createIdentifier("set " + keyStr.str()),
+            /* superClassNode */ nullptr,
+            Function::DefinitionKind::ES5Function,
+            /* homeObject */ nullptr,
+            /* parentNode */ propValue->setterProp);
       }
 
       Builder.createDefineOwnGetterSetterInst(
@@ -1630,7 +1674,8 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
               nameHint,
               nullptr,
               Function::DefinitionKind::ES6Method,
-              capturedObj)
+              capturedObj,
+              prop)
         : genExpression(prop->_value, nameHint);
 
     // Only store the value if it won't be overwritten.
@@ -1638,14 +1683,8 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
       assert(
           propValue->state != PropertyValue::IRGenerated &&
           "IR can only be generated once");
-      if (haveSeenComputedProp ||
-          propValue->state == PropertyValue::Placeholder) {
-        Builder.createDefineOwnPropertyInst(
-            value, Obj, Key, IRBuilder::PropEnumerable::Yes);
-      } else {
-        Builder.createDefineNewOwnPropertyInst(
-            value, Obj, Key, IRBuilder::PropEnumerable::Yes);
-      }
+      Builder.createDefineOwnPropertyInst(
+          value, Obj, Key, IRBuilder::PropEnumerable::Yes);
       propValue->state = PropertyValue::IRGenerated;
     } else {
       maybeInsertPlaceholder();
@@ -1704,7 +1743,7 @@ Value *ESTreeIRGen::genTypedObjectExpr(
         "Missing stored value in typechecked object literal");
     // Use a literal if possible, otherwise use the default init value.
     // Avoid putting non-literals here because we want to emit PrStore
-    // instead of DefineNewOwnPropertyInst.
+    // instead of DefineOwnPropertyInst.
     Value *initValue = nullptr;
     if (llvh::isa<Literal>(it->second.first)) {
       initValue = it->second.first;
@@ -1966,7 +2005,7 @@ Value *ESTreeIRGen::genYieldStarExpr(ESTree::YieldExpressionNode *Y) {
       // emitNormalCleanup.
       []() {},
       // emitHandler.
-      [this, exitBlock, result, &iteratorRecord, &resumeGenTryStartBB](
+      [this, exitBlock, result, &iteratorRecord, &resumeGenTryStartBB, Y](
           BasicBlock *getNextBlock) {
         auto *catchReg = Builder.createCatchInst();
 
@@ -2021,7 +2060,7 @@ Value *ESTreeIRGen::genYieldStarExpr(ESTree::YieldExpressionNode *Y) {
         // going to terminate the yield* loop. But first we need to give
         // iterator a chance to clean up.
         Builder.setInsertionBlock(noThrowMethodBB);
-        emitIteratorCloseSlow(iteratorRecord, false);
+        emitIteratorCloseSlow(Y, iteratorRecord, false);
         Builder.createThrowTypeErrorInst(Builder.getLiteralString(
             "yield* delegate must have a .throw() method"));
       });
@@ -2078,10 +2117,20 @@ Value *ESTreeIRGen::genBinaryExpression(ESTree::BinaryExpressionNode *bin) {
     return LHS;
   }
 
-  Value *LHS = genExpression(bin->_left);
+  ValueKind kind;
+  Value *LHS;
+  if (auto *PN = llvh::dyn_cast<ESTree::PrivateNameNode>(bin->_left)) {
+    // If we are seeing the form `#privateName in val`, generate a different
+    // kind of `in` operator.
+    assert(bin->_operator->str() == "in");
+    kind = ValueKind::BinaryPrivateInInstKind;
+    LHS = genPrivateNameValue(llvh::cast<ESTree::IdentifierNode>(PN->_id));
+  } else {
+    kind = BinaryOperatorInst::parseOperator(bin->_operator->str());
+    LHS = genExpression(bin->_left);
+  }
   Value *RHS = genExpression(bin->_right);
 
-  ValueKind kind = BinaryOperatorInst::parseOperator(bin->_operator->str());
   Instruction *res = Builder.createBinaryOperatorInst(LHS, RHS, kind);
 
   // If the binary operator is a comparison, set the result type to boolean.
@@ -2093,6 +2142,7 @@ Value *ESTreeIRGen::genBinaryExpression(ESTree::BinaryExpressionNode *bin) {
   if ((kind >= ValueKind::BinaryEqualInstKind &&
        kind <= ValueKind::BinaryGreaterThanOrEqualInstKind) ||
       kind == ValueKind::BinaryInInstKind ||
+      kind == ValueKind::BinaryPrivateInInstKind ||
       kind == ValueKind::BinaryInstanceOfInstKind) {
     res->setType(Type::createBoolean());
   }
@@ -2474,6 +2524,22 @@ Value *ESTreeIRGen::genIdentifierExpression(
   return emitLoad(Var, afterTypeOf);
 }
 
+Value *ESTreeIRGen::genPrivateNameValue(ESTree::IdentifierNode *Iden) {
+  sema::Decl *decl = semCtx_.getExpressionDecl(Iden);
+  assert(decl && "identifier must be resolved");
+  assert(
+      sema::Decl::isKindPrivateName(decl->kind) &&
+      "must refer to a private name");
+  // Fields each have their own name value.
+  if (decl->kind == sema::Decl::Kind::PrivateField) {
+    return emitLoad(getDeclData(decl), false);
+  }
+  // Methods and accessors all share the same class brand symbol as their "name
+  // value".
+  auto *entry = getDeclDataPrivate<PrivateNameFunctionTable::BaseEntry>(decl);
+  return emitLoad(entry->classBrand, false);
+}
+
 Value *ESTreeIRGen::genMetaProperty(ESTree::MetaPropertyNode *MP) {
   // Recognize "new.target"
   if (cast<ESTree::IdentifierNode>(MP->_meta)->_name == kw_.identNew) {
@@ -2589,8 +2655,7 @@ Value *ESTreeIRGen::genNewExpr(ESTree::NewExpressionNode *N) {
     for (auto &arg : N->_arguments) {
       args.push_back(genExpression(&arg));
     }
-    auto *thisArg =
-        Builder.createCreateThisInst(callee, Builder.getEmptySentinel());
+    auto *thisArg = Builder.createCreateThisInst(callee, callee);
     auto *res = Builder.createCallInst(callee, callee, thisArg, args);
     return Builder.createGetConstructedObjectInst(thisArg, res);
   }
@@ -2691,9 +2756,13 @@ Value *ESTreeIRGen::genThisExpression() {
   }
   // Generators may be used as arrows in async arrow functions, in which case
   // they should load from the captured this.
+  // Untyped base class constructors create `this` internally, so they also have
+  // to access `this` as a Variable.
   auto funcDefKind = curFunction()->function->getDefinitionKind();
   if ((funcDefKind == Function::DefinitionKind::ES6Arrow) ||
-      (funcDefKind == Function::DefinitionKind::GeneratorInnerArrow)) {
+      (funcDefKind == Function::DefinitionKind::GeneratorInnerArrow) ||
+      (curFunction()->hasLegacyClassContext() &&
+       funcDefKind == Function::DefinitionKind::ES6BaseConstructor)) {
     assert(
         curFunction()->capturedState.thisVal &&
         "arrow function must have a captured this");

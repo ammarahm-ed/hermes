@@ -15,7 +15,6 @@ namespace hermes::cli {
 vm::RuntimeConfig buildRuntimeConfig(const RuntimeFlags &flags) {
   return vm::RuntimeConfig::Builder()
       .withGCConfig(vm::GCConfig::Builder()
-                        .withMinHeapSize(flags.MinHeapSize.bytes)
                         .withInitHeapSize(flags.InitHeapSize.bytes)
                         .withMaxHeapSize(flags.MaxHeapSize.bytes)
                         .withOccupancyTarget(flags.OccupancyTarget)
@@ -24,6 +23,7 @@ vm::RuntimeConfig buildRuntimeConfig(const RuntimeFlags &flags) {
                                 .withSanitizeRate(flags.GCSanitizeRate)
                                 .withRandomSeed(flags.GCSanitizeRandomSeed)
                                 .build())
+                        .withShouldRecordStats(flags.GCPrintStats)
                         .withShouldReleaseUnused(vm::kReleaseUnusedOld)
                         .withAllocInYoung(flags.GCAllocYoung)
                         .withRevertToYGAtTTI(flags.GCRevertToYGAtTTI)
@@ -34,9 +34,7 @@ vm::RuntimeConfig buildRuntimeConfig(const RuntimeFlags &flags) {
       .withOptimizedEval(flags.OptimizedEval)
       .withAsyncBreakCheckInEval(flags.EmitAsyncBreakCheck)
       .withVMExperimentFlags(flags.VMExperimentFlags)
-      .withES6Promise(flags.ES6Promise)
       .withES6Proxy(flags.ES6Proxy)
-      .withES6Class(flags.EvalES6Class)
       .withIntl(flags.Intl)
       .withMicrotaskQueue(flags.MicrotaskQueue)
       .withEnableSampleProfiling(

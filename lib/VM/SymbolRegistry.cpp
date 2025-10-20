@@ -10,8 +10,8 @@
 #include "hermes/VM/Handle-inline.h"
 #include "hermes/VM/HermesValue.h"
 #include "hermes/VM/JSMapImpl.h"
+#include "hermes/VM/RootAcceptor.h"
 #include "hermes/VM/Runtime.h"
-#include "hermes/VM/SlotAcceptor.h"
 #include "hermes/VM/StringPrimitive.h"
 
 namespace hermes {
@@ -37,7 +37,12 @@ void SymbolRegistry::markRoots(RootAcceptor &acceptor) {
 CallResult<SymbolID> SymbolRegistry::getSymbolForKey(
     Runtime &runtime,
     Handle<StringPrimitive> key) {
-  SmallHermesValue hv = JSMap::get(stringMap_, runtime, key);
+  struct : public Locals {
+    PinnedValue<SymbolID> symbol;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  SmallHermesValue hv = stringMap_->get(runtime, key.getHermesValue());
   if (!hv.isUndefined()) {
     return hv.getSymbol();
   }
@@ -47,16 +52,16 @@ CallResult<SymbolID> SymbolRegistry::getSymbolForKey(
   if (LLVM_UNLIKELY(symbolRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  Handle<SymbolID> symbol = runtime.makeHandle(*symbolRes);
+  lv.symbol = *symbolRes;
 
   if (LLVM_UNLIKELY(
-          JSMap::insert(stringMap_, runtime, key, symbol) ==
+          JSMap::insert(stringMap_, runtime, key, lv.symbol) ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  registeredSymbols_.insert(symbol.get());
-  return symbol.get();
+  registeredSymbols_.insert(lv.symbol.get());
+  return lv.symbol.get();
 }
 
 } // namespace vm

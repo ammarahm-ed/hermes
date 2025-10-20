@@ -54,8 +54,18 @@ LexicalScope::LexicalScope(
 
 SemContext::SemContext(
     Context &astContext,
-    const std::shared_ptr<SemContext> &parent)
-    : kw(astContext), parent_(parent), root_(parent_ ? parent_->root_ : this) {}
+    const std::shared_ptr<SemContext> &parent,
+    LexicalScope *lexScope)
+    : kw(astContext),
+      parent_(parent),
+      parentLexScope_(lexScope),
+      root_(parent_ ? parent_->root_ : this) {
+#ifndef NDEBUG
+  assert(
+      (bool)parent_ == (bool)lexScope &&
+      "parent and lexical scope must both be null or non-null.");
+#endif
+}
 
 SemContext::~SemContext() = default;
 
@@ -105,7 +115,7 @@ LexicalScope *SemContext::newScope(
     LexicalScope *parentScope) {
   scopes_.emplace_back(parentFunction, parentScope);
   LexicalScope *res = &scopes_.back();
-  parentFunction->scopes.push_back(res);
+  parentFunction->addScope(res);
   return res;
 }
 
@@ -115,7 +125,7 @@ LexicalScope *SemContext::prepareClonedScope(
     LexicalScope *newParentScope) {
   scopes_.emplace_back(*this, scope, newParentFunction, newParentScope);
   LexicalScope *res = &scopes_.back();
-  newParentFunction->scopes.push_back(res);
+  newParentFunction->addScope(res);
   return res;
 }
 
@@ -169,13 +179,13 @@ Decl *SemContext::funcArgumentsDecl(
     decl = newDeclInScope(
         argumentsName,
         Decl::Kind::UndeclaredGlobalProperty,
-        argumentsFunc->scopes.front());
+        argumentsFunc->getScopes().front());
   } else {
     // Otherwise, regular function-level "arguments" declaration.
     decl = newDeclInScope(
         argumentsName,
         Decl::Kind::Var,
-        argumentsFunc->scopes.front(),
+        argumentsFunc->getScopes().front(),
         Decl::Special::Arguments);
   }
 
@@ -436,12 +446,13 @@ void SemContextDumper::printFunction(
     llvh::raw_ostream &os,
     const FunctionInfo &f,
     unsigned level) {
-  os << ind(level) << "Func " << (f.strict ? "strict" : "loose") << "\n";
+  os << ind(level) << (f.isStaticBlock ? "StaticBlock " : "Func ")
+     << (f.strict ? "strict" : "loose") << "\n";
   std::map<const LexicalScope *, llvh::SmallVector<const LexicalScope *, 2>>
       children;
 
-  for (const auto *sc : f.scopes) {
-    if (sc == f.scopes[0])
+  for (const auto *sc : f.getScopes()) {
+    if (sc == f.getScopes()[0])
       continue;
     children[sc->parentScope].push_back(sc);
   }
@@ -459,8 +470,9 @@ void SemContextDumper::printFunction(
           dumpScope(childScope, level + 1);
       };
 
-  dumpScope(f.scopes[0], level + 1);
-  assert(processedCount == f.scopes.size() && "not all scopes were visited");
+  dumpScope(f.getScopes()[0], level + 1);
+  assert(
+      processedCount == f.getScopes().size() && "not all scopes were visited");
 }
 
 void SemContextDumper::printScope(
@@ -506,6 +518,11 @@ void SemContextDumper::printDecl(llvh::raw_ostream &os, const Decl *d) {
     CASE(Parameter)
     CASE(GlobalProperty)
     CASE(UndeclaredGlobalProperty)
+    CASE(PrivateField)
+    CASE(PrivateMethod)
+    CASE(PrivateGetter)
+    CASE(PrivateSetter)
+    CASE(PrivateGetterSetter)
   }
   os << s;
 #undef CASE
@@ -518,6 +535,7 @@ void SemContextDumper::printDecl(llvh::raw_ostream &os, const Decl *d) {
     switch (d->special) {
       CASE(Arguments)
       CASE(Eval)
+      CASE(PrivateStatic)
       case Decl::Special::NotSpecial:
         break;
     }

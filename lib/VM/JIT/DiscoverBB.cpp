@@ -47,7 +47,7 @@ void discoverBasicBlocks(
       continue;
     }
 
-    if (decoded.meta.opCode == OpCode::SwitchImm) {
+    if (decoded.meta.opCode == OpCode::UIntSwitchImm) {
       uint32_t min = decoded.operandValue[3].integer;
       uint32_t max = decoded.operandValue[4].integer;
       // Max is inclusive, so add 1 to get the number of entries.
@@ -67,6 +67,32 @@ void discoverBasicBlocks(
       }
 
       int32_t defaultOffset = decoded.operandValue[2].integer;
+      addLabel(ip + defaultOffset);
+
+      ip += decoded.meta.size;
+      // Switch is a branch. Add the next instruction as a label.
+      addLabel(ip);
+      continue;
+    }
+
+    if (decoded.meta.opCode == OpCode::StringSwitchImm) {
+      uint32_t entries = decoded.operandValue[4].integer;
+
+      // Calculate the offset into the bytecode where the jump table for
+      // this SwitchImm starts.
+      const uint8_t *tablestart = (const uint8_t *)llvh::alignAddr(
+          (const uint8_t *)ip + decoded.operandValue[2].integer,
+          sizeof(uint32_t));
+
+      auto *stringSwitchTable =
+          reinterpret_cast<const hbc::StringSwitchTableCase *>(tablestart);
+
+      // Add a label for each offset in the table.
+      for (uint32_t i = 0; i < entries; ++i) {
+        addLabel(ip + stringSwitchTable[i].target);
+      }
+
+      int32_t defaultOffset = decoded.operandValue[3].integer;
       addLabel(ip + defaultOffset);
 
       ip += decoded.meta.size;

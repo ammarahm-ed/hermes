@@ -374,6 +374,12 @@ class BlockStatementDecoration : public ScopeDecorationBase {
   bool mayContainArrowFunctionsUsingArguments = false;
 };
 
+class StaticBlockDecoration : public ScopeDecorationBase {
+ public:
+  /// Function info for this static block.
+  sema::FunctionInfo *functionInfo{};
+};
+
 class ForStatementDecoration : public ScopeDecorationBase {};
 class ForInStatementDecoration : public ScopeDecorationBase {};
 class ForOfStatementDecoration : public ScopeDecorationBase {};
@@ -514,6 +520,10 @@ struct DecoratorTrait {
 template <>
 struct DecoratorTrait<BlockStatementNode> {
   using Type = BlockStatementDecoration;
+};
+template <>
+struct DecoratorTrait<StaticBlockNode> {
+  using Type = StaticBlockDecoration;
 };
 template <>
 struct DecoratorTrait<BreakStatementNode> {
@@ -1245,7 +1255,7 @@ bool isGenerator(FunctionLikeNode *node);
 bool isAsync(FunctionLikeNode *node);
 
 /// \return the super class node of \p node.
-Node *getSuperClass(ClassLikeNode *node);
+Node *&getSuperClass(ClassLikeNode *node);
 
 /// \return the IdentifierNode of \p node. Can be null.
 IdentifierNode *getClassID(ClassLikeNode *node);

@@ -176,6 +176,57 @@ TEST_P(JSITest, ObjectTest) {
   Array names = obj.getPropertyNames(rt);
   EXPECT_EQ(names.size(rt), 1);
   EXPECT_EQ(names.getValueAtIndex(rt, 0).getString(rt).utf8(rt), "a");
+
+  // This Runtime Decorator is used to test the default implementation of
+  // Runtime::has/get/setProperty with Value overload
+  class RD : public RuntimeDecorator<Runtime, Runtime> {
+   public:
+    explicit RD(Runtime& rt) : RuntimeDecorator(rt) {}
+
+    Value getProperty(const Object& object, const Value& name) override {
+      return Runtime::getProperty(object, name);
+    }
+
+    bool hasProperty(const Object& object, const Value& name) override {
+      return Runtime::hasProperty(object, name);
+    }
+
+    void setPropertyValue(
+        const Object& object,
+        const Value& name,
+        const Value& value) override {
+      Runtime::setPropertyValue(object, name, value);
+    }
+  };
+
+  RD rd = RD(rt);
+
+  obj = eval("const obj = {}; obj;").getObject(rd);
+  auto propVal = Value(123);
+  obj.setProperty(rd, propVal, 456);
+  EXPECT_TRUE(obj.hasProperty(rd, propVal));
+  auto getRes = obj.getProperty(rd, propVal);
+  EXPECT_EQ(getRes.getNumber(), 456);
+
+  /// The property is non-writable so it should fail
+  obj = eval(
+            "Object.defineProperty(obj, '456', {"
+            "  value: 10,"
+            "  writable: false,});")
+            .getObject(rd);
+  auto unwritableProp = Value(456);
+  EXPECT_THROW(obj.setProperty(rd, unwritableProp, 1), JSError);
+
+  auto badObjKey = eval(
+      "var badObj = {"
+      "    toString: function() {"
+      "        throw new Error('something went wrong');"
+      "    }"
+      "};"
+      "badObj;");
+  EXPECT_THROW(obj.setProperty(rd, badObjKey, 123), JSError);
+  EXPECT_THROW(obj.hasProperty(rd, badObjKey), JSError);
+  EXPECT_THROW(obj.getProperty(rd, badObjKey), JSError);
 }
 
 TEST_P(JSITest, HostObjectTest) {
@@ -1173,7 +1224,7 @@ TEST_P(JSITest, DecoratorTest) {
 
   class CountRuntime final : public WithRuntimeDecorator<Count> {
    public:
-    explicit CountRuntime(std::unique_ptr<Runtime> rt)
+    explicit CountRuntime(std::shared_ptr<Runtime> rt)
         : WithRuntimeDecorator<Count>(*rt, count_),
           rt_(std::move(rt)),
           count_(kInit) {}
@@ -1183,7 +1234,7 @@ TEST_P(JSITest, DecoratorTest) {
     }
 
    private:
-    std::unique_ptr<Runtime> rt_;
+    std::shared_ptr<Runtime> rt_;
     Count count_;
   };
 
@@ -1222,7 +1273,7 @@ TEST_P(JSITest, MultiDecoratorTest) {
   class MultiRuntime final
       : public WithRuntimeDecorator<std::tuple<Inc, Nest>> {
    public:
-    explicit MultiRuntime(std::unique_ptr<Runtime> rt)
+    explicit MultiRuntime(std::shared_ptr<Runtime> rt)
         : WithRuntimeDecorator<std::tuple<Inc, Nest>>(*rt, tuple_),
           rt_(std::move(rt)) {}
 
@@ -1234,7 +1285,7 @@ TEST_P(JSITest, MultiDecoratorTest) {
     }
 
    private:
-    std::unique_ptr<Runtime> rt_;
+    std::shared_ptr<Runtime> rt_;
     std::tuple<Inc, Nest> tuple_;
   };
 
@@ -1771,6 +1822,174 @@ TEST_P(JSITest, ObjectCreateWithPrototype) {
   // Tests null value as prototype
   child = Object::create(rd, Value::null());
   EXPECT_TRUE(child.getPrototype(rd).isNull());
+}
+
+TEST_P(JSITest, SetRuntimeData) {
+  class RD : public RuntimeDecorator<Runtime, Runtime> {
+   public:
+    explicit RD(Runtime& rt) : RuntimeDecorator(rt) {}
+
+    void setRuntimeDataImpl(
+        const UUID& uuid,
+        const void* data,
+        void (*deleter)(const void* data)) override {
+      Runtime::setRuntimeDataImpl(uuid, data, deleter);
+    }
+
+    const void* getRuntimeDataImpl(const UUID& uuid) override {
+      return Runtime::getRuntimeDataImpl(uuid);
+    }
+  };
+
+  RD rd1 = RD(rt);
+  UUID uuid1{0xe67ab3d6, 0x09a0, 0x11f0, 0xa641, 0x325096b39f47};
+  auto str = std::make_shared<std::string>("hello world");
+  rd1.setRuntimeData(uuid1, str);
+
+  UUID uuid2{0xa12f99fc, 0x09a2, 0x11f0, 0x84de, 0x325096b39f47};
+  auto obj1 = std::make_shared<Object>(rd1);
+  rd1.setRuntimeData(uuid2, obj1);
+
+  auto storedStr =
+      std::static_pointer_cast<std::string>(rd1.getRuntimeData(uuid1));
+  auto storedObj = std::static_pointer_cast<Object>(rd1.getRuntimeData(uuid2));
+  EXPECT_EQ(storedStr, str);
+  EXPECT_EQ(storedObj, obj1);
+
+  // Override the existing value at uuid1
+  auto weakOldStr = std::weak_ptr<std::string>(str);
+  str = std::make_shared<std::string>("goodbye world");
+  rd1.setRuntimeData(uuid1, str);
+  storedStr = std::static_pointer_cast<std::string>(rd1.getRuntimeData(uuid1));
+  EXPECT_EQ(str, storedStr);
+  // Verify that the old data was not held on after it was overwritten.
+  EXPECT_EQ(weakOldStr.use_count(), 0);
+
+  auto rt2 = factory();
+  RD* rd2 = new RD(*rt2);
+  UUID uuid3{0x16f55892, 0x1034, 0x11f0, 0x8f65, 0x325096b39f47};
+  auto obj2 = std::make_shared<Object>(*rd2);
+  rd2->setRuntimeData(uuid3, obj2);
+
+  auto storedObj2 =
+      std::static_pointer_cast<Object>(rd2->getRuntimeData(uuid3));
+  EXPECT_EQ(storedObj2, obj2);
+
+  // UUID1 is for some data in runtime rd1, not rd2
+  EXPECT_FALSE(rd2->getRuntimeData(uuid1));
+
+  // Verify that when runtime is deleted, its runtime data map gets removed from
+  // the global map. So nothing should be holding on to the stored data.
+  auto weakObj2 = std::weak_ptr<Object>(obj2);
+  obj2.reset();
+  storedObj2.reset();
+  delete rd2;
+  rt2.reset();
+  EXPECT_EQ(weakObj2.use_count(), 0);
+
+  // Only the second runtime was destroyed, so custom data from the first
+  // runtime should remain unaffected.
+  storedStr = std::static_pointer_cast<std::string>(rd1.getRuntimeData(uuid1));
+  EXPECT_EQ(storedStr, str);
+
+  // Overwrite Object.defineProperty, which is called in the default
+  // implementation of setRuntimeDataImpl, to test that even if the JSI
+  // operations on this secret property fail, we are still able to properly
+  // clean up the custom data.
+  auto rt3 = factory();
+  RD* rd3 = new RD(*rt3);
+  UUID uuid4{0xa5682986, 0x1edc, 0x11f0, 0xa4fa, 0x325096b39f47};
+  rd3->global()
+      .getPropertyAsObject(*rd3, "Object")
+      .setProperty(*rd3, "defineProperty", Value(false));
+
+  auto obj3 = std::make_shared<Object>(*rd3);
+  auto weakObj3 = std::weak_ptr<Object>(obj3);
+  EXPECT_THROW(rd3->setRuntimeData(uuid4, obj3), JSIException);
+  obj3.reset();
+  delete rd3;
+  rt3.reset();
+  EXPECT_EQ(weakObj3.use_count(), 0);
+}
+
+TEST_P(JSITest, CastInterface) {
+  // This Runtime Decorator is used to test the default implementation of
+  // jsi::Runtime::castInterface
+  class RD : public RuntimeDecorator<Runtime, Runtime> {
+   public:
+    explicit RD(Runtime& rt) : RuntimeDecorator(rt) {}
+
+    ICast* castInterface(const UUID& interfaceUuid) override {
+      return Runtime::castInterface(interfaceUuid);
+    }
+  };
+
+  RD rd = RD(rt);
+  auto randomUuid = UUID{0xf2cd96cf, 0x455e, 0x42d9, 0x850a, 0x13e2cde59b8b};
+  auto ptr = rd.castInterface(randomUuid);
+
+  // Use == instead of EXPECT_EQ to avoid ambiguous operator usage due to the
+  // type of 'ptr'.
+  EXPECT_TRUE(ptr == nullptr);
+}
+
+TEST_P(JSITest, DeleteProperty) {
+  // This Runtime Decorator is used to test the default implementation of
+  // Runtime::deleteProperty
+  class RD : public RuntimeDecorator<Runtime, Runtime> {
+   public:
+    explicit RD(Runtime& rt) : RuntimeDecorator(rt) {}
+
+    void deleteProperty(const Object& object, const PropNameID& name) override {
+      Runtime::deleteProperty(object, name);
+    }
+    void deleteProperty(const Object& object, const String& name) override {
+      Runtime::deleteProperty(object, name);
+    }
+    void deleteProperty(const Object& object, const Value& name) override {
+      Runtime::deleteProperty(object, name);
+    }
+  };
+  RD rd = RD(rt);
+  auto obj = eval("obj = {1:2, foo: 'bar', 3: 4, salt:'pepper'}").getObject(rd);
+
+  auto prop = PropNameID::forAscii(rd, "1");
+  auto hasRes = obj.hasProperty(rd, prop);
+  EXPECT_TRUE(hasRes);
+  obj.deleteProperty(rd, prop);
+  hasRes = obj.hasProperty(rd, prop);
+  EXPECT_FALSE(hasRes);
+
+  auto str = String::createFromAscii(rd, "foo");
+  hasRes = obj.hasProperty(rd, str);
+  EXPECT_TRUE(hasRes);
+  obj.deleteProperty(rd, str);
+  hasRes = obj.hasProperty(rd, str);
+  EXPECT_FALSE(hasRes);
+
+  auto valProp = Value(3);
+  hasRes = obj.hasProperty(rd, "3");
+  EXPECT_TRUE(hasRes);
+  obj.deleteProperty(rd, valProp);
+  auto getRes = obj.getProperty(rd, "3");
+  EXPECT_TRUE(getRes.isUndefined());
+
+  hasRes = obj.hasProperty(rd, "salt");
+  EXPECT_TRUE(hasRes);
+  obj.deleteProperty(rd, "salt");
+  hasRes = obj.hasProperty(rd, "salt");
+  EXPECT_FALSE(hasRes);
+
+  obj = eval(
+            "const obj = {};"
+            "Object.defineProperty(obj, 'prop', {"
+            "  value: 10,"
+            "  configurable: false,});"
+            "obj;")
+            .getObject(rd);
+  EXPECT_THROW(obj.deleteProperty(rd, "prop"), JSError);
+  hasRes = obj.hasProperty(rd, "prop");
+  EXPECT_TRUE(hasRes);
 }
 
 INSTANTIATE_TEST_CASE_P(

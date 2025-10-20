@@ -25,15 +25,8 @@
 namespace hermes {
 namespace vm {
 
-Handle<NativeConstructor> createNumberConstructor(Runtime &runtime) {
+HermesValue createNumberConstructor(Runtime &runtime) {
   Handle<JSNumber> numberPrototype{runtime.numberPrototype};
-
-  auto cons = defineSystemConstructor(
-      runtime,
-      Predefined::getSymbolID(Predefined::Number),
-      numberConstructor,
-      numberPrototype,
-      1);
 
   defineMethod(
       runtime,
@@ -84,11 +77,24 @@ Handle<NativeConstructor> createNumberConstructor(Runtime &runtime) {
   constantDPF.writable = 0;
   constantDPF.configurable = 0;
 
-  MutableHandle<> numberValueHandle{runtime};
+  struct : public Locals {
+    PinnedValue<> numberValueHandle;
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  defineSystemConstructor(
+      runtime,
+      Predefined::getSymbolID(Predefined::Number),
+      numberConstructor,
+      numberPrototype,
+      1,
+      lv.cons);
+
   auto setNumberValueProperty = [&](SymbolID name, double value) {
-    numberValueHandle = HermesValue::encodeTrustedNumberValue(value);
+    lv.numberValueHandle = HermesValue::encodeTrustedNumberValue(value);
     auto result = JSObject::defineOwnProperty(
-        cons, runtime, name, constantDPF, numberValueHandle);
+        lv.cons, runtime, name, constantDPF, lv.numberValueHandle);
     assert(
         result != ExecutionStatus::EXCEPTION &&
         "defineOwnProperty() failed on a new object");
@@ -124,47 +130,47 @@ Handle<NativeConstructor> createNumberConstructor(Runtime &runtime) {
 
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::isFinite),
       nullptr,
       numberIsFinite,
       1);
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::isInteger),
       nullptr,
       numberIsInteger,
       1);
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::isNaN),
       nullptr,
       numberIsNaN,
       1);
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::isSafeInteger),
       nullptr,
       numberIsSafeInteger,
       1);
   defineProperty(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::parseInt),
       runtime.parseIntFunction);
   defineProperty(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::parseFloat),
       runtime.parseFloatFunction);
-  return cons;
+  return lv.cons.getHermesValue();
 }
 
-CallResult<HermesValue>
-numberConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   double value = +0.0;
 
   if (args.getArgCount() > 0) {
@@ -209,8 +215,8 @@ numberConstructor(void *, Runtime &runtime, NativeArgs args) {
   return JSNumber::create(runtime, value, lv.selfParent).getHermesValue();
 }
 
-CallResult<HermesValue>
-numberIsFinite(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberIsFinite(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (!args.getArg(0).isNumber()) {
     // If Type(number) is not Number, return false.
     return HermesValue::encodeBoolValue(false);
@@ -221,8 +227,8 @@ numberIsFinite(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeBoolValue(std::isfinite(number));
 }
 
-CallResult<HermesValue>
-numberIsInteger(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberIsInteger(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (!args.getArg(0).isNumber()) {
     // If Type(number) is not Number, return false.
     return HermesValue::encodeBoolValue(false);
@@ -243,7 +249,8 @@ numberIsInteger(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeBoolValue(integer == number);
 }
 
-CallResult<HermesValue> numberIsNaN(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberIsNaN(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (!args.getArg(0).isNumber()) {
     // If Type(number) is not Number, return false.
     return HermesValue::encodeBoolValue(false);
@@ -254,8 +261,8 @@ CallResult<HermesValue> numberIsNaN(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeBoolValue(std::isnan(number));
 }
 
-CallResult<HermesValue>
-numberIsSafeInteger(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberIsSafeInteger(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (!args.getArg(0).isNumber()) {
     // If Type(number) is not Number, return false.
     return HermesValue::encodeBoolValue(false);
@@ -283,8 +290,8 @@ numberIsSafeInteger(void *, Runtime &runtime, NativeArgs args) {
       std::abs(integer) <= ((double)((uint64_t)1 << 53)) - 1);
 }
 
-CallResult<HermesValue>
-numberPrototypeValueOf(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeValueOf(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (args.getThisArg().isNumber()) {
     return args.getThisArg();
   }
@@ -296,8 +303,8 @@ numberPrototypeValueOf(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeTrustedNumberValue(numPtr->getPrimitiveNumber());
 }
 
-CallResult<HermesValue>
-numberPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeToString(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   const size_t MIN_RADIX = 2;
   const size_t MAX_RADIX = 36;
 
@@ -340,21 +347,25 @@ numberPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
   }
 
   // Radix 10 and non-finite values simply call toString.
-  auto resultRes = toString_RJS(
-      runtime,
-      runtime.makeHandle(HermesValue::encodeTrustedNumberValue(number)));
+  struct : public Locals {
+    PinnedValue<> numberHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.numberHandle = HermesValue::encodeTrustedNumberValue(number);
+  auto resultRes = toString_RJS(runtime, lv.numberHandle);
   if (LLVM_UNLIKELY(resultRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   return resultRes->getHermesValue();
 }
 
-CallResult<HermesValue>
-numberPrototypeToLocaleString(void *ctx, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeToLocaleString(
+    void *ctx,
+    Runtime &runtime) {
 #ifdef HERMES_ENABLE_INTL
-  return intlNumberPrototypeToLocaleString(/* unused */ ctx, runtime, args);
+  return intlNumberPrototypeToLocaleString(/* unused */ ctx, runtime);
 #else
-
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   double number;
 
   // Extract the number from this.
@@ -371,9 +382,12 @@ numberPrototypeToLocaleString(void *ctx, Runtime &runtime, NativeArgs args) {
 
   // Call toString, as JSC does.
   // TODO: Format string according to locale.
-  auto res = toString_RJS(
-      runtime,
-      runtime.makeHandle(HermesValue::encodeTrustedNumberValue(number)));
+  struct : public Locals {
+    PinnedValue<> numberHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.numberHandle = HermesValue::encodeTrustedNumberValue(number);
+  auto res = toString_RJS(runtime, lv.numberHandle);
   if (res == ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -382,8 +396,8 @@ numberPrototypeToLocaleString(void *ctx, Runtime &runtime, NativeArgs args) {
 #endif
 }
 
-CallResult<HermesValue>
-numberPrototypeToFixed(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeToFixed(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto intRes = toIntegerOrInfinity(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(intRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
@@ -421,8 +435,12 @@ numberPrototypeToFixed(void *, Runtime &runtime, NativeArgs args) {
   // Account for very large numbers.
   if (std::abs(x) >= 1e21) {
     // toString(x) if abs(x) >= 10^21.
-    auto resultRes = toString_RJS(
-        runtime, runtime.makeHandle(HermesValue::encodeTrustedNumberValue(x)));
+    struct : public Locals {
+      PinnedValue<> xHandle;
+    } lv;
+    LocalsRAII lraii(runtime, &lv);
+    lv.xHandle = HermesValue::encodeTrustedNumberValue(x);
+    auto resultRes = toString_RJS(runtime, lv.xHandle);
     if (LLVM_UNLIKELY(resultRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
@@ -503,8 +521,8 @@ numberPrototypeToFixed(void *, Runtime &runtime, NativeArgs args) {
   return StringPrimitive::create(runtime, m);
 }
 
-CallResult<HermesValue>
-numberPrototypeToExponential(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeToExponential(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // The number to make a string toExponential.
   double x;
   if (args.getThisArg().isNumber()) {
@@ -631,8 +649,8 @@ numberPrototypeToExponential(void *, Runtime &runtime, NativeArgs args) {
   return runtime.ignoreAllocationFailure(StringPrimitive::create(runtime, n));
 }
 
-CallResult<HermesValue>
-numberPrototypeToPrecision(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> numberPrototypeToPrecision(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // The number to make a string toPrecision.
   double x;
   if (args.getThisArg().isNumber()) {
@@ -647,8 +665,12 @@ numberPrototypeToPrecision(void *, Runtime &runtime, NativeArgs args) {
   }
 
   if (args.getArg(0).isUndefined()) {
-    auto xHandle = runtime.makeHandle(HermesValue::encodeTrustedNumberValue(x));
-    auto resultRes = toString_RJS(runtime, xHandle);
+    struct : public Locals {
+      PinnedValue<> xHandle;
+    } lv;
+    LocalsRAII lraii(runtime, &lv);
+    lv.xHandle = HermesValue::encodeTrustedNumberValue(x);
+    auto resultRes = toString_RJS(runtime, lv.xHandle);
     if (LLVM_UNLIKELY(resultRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }

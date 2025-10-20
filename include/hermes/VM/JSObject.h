@@ -275,6 +275,22 @@ struct ObjectVTable : public VTable {
 class JSObject : public GCCell {
   friend void JSObjectBuildMeta(const GCCell *cell, Metadata::Builder &mb);
 
+ protected:
+  /// Flags affecting the entire object.
+  SHObjectFlags flags_{};
+
+  /// The prototype of this object.
+  GCPointer<JSObject> parent_;
+
+  /// The dynamically derived "class" of the object, describing its fields in
+  /// order.
+  /// Modification of this field *MUST* be done via setClass within JSObject
+  /// methods, it should not be accessed directly within JSObject itself.
+  GCPointer<HiddenClass> clazzDoNotAccessDirectly_{};
+
+  /// Storage for property values.
+  GCPointer<PropStorage> propStorage_{};
+
  public:
   /// A light-weight constructor which performs no GC allocations. Its purpose
   /// to make sure all fields are initialized according to C++ without writing
@@ -286,7 +302,11 @@ class JSObject : public GCCell {
       HiddenClass *clazz,
       NeedsBarriers needsBarriers)
       : parent_(runtime, parent, runtime.getHeap(), needsBarriers),
-        clazz_(runtime, clazz, runtime.getHeap(), needsBarriers),
+        clazzDoNotAccessDirectly_(
+            runtime,
+            clazz,
+            runtime.getHeap(),
+            needsBarriers),
         propStorage_(nullptr) {
     // Direct property slots are initialized by initDirectPropStorage.
   }
@@ -298,7 +318,11 @@ class JSObject : public GCCell {
       Handle<HiddenClass> clazz,
       NeedsBarriers needsBarriers)
       : parent_(runtime, *parent, runtime.getHeap(), needsBarriers),
-        clazz_(runtime, *clazz, runtime.getHeap(), needsBarriers),
+        clazzDoNotAccessDirectly_(
+            runtime,
+            *clazz,
+            runtime.getHeap(),
+            needsBarriers),
         propStorage_(nullptr) {
     // Direct property slots are initialized by initDirectPropStorage.
   }
@@ -341,6 +365,13 @@ class JSObject : public GCCell {
         cell->getKind(), CellKind::ObjectKind_first, CellKind::ObjectKind_last);
   }
 
+  /// \return the maximum number of properties for which an object can be
+  /// allocated entirely at once in the GC young gen.
+  /// This is useful because we know that all property slots can be written to
+  /// without a write barrier until another allocation happens after the
+  /// JSObject.
+  static constexpr inline uint32_t maxYoungGenAllocationPropCount();
+
   /// Attempts to allocate a JSObject with the given prototype.
   /// If allocation fails, the GC declares an OOM.
   static PseudoHandle<JSObject> create(
@@ -349,7 +380,9 @@ class JSObject : public GCCell {
 
   /// Attempts to allocate a JSObject with the standard Object prototype.
   /// If allocation fails, the GC declares an OOM.
-  static PseudoHandle<JSObject> create(Runtime &runtime);
+  static PseudoHandle<JSObject> create(Runtime &runtime) {
+    return create(runtime, Handle<JSObject>::vmcast(&runtime.objectPrototype));
+  }
 
   /// Attempts to allocate a JSObject with the standard Object prototype and
   /// property storage preallocated. If allocation fails, the GC declares an
@@ -358,14 +391,6 @@ class JSObject : public GCCell {
   static PseudoHandle<JSObject> create(
       Runtime &runtime,
       unsigned propertyCount);
-
-  /// Allocates a JSObject with the given hidden class and property storage
-  /// preallocated. If allocation fails, the GC declares an
-  /// OOM.
-  /// \param clazz the hidden class for the new object.
-  static PseudoHandle<JSObject> create(
-      Runtime &runtime,
-      Handle<HiddenClass> clazz);
 
   /// Allocates a JSObject with the given hidden class and prototype.
   /// If allocation fails, the GC declares an OOM.
@@ -409,6 +434,13 @@ class JSObject : public GCCell {
     return flags_.proxyObject;
   }
 
+  /// Record that this object is being used in a form of caching optimisation
+  /// such that any change to its hidden class or parent must update the epoch
+  /// in the runtime.
+  void setCachedUsingEpoch() {
+    flags_.isCachedUsingEpoch = true;
+  }
+
   /// Returns whether the object has any of properties set in \p flags.
   /// \p flags should have only the flags set, not the objectID.
   bool hasFlagIn(SHObjectFlags flags) const {
@@ -424,7 +456,7 @@ class JSObject : public GCCell {
 
   /// \return the `__proto__` internal property, which may be nullptr.
   JSObject *getParent(PointerBase &runtime) const {
-    return parent_.get(runtime);
+    return getParentGCPtr().get(runtime);
   }
 
   /// \return the `__proto__` internal property, which may be nullptr.
@@ -436,25 +468,42 @@ class JSObject : public GCCell {
 
   /// \return the hidden class of this object.
   HiddenClass *getClass(PointerBase &base) const {
-    return clazz_.getNonNull(base);
+    return clazzDoNotAccessDirectly_.getNonNull(base);
   }
 
   /// \return the hidden class of this object.
   const GCPointer<HiddenClass> &getClassGCPtr() const {
-    return clazz_;
+    return clazzDoNotAccessDirectly_;
   }
 
-  /// Set the hidden class of this object to \p clazz. This does not allocate
+  /// Update the hidden class of this object to \p clazz. This does not allocate
   /// indirect property storage, and must only be used when the current and new
   /// hidden classes do not have more properties than the direct storage. Note
   /// that if used incorrectly, this can create completely invalid objects.
-  void setClassNoAllocPropStorageUnsafe(Runtime &runtime, HiddenClass *clazz) {
+  void updateClassNoAllocPropStorageUnsafe(
+      Runtime &runtime,
+      HiddenClass *clazz) {
     // Check that there is no prop storage already allocated, and the new class
     // does not require it.
     assert(!propStorage_);
     assert(clazz->getNumProperties() <= DIRECT_PROPERTY_SLOTS);
-    clazz_.set(runtime, clazz, runtime.getHeap());
+    updateClass(runtime, clazz);
   }
+
+  /// Set the HiddenClass of \p self to \p clazz and write \p value to index \p
+  /// slot.
+  /// Used by PutById caching path.
+  /// May reallocate the property storage if it needs to expand.
+  /// \param clazz the HiddenClass to transition to, non-null.
+  /// \return true if the HiddenClass was able to be transitioned and the new
+  /// property was added, false if reallocation is required, in which case the
+  /// caller must call the potentially allocating transitionHiddenClassSlowPath.
+  static void addNewOwnPropertyInSlot(
+      JSObject *self,
+      Runtime &runtime,
+      HiddenClass *clazz,
+      SlotIndex slot,
+      SmallHermesValue value);
 
   /// \return the object ID. Assign one if not yet exist. This ID can be used
   /// in Set or Map where hashing is required. We don't assign object an ID
@@ -493,23 +542,13 @@ class JSObject : public GCCell {
       JSObject *parent,
       PropOpFlags opFlags = PropOpFlags());
 
-  /// Sets the internal prototype property on a typed object.
-  /// Used only for typed code, bypasses checks for Proxy, isExtensible, and
-  /// cycle checking.
-  static void
-  unsafeSetParentInternal(JSObject *self, Runtime &runtime, JSObject *parent) {
-    self->parent_.set(runtime, parent, runtime.getHeap());
-  }
-
   /// Return the value of an internal property slot. Use getDirectSlotValue if
   /// \p index is known to be in a direct property slot at compile time.
   static SmallHermesValue
   getInternalProperty(JSObject *self, PointerBase &base, SlotIndex index) {
     assert(
         HiddenClass::debugIsPropertyDefined(
-            self->clazz_.get(base),
-            base,
-            InternalProperty::getSymbolID(index)) &&
+            self->getClass(base), base, InternalProperty::getSymbolID(index)) &&
         "internal slot must be reserved");
     return getNamedSlotValueUnsafe(self, base, index);
   }
@@ -521,7 +560,7 @@ class JSObject : public GCCell {
       SmallHermesValue value) {
     assert(
         HiddenClass::debugIsPropertyDefined(
-            self->clazz_.get(runtime),
+            self->getClass(runtime),
             runtime,
             InternalProperty::getSymbolID(index)) &&
         "internal slot must be reserved");
@@ -617,11 +656,13 @@ class JSObject : public GCCell {
       PointerBase &runtime,
       NamedPropertyDescriptor desc) {
     assert(
+        desc.flags.privateName ||
         !self->flags_.proxyObject && !desc.flags.proxyObject &&
-        "getNamedSlotValueUnsafe called on a Proxy");
+            "getNamedSlotValueUnsafe called on a Proxy");
     assert(
+        desc.flags.privateName ||
         !desc.flags.hostObject &&
-        "getNamedSlotValueUnsafe called on a HostObject");
+            "getNamedSlotValueUnsafe called on a HostObject");
     return getNamedSlotValueUnsafe(self, runtime, desc.slot);
   }
 
@@ -702,7 +743,6 @@ class JSObject : public GCCell {
   static CallResult<PseudoHandle<>> getComputedSlotValue(
       PseudoHandle<JSObject> self,
       Runtime &runtime,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor desc);
 
   /// Load a value using a computed descriptor. Read the value either from
@@ -723,7 +763,6 @@ class JSObject : public GCCell {
   LLVM_NODISCARD static CallResult<bool> setComputedSlotValue(
       Handle<JSObject> selfHandle,
       Runtime &runtime,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor desc,
       Handle<> value);
 
@@ -765,7 +804,6 @@ class JSObject : public GCCell {
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       Handle<JSObject> propObj,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor desc,
       Handle<> nameValHandle);
 
@@ -815,7 +853,6 @@ class JSObject : public GCCell {
       Runtime &runtime,
       Handle<> nameValHandle,
       IgnoreProxy ignoreProxy,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor &desc);
 
   /// Provides the functionality of ES9 [[GetOwnProperty]] on selfHandle.  It
@@ -829,7 +866,6 @@ class JSObject : public GCCell {
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       Handle<> nameValHandle,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor &desc);
 
   /// Like the other overload, except valueOrAccessor will be set to a value or
@@ -838,9 +874,8 @@ class JSObject : public GCCell {
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       Handle<> nameValHandle,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
       ComputedPropertyDescriptor &desc,
-      MutableHandle<> &valueOrAccessor);
+      MutableHandle<> valueOrAccessor);
 
   /// ES5.1 8.12.2.
   /// Extract a descriptor \p desc of a predefined property \p name
@@ -868,20 +903,7 @@ class JSObject : public GCCell {
   /// IMPORTANT: This is unsafe because the caller must ensure \p name will NOT
   /// be freed within the lifetime of \p desc - typically by ensuring \p name
   /// is stored in the string table of the bytecode.
-  /// \param expectedFlags if valid, we are searching for a property which, if
-  ///   not found, we would create with these specific flags. This can speed
-  ///   up the search in the negative case - when the property doesn't exist.
   /// \return the object instance containing the property, or nullptr.
-  static JSObject *getNamedDescriptorUnsafe(
-      Handle<JSObject> selfHandle,
-      Runtime &runtime,
-      SymbolID name,
-      PropertyFlags expectedFlags,
-      NamedPropertyDescriptor &desc);
-
-  /// ES5.1 8.12.2.
-  /// Wrapper around \c getNamedDescriptorUnsafe() passing \c false to \c
-  /// forPutNamed.
   static JSObject *getNamedDescriptorUnsafe(
       Handle<JSObject> selfHandle,
       Runtime &runtime,
@@ -892,10 +914,6 @@ class JSObject : public GCCell {
   /// Extract a descriptor \p desc of a named property \p name in this object
   /// or along the prototype chain.
   /// \param nameValHandle the name of the property. It must be a primitive.
-  /// \param tmpSymbolStorage a temporary handle sometimes used internally
-  ///    to store SymbolIDs in order to make sure they aren't collected.
-  ///    Must not be modified or read by the caller for the lifetime of \p desc,
-  ///    the function makes no guarantees regarding whether it is used.
   /// \param[out] propObj it is set to the object in the prototype chain
   ///   containing the property, or \c null if we didn't find the property.
   /// \param[out] desc if the property was found, set to the property
@@ -904,9 +922,8 @@ class JSObject : public GCCell {
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       Handle<> nameValHandle,
-      MutableHandle<JSObject> &propObj,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
-      ComputedPropertyDescriptor &desc);
+      MutableHandle<JSObject> propObj,
+      ComputedPropertyDescWithSymStorage &desc);
 
   /// A wrapper to getComputedPrimitiveDescriptor() in the case when
   /// \p nameValHandle may be an object, in which case we need to call
@@ -915,10 +932,6 @@ class JSObject : public GCCell {
   /// The values of the output parameters are not defined if the call terminates
   /// with an exception.
   /// \param nameValHandle the name of the property.
-  /// \param tmpSymbolStorage a temporary handle sometimes used internally
-  ///    to store SymbolIDs in order to make sure they aren't collected.
-  ///    Must not be modified or read by the caller for the lifetime of \p desc,
-  ///    the function makes no guarantees regarding whether it is used.
   /// \param[out] propObj if the method terminates without an exception, it is
   ///    set to the object in the prototype chain containing the property, or
   ///    \c null if we didn't find the property.
@@ -928,9 +941,8 @@ class JSObject : public GCCell {
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       Handle<> nameValHandle,
-      MutableHandle<JSObject> &propObj,
-      MutableHandle<SymbolID> &tmpSymbolStorage,
-      ComputedPropertyDescriptor &desc);
+      MutableHandle<JSObject> propObj,
+      ComputedPropertyDescWithSymStorage &desc);
 
   /// The following three methods implement ES5.1 8.12.3.
   /// getNamed is an optimized path for getting a property with a SymbolID when
@@ -1009,7 +1021,10 @@ class JSObject : public GCCell {
       Runtime &runtime,
       SymbolID name,
       Handle<> valueHandle,
-      PropOpFlags opFlags = PropOpFlags());
+      PropOpFlags opFlags = PropOpFlags(),
+      RuntimeModule *runtimeModule = nullptr,
+      SHUnit *unit = nullptr,
+      WritePropertyCacheEntry *cacheEntry = nullptr);
 
   /// like putNamed, but with a receiver
   static CallResult<bool> putNamedWithReceiver_RJS(
@@ -1018,7 +1033,10 @@ class JSObject : public GCCell {
       SymbolID name,
       Handle<> valueHandle,
       Handle<> receiver,
-      PropOpFlags opFlags = PropOpFlags());
+      PropOpFlags opFlags = PropOpFlags(),
+      RuntimeModule *runtimeModule = nullptr,
+      SHUnit *unit = nullptr,
+      WritePropertyCacheEntry *cacheEntry = nullptr);
 
   /// putNamedOrIndexed sets a property with a SymbolID which may be index-like.
   static CallResult<bool> putNamedOrIndexed(
@@ -1189,6 +1207,21 @@ class JSObject : public GCCell {
       Handle<> valueOrAccessor,
       PropOpFlags opFlags = PropOpFlags());
 
+  /// ES2024 7.3.30 PrivateGet
+  static CallResult<HermesValue> getPrivateField(
+      Handle<JSObject> selfHandle,
+      Runtime &runtime,
+      Handle<SymbolID> privateName,
+      PrivateNameCacheEntry *cacheEntry);
+
+  /// ES2024 7.3.31 PrivateSet
+  static ExecutionStatus setPrivateField(
+      Handle<JSObject> selfHandle,
+      Runtime &runtime,
+      Handle<SymbolID> privateName,
+      Handle<> valueHandle,
+      PrivateNameCacheEntry *cacheEntry);
+
   /// ES5.1 15.2.3.8.
   /// Make all own properties non-configurable.
   /// Set [[Extensible]] to false.
@@ -1347,6 +1380,9 @@ class JSObject : public GCCell {
       Runtime &runtime,
       ObjectVTable::CheckAllOwnIndexedMode mode);
 
+  /// Implements jitCall for non-callable objects, which just throws.
+  static HermesValue _jitCallImpl(Runtime *runtime, JSObject *self);
+
   /// Allocate an instance of property storage with the specified size.
   static inline ExecutionStatus allocatePropStorage(
       Handle<JSObject> selfHandle,
@@ -1371,27 +1407,30 @@ class JSObject : public GCCell {
     return static_cast<const ObjectVTable *>(GCCell::getVT());
   }
 
+  /// Update the hidden class of this object to \p clazz.
+  /// This does not allocate indirect property storage, it is an internal API.
+  /// \param clazz the new class, must not be null.
+  void updateClass(Runtime &runtime, HiddenClass *clazz) {
+    assert(clazz && "clazz cannot be null");
+    clazzDoNotAccessDirectly_.setNonNull(runtime, clazz, runtime.getHeap());
+
+    // Changing the HiddenClass may result in adding a setter/readonly property
+    // in the parent chain that would prevent adding the property to the cached
+    // HiddenClass.
+    // We must break the cache, so increment the epoch.
+    if (LLVM_UNLIKELY(flags_.isCachedUsingEpoch))
+      runtime.incParentCacheEpoch();
+  }
+
   /// Allocate storage for a new slot after the slot index itself has been
   /// allocated by the hidden class.
   /// Note that slot storage is never truly released once allocated. Released
   /// storage slots are put into a free list.
-  static void allocateNewSlotStorage(
+  static ExecutionStatus allocateNewSlotStorage(
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       SlotIndex newSlotIndex,
       Handle<> valueHandle);
-
-  /// Look for a property and return a \c PropertyPos identifying it and store
-  /// its descriptor in \p desc.
-  /// \param expectedFlags if valid, we are searching for a property which, if
-  ///   not found, we would create with these specific flags. This can speed
-  ///   up the search in the negative case - when the property doesn't exist.
-  static OptValue<HiddenClass::PropertyPos> findProperty(
-      Handle<JSObject> selfHandle,
-      Runtime &runtime,
-      SymbolID name,
-      PropertyFlags expectedFlags,
-      NamedPropertyDescriptor &desc);
 
   /// Look for a property and return a \c PropertyPos identifying it and store
   /// its descriptor in \p desc.
@@ -1408,14 +1447,46 @@ class JSObject : public GCCell {
       SymbolID name,
       DefinePropertyFlags dpFlags,
       Handle<> valueOrAccessor,
-      PropOpFlags opFlags);
+      PropOpFlags opFlags,
+      RuntimeModule *runtimeModule = nullptr,
+      SHUnit *unit = nullptr,
+      WritePropertyCacheEntry *cacheEntry = nullptr);
   /// Performs the actual adding of the property for \c addOwnProperty()
   static ExecutionStatus addOwnPropertyImpl(
       Handle<JSObject> selfHandle,
       Runtime &runtime,
       SymbolID name,
       PropertyFlags propertyFlags,
-      Handle<> valueOrAccessor);
+      Handle<> valueOrAccessor,
+      RuntimeModule *runtimeModule,
+      SHUnit *unit,
+      WritePropertyCacheEntry *cacheEntry);
+
+  /// Try to cache property addition.
+  /// May fail if unable to allocate an AddPropertyCacheEntry, e.g.
+  /// On success, sets isCachedUsingEpoch flag for the parent of \p self
+  /// and all parents transitively.
+  /// \param self the object the property is added to
+  /// \param runtimeModule the runtimeModule in which to allocate an
+  ///   AddPropertyCacheEntry.
+  /// \param unit the SHUnit in which to allocate AddPropertyCacheEntry.
+  /// \param writeCacheEntry the existing cache entry (non-null)
+  /// \param startClazz the HiddenClass prior to adding the property
+  /// \param slot the slot index at which the property will be added
+  /// \param resultClazz the HiddenClass after adding the property (must not be
+  ///   in dictionary mode)
+  /// \pre At most one of runtimeModule and unit is non-null.
+  /// \pre If writeCacheEntry is non-null, at least one of runtimeModule and
+  ///   unit is non-null.
+  static void tryCacheAddProperty(
+      JSObject *self,
+      Runtime &runtime,
+      RuntimeModule *runtimeModule,
+      SHUnit *unit,
+      WritePropertyCacheEntry *writeCacheEntry,
+      HiddenClass *startClazz,
+      SlotIndex slot,
+      HiddenClass *resultClazz);
 
   /// ES5.1 8.12.9.
   static CallResult<bool> updateOwnProperty(
@@ -1484,19 +1555,6 @@ class JSObject : public GCCell {
       PropOpFlags opFlags);
 
  protected:
-  /// Flags affecting the entire object.
-  SHObjectFlags flags_{};
-
-  /// The prototype of this object.
-  GCPointer<JSObject> parent_;
-
-  /// The dynamically derived "class" of the object, describing its fields in
-  /// order.
-  GCPointer<HiddenClass> clazz_{};
-
-  /// Storage for property values.
-  GCPointer<PropStorage> propStorage_{};
-
   /// Storage for direct property slots.
   inline GCSmallHermesValue *directProps();
   inline const GCSmallHermesValue *directProps() const;
@@ -1568,21 +1626,23 @@ constexpr size_t JSObject::cellSizeJSObject() {
           directPropsOffset() +
               sizeof(GCSmallHermesValue) * DIRECT_PROPERTY_SLOTS,
       "unexpected padding");
-
-#if !defined(__i386__) && !defined(_M_IX86)
-static_assert(
-  heapAlignSize(sizeof(JSObjectAndDirectProps)) ==
-      sizeof(JSObjectAndDirectProps),
-  "Wasted direct slot due to alignment");
-#endif
- 
+  // Check that any padding added due to alignment is less than an additional
+  // direct property slot. This ensures that we've maximized the direct property
+  // slots for the current object size.
+  static_assert(
+      heapAlignSize(sizeof(JSObjectAndDirectProps)) -
+              sizeof(JSObjectAndDirectProps) <
+          sizeof(GCSmallHermesValue),
+      "Wasted direct slot due to alignment");
   return sizeof(JSObjectAndDirectProps);
 }
 
 void JSObject::staticAsserts() {
   static_assert(sizeof(JSObject) == sizeof(SHJSObject));
   static_assert(offsetof(JSObject, flags_) == offsetof(SHJSObject, flags));
-  static_assert(offsetof(JSObject, clazz_) == offsetof(SHJSObject, clazz));
+  static_assert(
+      offsetof(JSObject, clazzDoNotAccessDirectly_) ==
+      offsetof(SHJSObject, clazz));
   static_assert(
       offsetof(JSObject, propStorage_) == offsetof(SHJSObject, propStorage));
   llvm_unreachable("staticAsserts must never be called.");
@@ -1597,7 +1657,7 @@ void JSObject::staticAsserts() {
 /// * a Number which corresponds to an array index
 /// \param[out] beginIndex beginning of the range of indices storing names
 /// \param[out] endIndex end (exclusive) of the range of indices storing names
-CallResult<Handle<BigStorage>> getForInPropertyNames(
+CallResult<Handle<ArrayStorageSmall>> getForInPropertyNames(
     Runtime &runtime,
     Handle<JSObject> obj,
     uint32_t &beginIndex,
@@ -1668,7 +1728,7 @@ bool JSObject::forEachOwnPropertyWhile(
   }
 
   return HiddenClass::forEachPropertyWhile(
-      runtime.makeHandle(selfHandle->clazz_), runtime, namedCB);
+      runtime.makeHandle(selfHandle->getClassGCPtr()), runtime, namedCB);
 }
 
 inline ExecutionStatus JSObject::allocatePropStorage(
@@ -1716,11 +1776,48 @@ inline T *JSObject::initDirectPropStorage(Runtime &runtime, T *self) {
   static_assert(
       count <= DIRECT_PROPERTY_SLOTS,
       "smallPropStorage size must fit in direct properties");
-  GCSmallHermesValue::uninitialized_fill(
-      self->directProps() + numOverlapSlots<T>(),
-      self->directProps() + DIRECT_PROPERTY_SLOTS,
-      SmallHermesValue::encodeUndefinedValue(),
-      runtime.getHeap());
+
+  // Initialize the direct property slots to undefined. We have observed that
+  // using a loop here can result in inefficient code on some platforms
+  // (including calls to memset) so we manually unroll it with a switch.
+  switch (numOverlapSlots<T>()) {
+    case 0:
+      new (&self->directProps()[0]) GCSmallHermesValue(
+          SmallHermesValue::encodeRawZeroValueUnsafe(),
+          runtime.getHeap(),
+          nullptr);
+      [[fallthrough]];
+    case 1:
+      new (&self->directProps()[1]) GCSmallHermesValue(
+          SmallHermesValue::encodeRawZeroValueUnsafe(),
+          runtime.getHeap(),
+          nullptr);
+      [[fallthrough]];
+    case 2:
+      new (&self->directProps()[2]) GCSmallHermesValue(
+          SmallHermesValue::encodeRawZeroValueUnsafe(),
+          runtime.getHeap(),
+          nullptr);
+      [[fallthrough]];
+    case 3:
+      new (&self->directProps()[3]) GCSmallHermesValue(
+          SmallHermesValue::encodeRawZeroValueUnsafe(),
+          runtime.getHeap(),
+          nullptr);
+      [[fallthrough]];
+    case 4:
+      new (&self->directProps()[4]) GCSmallHermesValue(
+          SmallHermesValue::encodeRawZeroValueUnsafe(),
+          runtime.getHeap(),
+          nullptr);
+      [[fallthrough]];
+    case 5:
+      static_assert(
+          DIRECT_PROPERTY_SLOTS == 5,
+          "Must update this switch if we add or remove direct properties");
+      break;
+  }
+
   return self;
 }
 
@@ -1752,7 +1849,6 @@ inline SmallHermesValue JSObject::getNamedSlotValueDirectUnsafe(
     JSObject *self,
     PointerBase &runtime,
     SlotIndex index) {
-  assert(!self->flags_.proxyObject && "getNamedSlotValue called on a Proxy");
   assert(index < DIRECT_PROPERTY_SLOTS);
   return self->directProps()[index];
 }
@@ -1762,7 +1858,6 @@ inline SmallHermesValue JSObject::getNamedSlotValueIndirectUnsafe(
     JSObject *self,
     PointerBase &runtime,
     SlotIndex index) {
-  assert(!self->flags_.proxyObject && "getNamedSlotValue called on a Proxy");
   return self->propStorage_.getNonNull(runtime)->at(index);
 }
 
@@ -1851,7 +1946,6 @@ inline void JSObject::setNamedSlotValueIndirectUnsafe(
 inline CallResult<PseudoHandle<>> JSObject::getComputedSlotValue(
     PseudoHandle<JSObject> self,
     Runtime &runtime,
-    MutableHandle<SymbolID> &tmpSymbolStorage,
     ComputedPropertyDescriptor desc) {
   if (LLVM_LIKELY(desc.flags.indexed)) {
     assert(
@@ -1894,7 +1988,6 @@ inline HermesValue JSObject::getComputedSlotValueUnsafe(
 inline CallResult<bool> JSObject::setComputedSlotValue(
     Handle<JSObject> selfHandle,
     Runtime &runtime,
-    MutableHandle<SymbolID> &tmpSymbolStorage,
     ComputedPropertyDescriptor desc,
     Handle<> value) {
   if (LLVM_LIKELY(desc.flags.indexed)) {
@@ -1950,7 +2043,7 @@ inline OptValue<bool> JSObject::tryGetOwnNamedDescriptorFast(
     SymbolID name,
     NamedPropertyDescriptor &desc) {
   return HiddenClass::tryFindPropertyFast(
-      self->clazz_.getNonNull(runtime), runtime, name, desc);
+      self->getClass(runtime), runtime, name, desc);
 }
 
 inline OptValue<SmallHermesValue>
@@ -1979,11 +2072,7 @@ inline JSObject *JSObject::getNamedDescriptorPredefined(
     Predefined::Str name,
     NamedPropertyDescriptor &desc) {
   return getNamedDescriptorUnsafe(
-      selfHandle,
-      runtime,
-      Predefined::getSymbolID(name),
-      PropertyFlags::invalid(),
-      desc);
+      selfHandle, runtime, Predefined::getSymbolID(name), desc);
 }
 
 inline JSObject *JSObject::getNamedDescriptorPredefined(
@@ -1992,20 +2081,7 @@ inline JSObject *JSObject::getNamedDescriptorPredefined(
     Predefined::Sym name,
     NamedPropertyDescriptor &desc) {
   return getNamedDescriptorUnsafe(
-      selfHandle,
-      runtime,
-      Predefined::getSymbolID(name),
-      PropertyFlags::invalid(),
-      desc);
-}
-
-inline JSObject *JSObject::getNamedDescriptorUnsafe(
-    Handle<JSObject> selfHandle,
-    Runtime &runtime,
-    SymbolID name,
-    NamedPropertyDescriptor &desc) {
-  return getNamedDescriptorUnsafe(
-      selfHandle, runtime, name, PropertyFlags::invalid(), desc);
+      selfHandle, runtime, Predefined::getSymbolID(name), desc);
 }
 
 inline CallResult<PseudoHandle<>> JSObject::getNamed_RJS(
@@ -2031,9 +2107,20 @@ inline CallResult<bool> JSObject::putNamed_RJS(
     Runtime &runtime,
     SymbolID name,
     Handle<> valueHandle,
-    PropOpFlags opFlags) {
+    PropOpFlags opFlags,
+    RuntimeModule *runtimeModule,
+    SHUnit *unit,
+    WritePropertyCacheEntry *cacheEntry) {
   return putNamedWithReceiver_RJS(
-      selfHandle, runtime, name, valueHandle, selfHandle, opFlags);
+      selfHandle,
+      runtime,
+      name,
+      valueHandle,
+      selfHandle,
+      opFlags,
+      runtimeModule,
+      unit,
+      cacheEntry);
 }
 
 inline CallResult<bool> JSObject::putComputed_RJS(
@@ -2069,31 +2156,57 @@ inline OptValue<HiddenClass::PropertyPos> JSObject::findProperty(
     Runtime &runtime,
     SymbolID name,
     NamedPropertyDescriptor &desc) {
-  return findProperty(
-      selfHandle, runtime, name, PropertyFlags::invalid(), desc);
-}
-
-inline OptValue<HiddenClass::PropertyPos> JSObject::findProperty(
-    Handle<JSObject> selfHandle,
-    Runtime &runtime,
-    SymbolID name,
-    PropertyFlags expectedFlags,
-    NamedPropertyDescriptor &desc) {
   auto ret = HiddenClass::findProperty(
-      createPseudoHandle(selfHandle->clazz_.getNonNull(runtime)),
-      runtime,
-      name,
-      expectedFlags,
-      desc);
+      createPseudoHandle(selfHandle->getClass(runtime)), runtime, name, desc);
   assert(
-      !(selfHandle->flags_.proxyObject && ret) &&
-      "Proxy objects should never have own properties");
+      (desc.flags.privateName || !(selfHandle->flags_.proxyObject && ret)) &&
+      "Proxy objects should never have own non-private properties");
   return ret;
 }
 
 inline bool JSObject::shouldCacheForIn(Runtime &runtime) const {
-  return !clazz_.getNonNull(runtime)->isDictionary() &&
-      !flags_.indexedStorage && !flags_.hostObject && !flags_.proxyObject;
+  return !getClass(runtime)->isDictionary() && !flags_.indexedStorage &&
+      !flags_.hostObject && !flags_.proxyObject;
+}
+
+/// Attempt to get the value of an indexed property from an object cheaply,
+/// if the object is a JSArray, typed array, or a JSObject with indexed storage.
+/// Allocation may occur (e.g. for a BigInt64Array), but usually doesn't.
+///
+/// IndexType must be an unsigned integer type. It is templated to allow the
+/// check for 0xFFFF'FFFFu to be skipped if the value is known to be smaller
+/// (e.g. uint8_t).
+template <typename IndexType>
+inline OptValue<HermesValue>
+tryFastGetComputedMayAlloc(Runtime &runtime, JSObject *obj, IndexType index);
+
+/// Attempt to get the value of an indexed property from an object cheaply,
+/// if the object is a JSArray, typed array, or a JSObject with indexed storage.
+/// Allocation may NOT occur, so some typed arrays or general indexed objects
+/// are not supported.
+///
+/// IndexType must be an unsigned integer type. It is templated to allow the
+/// check for 0xFFFF'FFFFu to be skipped if the value is known to be smaller
+/// (e.g. uint8_t).
+template <typename IndexType>
+inline OptValue<HermesValue>
+tryFastGetComputedNoAlloc(Runtime &runtime, JSObject *obj, IndexType index);
+
+/// A version of JSObject::getComputedWithReceiver_RJS(), specialized for
+/// uint32_t index. It attempts the fast paths before falling back to
+/// JSObject::getComputedWithReceiver_RJS().
+CallResult<PseudoHandle<>> getIndexedWithReceiver_RJS(
+    Runtime &runtime,
+    Handle<JSObject> srcHandle,
+    uint64_t index,
+    Handle<> receiver);
+
+/// A version of JSObject::getComputed_RJS(), specialized for
+/// uint32_t index. It attempts the fast paths before falling back to
+/// JSObject::getComputed_RJS().
+inline CallResult<PseudoHandle<>>
+getIndexed_RJS(Runtime &runtime, Handle<JSObject> srcHandle, uint64_t index) {
+  return getIndexedWithReceiver_RJS(runtime, srcHandle, index, srcHandle);
 }
 
 } // namespace vm

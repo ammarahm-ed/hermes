@@ -8,10 +8,14 @@
 #ifndef HERMES_VM_JIT_ARM64_JIT_H
 #define HERMES_VM_JIT_ARM64_JIT_H
 
+#include "hermes/ADT/TransparentOwningPtr.h"
 #include "hermes/VM/CodeBlock.h"
+#include "hermes/VM/JIT/PerfJitDump.h"
 
 namespace hermes {
 namespace vm {
+struct RuntimeOffsets;
+
 namespace arm64 {
 
 namespace DumpJitCode {
@@ -24,11 +28,28 @@ enum : unsigned {
 };
 }
 
+/// List of counters that can be incremented from JIT emitted code.
+#define JIT_COUNTERS(X) \
+  X(NumCall)            \
+  X(NumCallSlow)
+
+/// Enum with an entry for each JIT counter. This is used to index into the list
+/// of counters.
+enum class JitCounter : unsigned {
+#define COUNTER_NAME(name) name,
+  JIT_COUNTERS(COUNTER_NAME)
+#undef COUNTER_NAME
+      _Last,
+};
+
 /// All state related to JIT compilation.
 class JITContext {
   class Compiler;
+  friend RuntimeOffsets;
 
  public:
+  class Impl;
+
   /// Construct a JIT context. No executable memory is allocated before it is
   /// needed.
   /// \param enable whether JIT is enabled.
@@ -38,9 +59,15 @@ class JITContext {
   JITContext(const JITContext &) = delete;
   void operator=(const JITContext &) = delete;
 
-  /// Compile a function to native code and return the native pointer. If the
-  /// function was previously compiled, return the existing body. If it cannot
-  /// be compiled, return nullptr.
+  /// \return whether \p codeBlock should be JIT compiled.
+  /// \pre codeBlock does not already have a JITCompiledFunctionPtr.
+  /// Does not allocate.
+  inline bool shouldCompile(CodeBlock *codeBlock);
+
+  /// Compile a function to native code and return the native pointer.
+  /// \pre codeBlock does not already have a JITCompiledFunctionPtr.
+  /// \pre shouldCompile() must be true.
+  /// \return the native pointer, nullptr if compilation failed.
   inline JITCompiledFunctionPtr compile(Runtime &runtime, CodeBlock *codeBlock);
 
   /// \return true if JIT compilation is enabled.
@@ -71,6 +98,22 @@ class JITContext {
     return dumpJITCode_;
   }
 
+  /// Construct data structure used for perf profiling support. This should be
+  /// called only when PerfProf is enabled and perf JITContext.
+  /// \param jitdumpFd The file descriptor of the opened jitdump file.
+  /// \param commentFd The file descriptor of the opended \p commentFile.
+  /// \param commentFile The path of the file to store the comments.
+  void initPerfProfData(
+      int jitdumpFd,
+      int commentFd,
+      const std::string &commentFile) {
+    assert(
+        !perfJitDump_ &&
+        "perfJitDump_ should be constructed once per JITContext");
+    perfJitDump_ =
+        std::make_unique<PerfJitDump>(jitdumpFd, commentFd, commentFile);
+  }
+
   /// Set the flag to fatally crash on JIT compilation errors.
   void setCrashOnError(bool crash) {
     crashOnError_ = crash;
@@ -96,10 +139,30 @@ class JITContext {
     emitAsserts_ = emitAsserts;
   }
 
+  /// Set whether we should emit counters in the JIT'ed code.
+  void setEmitCounters(bool emitCounters) {
+    assert(
+        (emitCounters || !counters_.get()) && "Can't disable enabled counters");
+    if (emitCounters && !counters_.get()) {
+      counters_.reset((uint64_t *)checkedCalloc(
+          (unsigned)JitCounter::_Last, sizeof(uint64_t)));
+    }
+  }
+
+  /// Dump the counters to the given stream. Counters must be enabled.
+  void dumpCounters(llvh::raw_ostream &os);
+
   /// \return true if we should emit asserts in the JIT'ed code.
   bool getEmitAsserts() {
     return emitAsserts_;
   }
+
+  /// Called by the GC at the beginning of a collection. This method informs the
+  /// GC of all runtime roots.  The \p markLongLived argument
+  /// indicates whether root data structures that contain only
+  /// references to long-lived objects (allocated directly as long lived)
+  /// are required to be scanned.
+  void markRoots(RootAcceptorWithNames &acceptor, bool markLongLived);
 
  private:
   /// Slow path that actually performs the compilation of the specified
@@ -107,7 +170,7 @@ class JITContext {
   JITCompiledFunctionPtr compileImpl(Runtime &runtime, CodeBlock *codeBlock);
 
  private:
-  class Impl;
+  /// Only initialized if JIT is enabled.
   std::unique_ptr<Impl> impl_{};
 
   /// Whether JIT compilation is enabled.
@@ -125,22 +188,25 @@ class JITContext {
   /// If true, ignores the default exec threshold completely.
   bool forceJIT_{false};
 
+  /// Generate jitdump for all jitted functions.
+  std::unique_ptr<PerfJitDump> perfJitDump_{};
+
   /// The JIT threshold for function execution count.
   /// Lowered based on the loop depth before deciding whether to JIT.
   uint32_t defaultExecThreshold_ = 1 << 5;
+
+  /// Array of counters for use by the emitted code.
+  TransparentOwningPtr<uint64_t, llvh::FreeDeleter> counters_;
 };
 
 LLVM_ATTRIBUTE_ALWAYS_INLINE
-inline JITCompiledFunctionPtr JITContext::compile(
-    Runtime &runtime,
-    CodeBlock *codeBlock) {
-  auto ptr = codeBlock->getJITCompiled();
-  if (LLVM_LIKELY(ptr))
-    return ptr;
+inline bool JITContext::shouldCompile(CodeBlock *codeBlock) {
+  assert(!codeBlock->getJITCompiled() && "already compiled");
+
   if (LLVM_LIKELY(!enabled_))
-    return nullptr;
+    return false;
   if (LLVM_LIKELY(codeBlock->getDontJIT()))
-    return nullptr;
+    return false;
 
   uint32_t loopDepth = codeBlock->getFunctionHeader().getLoopDepth();
   // It's possible that if the loop depth is too high, we will set the
@@ -151,8 +217,17 @@ inline JITCompiledFunctionPtr JITContext::compile(
       forceJIT_ ? 0 : (defaultExecThreshold_ >> (loopDepth * 2));
 
   if (LLVM_LIKELY(codeBlock->getExecutionCount() < execThreshold))
-    return nullptr;
+    return false;
 
+  return true;
+}
+
+LLVM_ATTRIBUTE_ALWAYS_INLINE
+inline JITCompiledFunctionPtr JITContext::compile(
+    Runtime &runtime,
+    CodeBlock *codeBlock) {
+  assert(!codeBlock->getJITCompiled() && "already compiled");
+  assert(shouldCompile(codeBlock) && "should not be compiled");
   return compileImpl(runtime, codeBlock);
 }
 

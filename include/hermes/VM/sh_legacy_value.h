@@ -119,8 +119,8 @@ extern "C" {
 /// Version of the HermesValue encoding format.
 /// Changing the format of HermesValue requires bumping this version number
 /// and fixing any code that relies on the layout of HermesValue.
-/// Updated: Aug 27, 2024
-#define HERMESVALUE_VERSION 1
+/// Updated: Feb 21, 2025
+#define HERMESVALUE_VERSION 2
 
 struct HermesValueBase {
   union {
@@ -136,7 +136,9 @@ typedef int32_t HVTagType;
 
 /// Tags are defined as 16-bit values positioned at the high bits of a 64-bit
 /// word.
-/// If tag < FirstTag, the encoded value is a double.
+/// We define them in the enum as negative numbers, with the last tag being -1.
+/// They range from -7 to -1 (signed).
+/// If in an unsigned comparison: tag < FirstTag, the encoded value is a double.
 enum HVTag {
   HVTag_First = (HVTagType)(int8_t)0xf9,
   HVTag_EmptyInvalid = HVTag_First,
@@ -173,6 +175,12 @@ enum HVETag {
   HVETag_Object2 = HVTag_Object * 2 + 1,
 
   HVETag_FirstPointer = HVETag_Str1,
+
+  /// This represents the last tag that corresponds either to a number, or a
+  /// value that can be encoded entirely in its most significant 29 bits, with
+  /// the rest being 0. This is used by HermesValue32 to determine whether the
+  /// value should be considered for storage in "compressed HV64" form.
+  HVETag_LastNumberOrCompressible = HVETag_Bool,
 };
 
 /// Number of bits used in the high part to encode the sign, exponent and tag.
@@ -188,6 +196,9 @@ static const uint64_t kHV_DataMask = (1ull << kHV_NumDataBits) - 1;
 
 static const unsigned kHV_ETagWidth = 4;
 static const unsigned kHV_ETagMask = (1 << kHV_ETagWidth) - 1;
+
+/// The value of a bool is encoded in the most significant bit after the ETag.
+static const unsigned kHV_BoolBitIdx = kHV_NumDataBits - 2;
 
 static inline SHLegacyValue _sh_ljs_encode_raw_tag(
     uint64_t val,
@@ -231,11 +242,12 @@ static inline SHLegacyValue _sh_ljs_native_uint32(uint32_t val) {
 }
 
 static inline SHLegacyValue _sh_ljs_bool(bool b) {
-  return _sh_ljs_encode_raw_etag(b, HVETag_Bool);
+  // Bool occupies the most significant bit after the ETag.
+  return _sh_ljs_encode_raw_etag((uint64_t)b << kHV_BoolBitIdx, HVETag_Bool);
 }
 
 static inline SHLegacyValue _sh_ljs_object(void *p) {
-  return _sh_ljs_encode_raw_tag((uint64_t)p, HVTag_Object);
+  return _sh_ljs_encode_raw_tag((uint64_t)(uintptr_t)p, HVTag_Object);
 }
 
 static inline SHLegacyValue _sh_ljs_undefined() {
@@ -280,15 +292,15 @@ static inline bool _sh_ljs_is_string(SHLegacyValue v) {
 }
 
 static inline bool _sh_ljs_get_bool(SHLegacyValue v) {
-  // Clear the ETag and return the raw values that are left.
-  return (bool)(v.raw & 1);
+  // Bool occupies the most significant bit after the ETag.
+  return (bool)(v.raw & (1ull << kHV_BoolBitIdx));
 }
 static inline double _sh_ljs_get_double(SHLegacyValue v) {
   return v.f64;
 }
 static inline void *_sh_ljs_get_pointer(SHLegacyValue v) {
   // Mask out the tag.
-  return (void *)(v.raw & kHV_DataMask);
+  return (void *)(uintptr_t)(v.raw & kHV_DataMask);
 }
 static inline void *_sh_ljs_get_native_pointer(SHLegacyValue v) {
   return (void *)(uintptr_t)v.raw;
@@ -401,13 +413,26 @@ typedef union {
     /// This flag indicates this is a proxy exotic Object
     uint32_t proxyObject : 1;
 
+    /// This flag is set when any other objects which contain this object in
+    /// their parent chain are cached in the AddPropertyCache, or if this object
+    /// was found in the prototype chain of an array.
+    ///
+    /// If the flag is set, then changing the parent or HiddenClass of this
+    /// object will increment the parentCacheEpoch in Runtime.
+    /// Note that property adds are not cached if any object in the parent chain
+    /// is in dictionary mode.
+    uint32_t isCachedUsingEpoch : 1;
+
     /// A non-zero object id value, assigned lazily. It is 0 before it is
     /// assigned. If an object started out as lazy, the objectID is the lazy
     /// object index used to identify when it gets initialized.
-    uint32_t objectID : 24;
+    uint32_t objectID : 23;
   };
   uint32_t bits;
 } SHObjectFlags;
+
+/// Used for debugging.
+void _sh_ljs_dump_to_stderr(SHLegacyValue v);
 
 #ifdef __cplusplus
 }

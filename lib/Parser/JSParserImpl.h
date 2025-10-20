@@ -190,6 +190,8 @@ class JSParserImpl {
       128
 #elif defined(_MSC_VER) && defined(HERMES_SLOW_DEBUG)
       128
+#elif defined(_MSC_VER) && defined(__clang__) && !defined(NDEBUG)
+      128
 #elif defined(_MSC_VER)
       512
 #else
@@ -274,6 +276,7 @@ class JSParserImpl {
   UniqueString *packageIdent_;
   UniqueString *privateIdent_;
   UniqueString *protectedIdent_;
+  UniqueString *prototypeIdent_;
   UniqueString *publicIdent_;
   UniqueString *staticIdent_;
   UniqueString *methodIdent_;
@@ -296,7 +299,6 @@ class JSParserImpl {
   UniqueString *keyofIdent_;
   UniqueString *declareIdent_;
   UniqueString *protoIdent_;
-  UniqueString *prototypeIdent_;
   UniqueString *opaqueIdent_;
   UniqueString *plusIdent_;
   UniqueString *minusIdent_;
@@ -339,9 +341,6 @@ class JSParserImpl {
 
 #if HERMES_PARSE_TS
   UniqueString *readonlyIdent_;
-  UniqueString *neverIdent_;
-  UniqueString *undefinedIdent_;
-  UniqueString *unknownIdent_;
 #endif
 
 #if HERMES_PARSE_FLOW || HERMES_PARSE_TS
@@ -349,6 +348,9 @@ class JSParserImpl {
   UniqueString *isIdent_;
   UniqueString *inferIdent_;
   UniqueString *constIdent_;
+  UniqueString *neverIdent_;
+  UniqueString *undefinedIdent_;
+  UniqueString *unknownIdent_;
 #endif
 
   /// String representation of all tokens.
@@ -520,6 +522,18 @@ class JSParserImpl {
     return tok_->getKind() == TokenKind::identifier &&
         tok_->getIdentifier() == ident;
   }
+  /// \return true if the current token is the specified identifier
+  /// without any escapes. It checks this by comparing the length of the token
+  /// with the length of the \p ident.
+  bool checkUnescaped(UniqueString *ident) const {
+    if (tok_->getKind() != TokenKind::identifier ||
+        tok_->getIdentifier() != ident)
+      return false;
+    SMRange tokRange = tok_->getSourceRange();
+    assert(tokRange.isValid() && "tokRange not initialized");
+    size_t tokLen = tokRange.End.getPointer() - tokRange.Start.getPointer();
+    return tokLen == ident->str().size();
+  }
   /// Check whether the current token is one of the specified ones. \returns
   /// true if it is.
   bool check(TokenKind kind1, TokenKind kind2) const {
@@ -548,7 +562,7 @@ class JSParserImpl {
       return true;
     }
 
-    if (check(letIdent_)) {
+    if (checkUnescaped(letIdent_)) {
       if (isStrictMode()) {
         return true;
       }
@@ -1281,6 +1295,7 @@ class JSParserImpl {
   Optional<ESTree::Node *> parseMatchExpressionFlow(
       SMLoc start,
       ESTree::Node *argument);
+  Optional<ESTree::Node *> parseMatchCaseGuardFlow();
   Optional<ESTree::Node *> parseMatchPatternFlow();
   Optional<ESTree::Node *> parseMatchSubpatternFlow();
   Optional<ESTree::IdentifierNode *> parseMatchBindingIdentifierFlow();
@@ -1400,7 +1415,14 @@ class JSParserImpl {
 
   Optional<ESTree::Node *> parseTypeParamsFlow();
   Optional<ESTree::Node *> parseTypeParamFlow();
-  Optional<ESTree::Node *> parseTypeArgsFlow();
+
+  /// \param trailingGrammarContext the grammar context to use to advance past
+  /// the final '>' in type arguments. Used to disambiguate between
+  /// JSX-initiated type arguments and Flow-based type arguments, because JSX
+  /// must allow for JSX identifiers immediately after the closing '>'.
+  Optional<ESTree::Node *> parseTypeArgsFlow(
+      JSLexer::GrammarContext trailingGrammarContext =
+          JSLexer::GrammarContext::Type);
 
   /// \param[out] params the parameters, populated by reference.
   /// \param[out] thisConstraint the type annotation for 'this'.

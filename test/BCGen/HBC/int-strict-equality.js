@@ -143,6 +143,10 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:  BigInt count: 0
 // CHKBC-NEXT:  String Kind Entry count: 2
 // CHKBC-NEXT:  RegExp count: 0
+// CHKBC-NEXT:  StringSwitchImm count: 0
+// CHKBC-NEXT:  Key buffer size (bytes): 0
+// CHKBC-NEXT:  Value buffer size (bytes): 0
+// CHKBC-NEXT:  Shape table count: 0
 // CHKBC-NEXT:  Segment ID: 0
 // CHKBC-NEXT:  CommonJS module count: 0
 // CHKBC-NEXT:  CommonJS module count (static): 0
@@ -159,7 +163,7 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:i4[ASCII, 42..58] #7CF5E44C: test_could_be_int
 
 // CHKBC:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x0000
 // CHKBC-NEXT:    DeclareGlobalVar  "test_int_int"
 // CHKBC-NEXT:    DeclareGlobalVar  "test_int_uint"
 // CHKBC-NEXT:    DeclareGlobalVar  "test_uint_uint"
@@ -167,13 +171,13 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:    GetGlobalObject   r2
 // CHKBC-NEXT:    LoadConstUndefined r0
 // CHKBC-NEXT:    CreateClosure     r1, r0, Function<test_int_int>
-// CHKBC-NEXT:    PutByIdLoose      r2, r1, 1, "test_int_int"
+// CHKBC-NEXT:    PutByIdLoose      r2, r1, 0, "test_int_int"
 // CHKBC-NEXT:    CreateClosure     r1, r0, Function<test_int_uint>
-// CHKBC-NEXT:    PutByIdLoose      r2, r1, 2, "test_int_uint"
+// CHKBC-NEXT:    PutByIdLoose      r2, r1, 1, "test_int_uint"
 // CHKBC-NEXT:    CreateClosure     r1, r0, Function<test_uint_uint>
-// CHKBC-NEXT:    PutByIdLoose      r2, r1, 3, "test_uint_uint"
+// CHKBC-NEXT:    PutByIdLoose      r2, r1, 2, "test_uint_uint"
 // CHKBC-NEXT:    CreateClosure     r1, r0, Function<test_could_be_int>
-// CHKBC-NEXT:    PutByIdLoose      r2, r1, 4, "test_could_be_int"
+// CHKBC-NEXT:    PutByIdLoose      r2, r1, 3, "test_could_be_int"
 // CHKBC-NEXT:    Ret               r0
 
 // CHKBC:Function<test_int_int>(3 params, 4 registers, 2 numbers, 1 non-pointers):
@@ -188,7 +192,7 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:    Ret               r1
 
 // CHKBC:Function<test_int_uint>(3 params, 4 registers, 2 numbers, 1 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x001c, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x001d
 // CHKBC-NEXT:    LoadParam         r3, 1
 // CHKBC-NEXT:    ToInt32           r1, r3
 // CHKBC-NEXT:    LoadConstZero     r0
@@ -201,7 +205,7 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:    Ret               r1
 
 // CHKBC:Function<test_uint_uint>(3 params, 4 registers, 2 numbers, 1 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x0023, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x0025
 // CHKBC-NEXT:    LoadConstZero     r0
 // CHKBC-NEXT:    LoadParam         r3, 1
 // CHKBC-NEXT:    URshift           r1, r3, r0
@@ -214,7 +218,7 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:    Ret               r1
 
 // CHKBC:Function<test_could_be_int>(2 params, 14 registers, 2 numbers, 2 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x002d, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x0030
 // CHKBC-NEXT:    LoadParam         r4, 1
 // CHKBC-NEXT:    LoadConstUndefined r3
 // CHKBC-NEXT:    Call1             r5, r4, r3
@@ -248,13 +252,13 @@ function test_could_be_int(func) {
 // CHKBC-NEXT:    bc 40: line 12 col 1
 // CHKBC-NEXT:    bc 51: line 12 col 1
 // CHKBC-NEXT:    bc 62: line 12 col 1
-// CHKBC-NEXT:  0x001c  function idx 2, starts at line 23 col 1
+// CHKBC-NEXT:  0x001d  function idx 2, starts at line 23 col 1
 // CHKBC-NEXT:    bc 11: line 25 col 7
-// CHKBC-NEXT:  0x0023  function idx 3, starts at line 34 col 1
+// CHKBC-NEXT:  0x0025  function idx 3, starts at line 34 col 1
 // CHKBC-NEXT:    bc 5: line 35 col 7
 // CHKBC-NEXT:    bc 12: line 36 col 7
-// CHKBC-NEXT:  0x002d  function idx 4, starts at line 45 col 1
+// CHKBC-NEXT:  0x0030  function idx 4, starts at line 45 col 1
 // CHKBC-NEXT:    bc 5: line 46 col 15
 // CHKBC-NEXT:    bc 12: line 46 col 11
 // CHKBC-NEXT:    bc 16: line 47 col 15
-// CHKBC-NEXT:  0x003c  end of debug source table
+// CHKBC-NEXT:  0x0040  end of debug source table

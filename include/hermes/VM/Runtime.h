@@ -24,7 +24,6 @@
 #include "hermes/VM/Debugger/Debugger.h"
 #include "hermes/VM/GC.h"
 #include "hermes/VM/GCBase-inline.h"
-#include "hermes/VM/GCStorage.h"
 #include "hermes/VM/Handle-inline.h"
 #include "hermes/VM/HandleRootOwner-inline.h"
 #include "hermes/VM/IdentifierTable.h"
@@ -299,7 +298,7 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
         runtimeModuleFlags,
         sourceURL,
         environment,
-        global_);
+        Handle<>(toPHV(&global_)));
   }
 
   ExecutionStatus loadSegment(
@@ -336,8 +335,24 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
       typename T,
       HasFinalizer hasFinalizer = HasFinalizer::No,
       LongLived longLived = LongLived::No,
+      CanBeLarge canBeLarge = CanBeLarge::No,
+      MayFail mayFail = MayFail::No,
       class... Args>
   T *makeAVariable(uint32_t size, Args &&...args);
+
+  /// Allocate two young gen objects of the size \p size1 + \p size2.
+  /// Calls the constructors of types T1 and T2 with the arguments \p t1Args and
+  /// \p t2Args respectively.
+  /// \pre the TOTAL size must be able to fit in the young gen
+  ///  (can be checked with GC::canAllocateInYoungGen(size)).
+  /// \post both result pointers are in the young gen.
+  /// \return a pointer to size1 size T1, and a pointer to size2 size T2.
+  template <typename T1, typename T2, typename... T1Args, typename... T2Args>
+  inline std::pair<T1 *, T2 *> make2YoungGenUnsafe(
+      uint32_t size1,
+      std::tuple<T1Args...> t1Args,
+      uint32_t size2,
+      std::tuple<T2Args...> t2Args);
 
   /// Used as a placeholder for places where we should be checking for OOM
   /// but aren't yet.
@@ -402,7 +417,7 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   FormatSymbolID formatSymbolID(SymbolID id);
 
   GC &getHeap() {
-    return *heapStorage_.get();
+    return heap_;
   }
 
   /// @}
@@ -437,15 +452,16 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// exception" (https://html.spec.whatwg.org/C#microtask-queuing).
   ExecutionStatus drainJobs();
 
-  // ES2021 9.12 "When the abstract operation AddToKeptObjects is called with a
-  // target object reference, it adds the target to a list that will point
-  // strongly at the target until ClearKeptObjects is called."
-  ExecutionStatus addToKeptObjects(Handle<JSObject> obj);
+  /// ES2025 9.11 "When the abstract operation AddToKeptObjects is called with a
+  /// target object or symbol, it adds the target to a list that will point
+  /// strongly at the target until ClearKeptObjects is called."
+  /// \pre \p obj must hold an Object or non-registered Symbol.
+  ExecutionStatus addToKeptObjects(Handle<> obj);
 
-  // ES2021 9.11 "ECMAScript implementations are
-  // expected to call ClearKeptObjects when a synchronous sequence of ECMAScript
-  // executions completes." This method clears all kept WeakRefs and allows
-  // their targets to be eligible for garbage collection again.
+  /// ES2025 9.10 "ECMAScript implementations are
+  /// expected to call ClearKeptObjects when a synchronous sequence of
+  /// ECMAScript executions completes." This method clears all kept WeakRefs and
+  /// allows their targets to be eligible for garbage collection again.
   void clearKeptObjects();
 
   IdentifierTable &getIdentifierTable() {
@@ -473,7 +489,11 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// Compute a hash value of a given HermesValue that is guaranteed to
   /// be stable with a moving GC. It however does not guarantee to be
   /// a perfect hash for strings.
-  uint64_t gcStableHashHermesValue(Handle<HermesValue> value);
+  uint64_t gcStableHashHermesValue(HermesValue value);
+
+  /// Compute a hash value of a given JSObject that is guaranteed to
+  /// be stable with a moving GC.
+  uint64_t gcStableHashJSObject(JSObject *object);
 
   /// @name Public VM State
   /// @{
@@ -501,18 +521,14 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// \return the new stack pointer.
   inline PinnedHermesValue *allocUninitializedStack(uint32_t count);
 
-  /// Allocate stack space for \p registers and initialize them with
-  /// \p initValue.
-  /// See implementation for why this is not inlined.
-  LLVM_ATTRIBUTE_NOINLINE
-  void allocStack(uint32_t count, HermesValue initValue);
+  /// Allocate stack space for \p registers and initialize them.
+  inline void allocStack(uint32_t count);
 
   /// Check whether <tt>count + STACK_RESERVE</tt> stack registers are available
   /// and allocate \p count registers.
   /// \param count number of registers to allocate.
-  /// \param initValue initialize the allocated registers with this value.
   /// \return \c true if allocation was successful.
-  inline bool checkAndAllocStack(uint32_t count, HermesValue initValue);
+  inline bool checkAndAllocStack(uint32_t count);
 
   /// Pop the specified number of elements from the stack.
   inline void popStack(uint32_t count);
@@ -596,6 +612,53 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   }
   /// Returns trailing data for all runtime modules.
   std::vector<llvh::ArrayRef<uint8_t>> getEpilogues();
+
+  /// \return the parent cache epoch.
+  uint32_t getParentCacheEpoch() const {
+    return parentCacheEpoch_;
+  }
+
+  /// \return true if the parent cache epoch has not been updated since the
+  /// array fast path prototype check was done.
+  bool checkArrayFastPathParentEpoch() const {
+    assert(
+        arrayFastPathParentCacheEpoch_ <= parentCacheEpoch_ &&
+        "Epoch overflowed without invalidating the cache");
+    return arrayFastPathParentCacheEpoch_ == parentCacheEpoch_;
+  }
+
+  /// Set the epoch to use for array fast path prototype checks.
+  void setArrayFastPathParentEpoch() {
+    arrayFastPathParentCacheEpoch_ = parentCacheEpoch_;
+  }
+
+#ifdef UNIT_TEST
+  /// Unsafe function to use for testing the overflow mechanism.
+  void testSetParentCacheEpoch(uint32_t epoch) {
+    parentCacheEpoch_ = epoch;
+  }
+#endif
+
+  /// Increment the parent cache epoch.
+  /// If this causes overflow, invalidate ALL PutById cache entries that have
+  /// stored an epoch (i.e. represent a HiddenClass transition).
+  /// \return the new value of the parent cache epoch.
+  uint32_t incParentCacheEpoch() {
+    ++parentCacheEpoch_;
+    if (LLVM_UNLIKELY(
+            parentCacheEpoch_ == AddPropertyCacheEntry::kMaxParentEpoch)) {
+      // Overflow.
+      invalidateAllAddCacheEntries();
+      // Clear the array fast path epoch so it is guaranteed to fail.
+      arrayFastPathParentCacheEpoch_ = 0;
+      parentCacheEpoch_ = 1;
+    }
+    return parentCacheEpoch_;
+  }
+
+  /// Iterate all AddPropertyCacheEntry in all RuntimeModules,
+  /// and set their startClazz to nullptr, invalidating them.
+  void invalidateAllAddCacheEntries();
 
   void printHeapStats(llvh::raw_ostream &os);
 
@@ -782,7 +845,9 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
 
 #define RUNTIME_HV_FIELD(name, type) PinnedValue<type> name{};
 #include "hermes/VM/RuntimeHermesValueFields.def"
-#undef RUNTIME_HV_FIELD
+#define RUNTIME_PHV_FIELD(name) \
+  PinnedHermesValue name{HermesValue::encodeRawZeroValueUnsafe()};
+#include "hermes/VM/RuntimePHVFields.def"
 
   /// Head of the locals list used for VM operations.
   Locals *vmLocals{};
@@ -896,32 +961,20 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
     return runtimeModuleList_;
   }
 
-  bool hasES6Promise() const {
-    return hasES6Promise_;
-  }
-
   bool hasES6Proxy() const {
     return hasES6Proxy_;
   }
 
-  bool hasES6Class() const {
-#ifndef HERMES_FACEBOOK_BUILD
-    return hasES6Class_;
-#else
-    return false;
-#endif
+  bool hasAsyncGenerators() const {
+    return hasAsyncGenerators_;
   }
 
   bool hasES6BlockScoping() const {
-    return hasES6Class_;
+    return hasES6BlockScoping_;
   }
 
   bool hasIntl() const {
     return hasIntl_;
-  }
-
-  bool hasArrayBuffer() const {
-    return hasArrayBuffer_;
   }
 
   bool hasMicrotaskQueue() const {
@@ -980,6 +1033,8 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
       // On windows in dbg mode builds, stack frames are bigger, and a depth
       // limit of 384 results in a C++ stack overflow in testing.
       128
+#elif defined(_MSC_VER) && defined(__clang__) && !defined(NDEBUG)
+      128
 #elif defined(_MSC_VER) && !NDEBUG
       192
 #else
@@ -999,7 +1054,7 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// indicates whether root data structures that contain only
   /// references to long-lived objects (allocated directly as long lived)
   /// are required to be scanned.
-  void markRoots(RootAndSlotAcceptorWithNames &acceptor, bool markLongLived);
+  void markRoots(RootAcceptorWithNames &acceptor, bool markLongLived);
 
   /// Called by the GC during collections that may reset weak references. This
   /// method informs the GC of all runtime weak roots.
@@ -1011,7 +1066,7 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   void markDomainRefInRuntimeModules(WeakRootAcceptor &weakRootAcceptor);
 
   /// See documentation on \c GCBase::GCCallbacks.
-  void markRootsForCompleteMarking(RootAndSlotAcceptorWithNames &acceptor);
+  void markRootsForCompleteMarking(RootAcceptorWithNames &acceptor);
 
   /// Visits every entry in the identifier table and calls acceptor with
   /// the entry and its id as arguments. This is intended to be used only for
@@ -1033,13 +1088,10 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// Optionally invoked at the beginning of a garbage collection.
   unsigned getSymbolsEnd() const;
 
-  /// If any symbols are marked by the IdentifierTable, clear that marking.
-  /// Optionally invoked at the beginning of some collections.
-  void unmarkSymbols();
-
   /// Called by the GC at the end of a collection to free all symbols not set in
-  /// markedSymbols.
-  void freeSymbols(const llvh::BitVector &markedSymbols);
+  /// markedSymbols. The function may set additional bits in \p markedSymbols to
+  /// reflect the fact that some symbols were not freed.
+  void freeSymbols(llvh::BitVector &markedSymbols);
 
 #ifdef HERMES_SLOW_DEBUG
   /// \return true if the given symbol is a live entry in the identifier
@@ -1138,9 +1190,14 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// Write a JS stack trace as part of a \c crashCallback() run.
   void crashWriteCallStack(JSONEmitter &json);
 
+  /// Initialize the given stack space with zeroes.
+  /// \param base the starting address of the space to initialize.
+  /// \param count the number of HermesValues to initialize.
+  inline void initStackWithZeroes(PinnedHermesValue *base, uint32_t count);
+
  private:
   GCBase::GCCallbacksWrapper<Runtime> gcCallbacksWrapper_;
-  GCStorage heapStorage_;
+  GC heap_;
 
   std::vector<std::function<void(GC *, RootAcceptor &)>> customMarkRootFuncs_;
   std::vector<std::function<void(GC *, WeakRootAcceptor &)>>
@@ -1151,23 +1208,17 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// All state related to JIT compilation.
   JITContext jitContext_;
 
-  /// Set to true if we should enable ES6 Promise.
-  const bool hasES6Promise_;
-
   /// Set to true if we should enable ES6 Proxy.
   const bool hasES6Proxy_;
 
-  /// Set to true if we should enable ES6 Class
-  const bool hasES6Class_;
+  /// Set to true if we should enable async generators.
+  const bool hasAsyncGenerators_;
 
   /// Set to true if we should enable ES6 block scoping.
   const bool hasES6BlockScoping_;
 
   /// Set to true if we should enable ECMA-402 Intl APIs.
   const bool hasIntl_;
-
-  /// Set to true if we should enable ArrayBuffer, DataView and typed arrays.
-  const bool hasArrayBuffer_;
 
   /// Set to true if we are using microtasks.
   const bool hasMicrotaskQueue_;
@@ -1326,6 +1377,22 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// ScriptIDs to use for new RuntimeModules coming in.
   facebook::hermes::debugger::ScriptID nextScriptId_{1};
 
+  /// An epoch used to invalidate property write cache entries.
+  /// Incremented whenever a cached object's parent changes its parent or its
+  /// HiddenClass, because those operations could introduce parent chain changes
+  /// that prevent adding the property the way that was cached.
+  ///
+  /// If this number rolls over from kMaxParentEpoch to 0 (unlikely),
+  /// invalidate ALL property write caches.
+  /// Start at 1 so we are guaranteed that 0 is never used and can be used to
+  /// ensure the check fails.
+  uint32_t parentCacheEpoch_ = 1;
+
+  /// The epoch when the array prototype was verified to allow us to use fast
+  /// paths in array JSLib functions. If parentCacheEpoch_ is different, we must
+  /// reverify the prototype chain.
+  uint32_t arrayFastPathParentCacheEpoch_ = 0;
+
   /// Store a key for the function that is executed if a crash occurs.
   /// This key will be unregistered in the destructor.
   const CrashManager::CallbackKey crashCallbackKey_;
@@ -1357,6 +1424,10 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   }
 
   Debugger debugger_{*this};
+
+  /// A copy of the internal bytecode made so that we can set breakpoints in it
+  /// to allow for debugging.
+  std::unique_ptr<uint8_t, llvh::FreeDeleter> internalBytecodeCopy_;
 #endif
 
   /// Use an 8MB stack, which is the default size on mac and linux.
@@ -1487,28 +1558,16 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
 
 #ifdef NDEBUG
   void invalidateCurrentIP() {}
+  void validateSavedIPBeforeCall() const {}
 #else
   void invalidateCurrentIP() {
     currentIP_ = (const inst::Inst *)kInvalidCurrentIP;
   }
+  /// Validate that the saved IP in the outgoing call registers of the current
+  /// frame has been correctly populated. This must be called when the frame and
+  /// stack pointers still represent to the caller frame.
+  void validateSavedIPBeforeCall() const;
 #endif
-
-  /// Save the return address in the caller in the stack frame.
-  /// This needs to be called at the beginning of a function call, before the
-  /// stack frame is set up. \c stackPointer_ should be at the end of the caller
-  /// frame, pointing to the first register of the callee frame that is about to
-  /// be set up.
-  void saveCallerIPInStackFrame() {
-    StackFramePtr newFrame(stackPointer_);
-#ifndef NDEBUG
-    assert(
-        (!newFrame.getSavedIP() ||
-         ((uintptr_t)currentIP_ != kInvalidCurrentIP &&
-          newFrame.getSavedIP() == currentIP_)) &&
-        "The ip should either be null or already have the expected value");
-#endif
-    newFrame.getSavedIPRef() = HermesValue::encodeNativePointer(getCurrentIP());
-  }
 
  private:
 #ifdef HERMES_MEMORY_INSTRUMENTATION
@@ -1638,7 +1697,7 @@ struct Locals {
 };
 
 /// RAII class to push/pop a Locals struct within a scope.
-class LocalsRAII {
+class [[nodiscard]] LocalsRAII {
   Runtime &runtime_;
   Locals *locals_;
 
@@ -1649,6 +1708,17 @@ class LocalsRAII {
     locals->prev = runtime_.vmLocals;
     locals->numLocals =
         (sizeof(T) - offsetof(Locals, locals)) / sizeof(PinnedHermesValue);
+#ifdef HERMES_SLOW_DEBUG
+    // All pointer/symbol type PinnedValues in locals must be initialized/reset
+    // to default. Otherwise, potential dangling pointers could be accessed by
+    // the GC.
+    for (size_t i = 0; i < locals_->numLocals; ++i) {
+      auto &phv = locals_->locals[i];
+      assert(
+          (!phv.isPointer() || !phv.getPointer()) &&
+          (!phv.isSymbol() || phv.getSymbol().isInvalid()));
+    }
+#endif
     runtime_.vmLocals = locals;
   }
   ~LocalsRAII() {
@@ -1664,19 +1734,20 @@ class ScopedNativeDepthTracker {
   Runtime &runtime_;
   /// Whether the stack overflowed when the tracker was constructed.
   bool overflowed_;
+#ifndef HERMES_CHECK_NATIVE_STACK
+  StackOverflowGuard::CallFrameRAII frame_;
+#endif
 
  public:
-  explicit ScopedNativeDepthTracker(Runtime &runtime) : runtime_(runtime) {
+  explicit ScopedNativeDepthTracker(Runtime &runtime)
+      : runtime_(runtime)
+#ifndef HERMES_CHECK_NATIVE_STACK
+        ,
+        frame_(StackOverflowGuard::CallFrameRAII{runtime_.overflowGuard_})
+#endif
+  {
     (void)runtime_;
-#ifndef HERMES_CHECK_NATIVE_STACK
-    ++runtime.overflowGuard_.callDepth;
-#endif
     overflowed_ = runtime.isStackOverflowing();
-  }
-  ~ScopedNativeDepthTracker() {
-#ifndef HERMES_CHECK_NATIVE_STACK
-    --runtime_.overflowGuard_.callDepth;
-#endif
   }
 
   /// \return whether we overflowed the native call frame depth.
@@ -1815,7 +1886,7 @@ class ScopedNativeCallFrame {
     frame_ = StackFramePtr::initFrame(
         stack,
         runtime.currentFrame_,
-        nullptr,
+        runtime.getCurrentIP(),
         nullptr,
         nullptr,
         argCount,
@@ -2060,6 +2131,8 @@ template <
     typename T,
     HasFinalizer hasFinalizer,
     LongLived longLived,
+    CanBeLarge canBeLarge,
+    MayFail mayFail,
     class... Args>
 T *Runtime::makeAVariable(uint32_t size, Args &&...args) {
 #ifndef NDEBUG
@@ -2069,8 +2142,25 @@ T *Runtime::makeAVariable(uint32_t size, Args &&...args) {
   // CAPTURE_IP* macros in the interpreter loop.
   (void)getCurrentIP();
 #endif
-  return getHeap().makeAVariable<T, hasFinalizer, longLived>(
-      size, std::forward<Args>(args)...);
+  return getHeap()
+      .makeAVariable<T, hasFinalizer, longLived, canBeLarge, mayFail>(
+          size, std::forward<Args>(args)...);
+}
+
+template <typename T1, typename T2, typename... T1Args, typename... T2Args>
+std::pair<T1 *, T2 *> Runtime::make2YoungGenUnsafe(
+    uint32_t size1,
+    std::tuple<T1Args...> t1Args,
+    uint32_t size2,
+    std::tuple<T2Args...> t2Args) {
+#ifndef NDEBUG
+  // We always call getCurrentIP() in a debug build as this has the effect of
+  // asserting the IP is correctly set (not invalidated) at this point. This
+  // allows us to leverage our whole test-suite to find missing cases of
+  // CAPTURE_IP* macros in the interpreter loop.
+  (void)getCurrentIP();
+#endif
+  return getHeap().make2YoungGenUnsafe<T1, T2>(size1, t1Args, size2, t2Args);
 }
 
 template <typename T>
@@ -2167,11 +2257,50 @@ inline PinnedHermesValue *Runtime::allocUninitializedStack(uint32_t count) {
   return stackPointer_ += count;
 }
 
-inline bool Runtime::checkAndAllocStack(uint32_t count, HermesValue initValue) {
-  if (!checkAvailableStack(count))
+inline bool Runtime::checkAndAllocStack(uint32_t count) {
+  if (LLVM_UNLIKELY(!checkAvailableStack(count)))
     return false;
-  allocStack(count, initValue);
+  allocStack(count);
   return true;
+}
+
+inline void Runtime::allocStack(uint32_t count) {
+  auto *fillPtr = stackPointer_;
+  allocUninitializedStack(count);
+  // Initialize the new registers.
+  initStackWithZeroes(fillPtr, count);
+}
+
+inline void Runtime::initStackWithZeroes(
+    PinnedHermesValue *base,
+    uint32_t count) {
+  auto *lim = base + count;
+  // Fill the first count % 3 elements so we can fill 4 at a time in the loop.
+  if (count & 1)
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+
+  if (count & 2) {
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+  }
+
+  // Store the remaining elements 4 at a time, allowing the compiler to use
+  // vectorized stores for up to 4 elements at a time. Note that the empty asm
+  // statement at the end of the loop prevents the compiler from storing more
+  // elements together.
+  while (base < lim) {
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+    *(base++) = HermesValue::encodeRawZeroValueUnsafe();
+
+#ifdef __GNUC__
+    // This empty asm statement tells the compiler that we want each write to
+    // be observable, so it cannot turn the loop into a memset call.
+    asm volatile("" : : : "memory");
+#endif
+  }
+  assert(base == lim && "Fill failed");
 }
 
 inline void Runtime::popStack(uint32_t count) {

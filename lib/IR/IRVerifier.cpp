@@ -54,6 +54,7 @@ class Verifier : public InstructionVisitor<Verifier, bool> {
    public:
     const Function &function;
     bool createArgumentsEncountered = false;
+    bool createScopeEncountered = false;
 
     FunctionState(Verifier *verifier, const Function &function)
         : verifier(verifier),
@@ -92,8 +93,6 @@ class Verifier : public InstructionVisitor<Verifier, bool> {
   LLVM_NODISCARD bool visitBasicBlock(const BasicBlock &BB);
   LLVM_NODISCARD bool visitVariableScope(const VariableScope &VS);
 
-  LLVM_NODISCARD bool visitBaseDefineOwnPropertyInst(
-      const BaseDefineOwnPropertyInst &Inst);
   LLVM_NODISCARD bool visitBaseCreateLexicalChildInst(
       const BaseCreateLexicalChildInst &Inst);
   LLVM_NODISCARD bool visitBaseCreateCallableInst(
@@ -234,6 +233,8 @@ bool Verifier::visitModule(const Module &M) {
   }
   for (auto &VS : M.getVariableScopes())
     ReturnIfNot(visitVariableScope(VS));
+  // Ensure that we can compute the hash of a module successfully.
+  (void)M.hash();
   return true;
 }
 
@@ -253,7 +254,8 @@ bool Verifier::visitFunction(const Function &F) {
         (*user),
         llvh::isa<BaseCallInst>(user) ||
             llvh::isa<BaseCreateLexicalChildInst>(user) ||
-            llvh::isa<GetClosureScopeInst>(user),
+            llvh::isa<GetClosureScopeInst>(user) ||
+            llvh::isa<CreateThisInst>(user),
         "Function can only be an operand to certain instructions");
   }
 
@@ -302,7 +304,8 @@ bool Verifier::visitFunction(const Function &F) {
           }
 
           // Make sure that the incoming value dominates the incoming block.
-          AssertWithMsg(
+          AssertIWithMsg(
+              (*Phi),
               D.dominates(inst->getParent(), block),
               "Incoming PHI value " << bbLabel(*inst->getParent())
                                     << " must dominate incoming "
@@ -324,6 +327,16 @@ bool Verifier::visitFunction(const Function &F) {
       seen.insert(&*II);
     }
   }
+
+  // If we are supporting full debugging, then we require that all functions
+  // have a CreateScopeInst.
+  if (F.getContext().getDebugInfoSetting() == DebugInfoSetting::ALL &&
+      !llvh::isa<GeneratorFunction>(F)) {
+    AssertWithMsg(
+        functionState->createScopeEncountered,
+        "All non-generator functions need to have a CreateScopeInst");
+  }
+
   return verifyTryStructure(F);
 }
 
@@ -463,24 +476,12 @@ bool Verifier::visitBasicBlock(const BasicBlock &BB) {
                             << bbLabel(**I));
   }
 
-  // Indicates whether all the instructions in the block observed so far had
-  // FirstInBlock set.
-  bool visitingFirstInBlock = true;
   // Verify each instruction
   for (BasicBlock::const_iterator I = BB.begin(); I != BB.end(); I++) {
     AssertWithMsg(
         I->getParent() == &BB,
         "Instruction " << iLabel(*I) << "'s parent " << bbLabel(*I->getParent())
                        << " does not match " << bbLabel(BB));
-
-    // Check that FirstInBlock instructions are not preceded by other
-    // instructions.
-    bool firstInBlock = I->getSideEffect().getFirstInBlock();
-    visitingFirstInBlock &= firstInBlock;
-    AssertIWithMsg(
-        (*I),
-        visitingFirstInBlock || !firstInBlock,
-        "Unexpected FirstInBlock instruction.");
 
     // Use the instruction using the InstructionVisitor::visit();
     ReturnIfNot(verifyBeforeVisitInstruction(*I));
@@ -549,7 +550,31 @@ bool Verifier::verifyBeforeVisitInstruction(const Instruction &Inst) {
         Inst, Inst.hasOutput(), "Instruction with type does not have output");
   }
 
+  if (Inst.getSideEffect().getFirstInBlock()) {
+    if (llvh::isa<PhiInst>(&Inst)) {
+      // Phis must be first in block, but they may be preceded by other Phis.
+      AssertIWithMsg(
+          Inst,
+          !Inst.getPrevNode() || llvh::isa<PhiInst>(Inst.getPrevNode()),
+          "Phi can only be preceded by other Phis");
+    } else {
+      // All other FirstInBlock instructions must be first in the block.
+      AssertIWithMsg(
+          Inst,
+          !Inst.getPrevNode(),
+          "FirstInBlock instruction must be first in the block");
+    }
+  }
+
   ReturnIfNot(verifyAttributes(&Inst));
+
+  if (Inst.getEnvironmentID() >= Instruction::kFirstScopeCreationIdIndex) {
+    AssertIWithMsg(
+        Inst,
+        Inst.getEnvironmentIDAsIndex() <
+            Inst.getFunction()->environments().size(),
+        "Invalid environment index ID");
+  }
 
   bool const acceptsEmptyType = Inst.acceptsEmptyType();
 
@@ -732,6 +757,18 @@ bool Verifier::visitAddEmptyStringInst(const AddEmptyStringInst &Inst) {
       Inst,
       Inst.getType() == Type::createString(),
       "AddEmptyStringInst must return a string type");
+  return true;
+}
+
+bool Verifier::visitCreatePrivateNameInst(const CreatePrivateNameInst &Inst) {
+  AssertIWithMsg(
+      Inst,
+      llvh::isa<LiteralString>(Inst.getSingleOperand()),
+      "CreatePrivateNameInst must take in a literal string");
+  AssertIWithMsg(
+      Inst,
+      Inst.getType().isPrivateNameType(),
+      "CreatePrivateNameInst must return a private name type");
   return true;
 }
 
@@ -933,7 +970,7 @@ bool Verifier::visitCallInst(const CallInst &Inst) {
 bool Verifier::visitHBCCallWithArgCountInst(
     const HBCCallWithArgCountInst &Inst) {
   // NumArgumentsLiteral is not always a number literal. For example, it will be
-  // lowered into HBCLoadConstant.
+  // lowered into LIRLoadConstInst.
   if (auto *LN = llvh::dyn_cast<LiteralNumber>(Inst.getNumArgumentsLiteral())) {
     AssertIWithMsg(
         Inst,
@@ -982,6 +1019,14 @@ bool Verifier::visitLoadPropertyWithReceiverInst(
     const LoadPropertyWithReceiverInst &Inst) {
   return true;
 }
+bool Verifier::visitLoadOwnPrivateFieldInst(
+    const LoadOwnPrivateFieldInst &Inst) {
+  AssertIWithMsg(
+      Inst,
+      Inst.getProperty()->getType().isPrivateNameType(),
+      "LoadOwnPrivateFieldInst must be loading a private name");
+  return true;
+}
 bool Verifier::visitTryLoadGlobalPropertyInst(
     const TryLoadGlobalPropertyInst &Inst) {
   return true;
@@ -1020,36 +1065,31 @@ bool Verifier::visitTryStoreGlobalPropertyStrictInst(
   return true;
 }
 
-bool Verifier::visitBaseDefineOwnPropertyInst(
-    const BaseDefineOwnPropertyInst &Inst) {
+bool Verifier::visitDefineOwnPropertyInst(const DefineOwnPropertyInst &Inst) {
   AssertIWithMsg(
       Inst,
       llvh::isa<LiteralBool>(
           Inst.getOperand(DefineOwnPropertyInst::IsEnumerableIdx)),
-      "BaseDefineOwnPropertyInst::IsEnumerable must be a boolean literal");
+      "DefineOwnPropertyInst::IsEnumerable must be a boolean literal");
   return true;
 }
-bool Verifier::visitDefineOwnPropertyInst(const DefineOwnPropertyInst &Inst) {
-  return visitBaseDefineOwnPropertyInst(Inst);
+bool Verifier::visitDefineOwnInDenseArrayInst(
+    const DefineOwnInDenseArrayInst &Inst) {
+  return true;
 }
-bool Verifier::visitDefineNewOwnPropertyInst(
-    const DefineNewOwnPropertyInst &Inst) {
-  ReturnIfNot(visitBaseDefineOwnPropertyInst(Inst));
+bool Verifier::visitStoreOwnPrivateFieldInst(
+    const StoreOwnPrivateFieldInst &Inst) {
   AssertIWithMsg(
       Inst,
-      Inst.getObject()->getType().isObjectType(),
-      "DefineNewOwnPropertyInst::Object must be known to be an object");
-  if (auto *LN = llvh::dyn_cast<LiteralNumber>(Inst.getProperty())) {
-    AssertIWithMsg(
-        Inst,
-        LN->convertToArrayIndex().hasValue(),
-        "DefineNewOwnPropertyInst::Property can only be an index-like number");
-  } else {
-    AssertIWithMsg(
-        Inst,
-        llvh::isa<LiteralString>(Inst.getProperty()),
-        "DefineNewOwnPropertyInst::Property must be a string or number literal");
-  }
+      Inst.getProperty()->getType().isPrivateNameType(),
+      "AddOwnPrivatePropertyInst::Property must be a private name");
+  return true;
+}
+bool Verifier::visitAddOwnPrivateFieldInst(const AddOwnPrivateFieldInst &Inst) {
+  AssertIWithMsg(
+      Inst,
+      Inst.getProperty()->getType().isPrivateNameType(),
+      "AddOwnPrivateFieldInst::Property must be a private name");
   return true;
 }
 
@@ -1338,7 +1378,9 @@ bool Verifier::visitSwitchInst(const hermes::SwitchInst &Inst) {
   return visitSwitchLikeInst(Inst);
 }
 
-bool Verifier::visitSwitchImmInst(const hermes::SwitchImmInst &Inst) {
+bool Verifier::visitUIntSwitchImmInst(const hermes::UIntSwitchImmInst &Inst) {
+  // For integer jump tables (SwitchImmInst, above), we assert that the
+  // LiteralNumber is a UInt32.
   ReturnIfNot(visitSwitchLikeInst(Inst));
   for (unsigned idx = 0, e = Inst.getNumCasePair(); idx < e; ++idx) {
     AssertIWithMsg(
@@ -1346,6 +1388,14 @@ bool Verifier::visitSwitchImmInst(const hermes::SwitchImmInst &Inst) {
         Inst.getCasePair(idx).first->isUInt32Representible(),
         "case value must be a uint32");
   }
+
+  return true;
+}
+
+bool Verifier::visitStringSwitchImmInst(
+    const hermes::StringSwitchImmInst &Inst) {
+  ReturnIfNot(visitSwitchLikeInst(Inst));
+  // No checking of the cases is necessary for string switches.
   return true;
 }
 
@@ -1390,6 +1440,7 @@ bool Verifier::visitGetParentScopeInst(const GetParentScopeInst &Inst) {
   return true;
 }
 bool Verifier::visitCreateScopeInst(const CreateScopeInst &Inst) {
+  functionState->createScopeEncountered = true;
   return true;
 }
 bool Verifier::visitResolveScopeInst(const ResolveScopeInst &Inst) {
@@ -1418,12 +1469,12 @@ bool Verifier::visitHBCProfilePointInst(const HBCProfilePointInst &Inst) {
   return true;
 }
 
-bool Verifier::visitHBCAllocObjectFromBufferInst(
-    const hermes::HBCAllocObjectFromBufferInst &Inst) {
+bool Verifier::visitLIRAllocObjectFromBufferInst(
+    const hermes::LIRAllocObjectFromBufferInst &Inst) {
   AssertIWithMsg(
       Inst,
       Inst.getKeyValuePairCount() > 0,
-      "Cannot allocate an empty HBCAllocObjectFromBufferInst");
+      "Cannot allocate an empty LIRAllocObjectFromBufferInst");
   return true;
 }
 
@@ -1432,12 +1483,17 @@ bool Verifier::visitAllocObjectLiteralInst(
   return true;
 }
 
-bool Verifier::visitHBCGetGlobalObjectInst(const HBCGetGlobalObjectInst &Inst) {
+bool Verifier::visitAllocTypedObjectInst(
+    const hermes::AllocTypedObjectInst &Inst) {
+  return true;
+}
+
+bool Verifier::visitLIRGetGlobalObjectInst(const LIRGetGlobalObjectInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
 
-bool Verifier::visitHBCLoadConstInst(hermes::HBCLoadConstInst const &Inst) {
+bool Verifier::visitLIRLoadConstInst(hermes::LIRLoadConstInst const &Inst) {
   // Nothing to verify at this point.
   return true;
 }
@@ -1469,18 +1525,6 @@ bool Verifier::visitCreateGeneratorInst(const CreateGeneratorInst &Inst) {
       "CreateGeneratorInst must take a BaseScopeInst");
   return true;
 }
-bool Verifier::visitStartGeneratorInst(const StartGeneratorInst &Inst) {
-  AssertIWithMsg(
-      Inst,
-      &Inst == &Inst.getParent()->front() &&
-          Inst.getParent() == &Inst.getParent()->getParent()->front(),
-      "StartGeneratorInst must be the first instruction of a function");
-  AssertIWithMsg(
-      Inst,
-      !M.areGeneratorsLowered(),
-      "Should not exist after generators are lowered");
-  return true;
-}
 bool Verifier::visitResumeGeneratorInst(const ResumeGeneratorInst &Inst) {
   AssertIWithMsg(
       Inst,
@@ -1493,28 +1537,28 @@ bool Verifier::visitLIRGetThisNSInst(const LIRGetThisNSInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
-bool Verifier::visitHBCGetArgumentsPropByValLooseInst(
-    const HBCGetArgumentsPropByValLooseInst &Inst) {
+bool Verifier::visitLIRGetArgumentsPropByValLooseInst(
+    const LIRGetArgumentsPropByValLooseInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
-bool Verifier::visitHBCGetArgumentsPropByValStrictInst(
-    const HBCGetArgumentsPropByValStrictInst &Inst) {
+bool Verifier::visitLIRGetArgumentsPropByValStrictInst(
+    const LIRGetArgumentsPropByValStrictInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
-bool Verifier::visitHBCGetArgumentsLengthInst(
-    const HBCGetArgumentsLengthInst &Inst) {
+bool Verifier::visitLIRGetArgumentsLengthInst(
+    const LIRGetArgumentsLengthInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
-bool Verifier::visitHBCReifyArgumentsLooseInst(
-    const HBCReifyArgumentsLooseInst &Inst) {
+bool Verifier::visitLIRReifyArgumentsLooseInst(
+    const LIRReifyArgumentsLooseInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
-bool Verifier::visitHBCReifyArgumentsStrictInst(
-    const HBCReifyArgumentsStrictInst &Inst) {
+bool Verifier::visitLIRReifyArgumentsStrictInst(
+    const LIRReifyArgumentsStrictInst &Inst) {
   // Nothing to verify at this point.
   return true;
 }
@@ -1526,7 +1570,7 @@ bool Verifier::visitGetConstructedObjectInst(
   return true;
 }
 
-bool Verifier::visitHBCSpillMovInst(const HBCSpillMovInst &Inst) {
+bool Verifier::visitLIRSpillMovInst(const LIRSpillMovInst &Inst) {
   return true;
 }
 bool Verifier::visitUnreachableInst(const UnreachableInst &Inst) {
@@ -1640,17 +1684,6 @@ bool Verifier::visitTypedLoadParentInst(const TypedLoadParentInst &Inst) {
       Inst,
       Inst.getObject()->getType().isObjectType(),
       "input object value must be of object type");
-  return true;
-}
-bool Verifier::visitTypedStoreParentInst(const TypedStoreParentInst &Inst) {
-  AssertIWithMsg(
-      Inst,
-      Inst.getObject()->getType().isObjectType(),
-      "input object value must be of object type");
-  AssertIWithMsg(
-      Inst,
-      Inst.getStoredValue()->getType().isObjectType(),
-      "stored value must be an object");
   return true;
 }
 

@@ -641,7 +641,7 @@ const Token *JSLexer::advance(GrammarContext grammarContext) {
         token_.setStart(curCharPtr_);
         uint32_t ch = decodeUTF8();
 
-        if (isUnicodeOnlyLetter(ch)) {
+        if (isUnicodeOnlyIDStart(ch)) {
           tmpStorage_.clear();
           appendUnicodeToStorage(ch);
           scanIdentifierPartsInContext(grammarContext);
@@ -837,11 +837,8 @@ llvh::Optional<uint32_t> JSLexer::consumeHTMLEntityOptional() {
 #endif
 
 bool JSLexer::isCurrentTokenADirective() {
-  // The current token must be a string literal without escapes.
-  if (token_.getKind() != TokenKind::string_literal ||
-      token_.getStringLiteralContainsEscapes()) {
+  if (token_.getKind() != TokenKind::string_literal)
     return false;
-  }
 
   const char *ptr = curCharPtr_;
 
@@ -1561,9 +1558,20 @@ end:
           parseIntWithRadixDigits</* AllowNumericSeparator */ true>(
               digits, radix, [](uint8_t) {})) {
         // This is a BigInt.
-        rawStorage_.clear();
-        rawStorage_.append(raw);
-        token_.setBigIntLiteral(getStringLiteral(rawStorage_));
+        // ESTree spec:
+        // bigint property is the string representation of the BigInt value. It
+        // must contain only decimal digits and not include numeric separators
+        // (_) or the suffix n.
+        // Filter out the characters we don't want.
+        // Drop the last character from `raw` because that's the 'n',
+        // and skip over all '_'.
+        tmpStorage_.clear();
+        for (char c : raw.drop_back(1)) {
+          if (c != '_')
+            tmpStorage_.push_back(c);
+        }
+        token_.setBigIntLiteral(
+            getStringLiteral(tmpStorage_), getStringLiteral(raw));
         return;
       }
 

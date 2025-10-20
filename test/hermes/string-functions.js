@@ -6,6 +6,7 @@
  */
 
 // RUN: LANG=en_US.UTF-8 %hermes -O -target=HBC %s | %FileCheck --match-full-lines %s
+// UNSUPPORTED: unicode_lite
 "use strict";
 
 print('String');
@@ -1136,3 +1137,33 @@ try { "abcde".search(pattern); } catch (e) { print(e.name); }
 
 try { new String(new Symbol()); } catch (e) { print(e.name); }
 // CHECK-NEXT: TypeError
+
+// Lone leading surrogate
+print("ab\uD800".isWellFormed())
+// CHECK-NEXT: false
+print("ab\uD800c".isWellFormed())
+// CHECK-NEXT: false
+print("ab\uD800".toWellFormed())
+// CHECK-NEXT: ab�
+print("ab\uD800c".toWellFormed())
+// CHECK-NEXT: ab�c
+
+// Lone trailing surrogate
+print("\uDFFFab".isWellFormed())
+// CHECK-NEXT: false
+print("c\uDFFFab".isWellFormed())
+// CHECK-NEXT: false
+print("\uDFFFab".toWellFormed())
+// CHECK-NEXT: �ab
+print("c\uDFFFab".toWellFormed())
+// CHECK-NEXT: c�ab
+
+// Well-formed
+print("abc".isWellFormed())
+// CHECK-NEXT: true
+print("ab\uD83D\uDE04c".isWellFormed())
+// CHECK-NEXT: true
+print("abc".toWellFormed())
+// CHECK-NEXT: abc
+print("ab\uD83D\uDE04c".toWellFormed())
+// CHECK-NEXT: ab😄c

@@ -87,6 +87,10 @@ function f(x) {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -101,15 +105,15 @@ function f(x) {
 // CHECK-NEXT:i2[ASCII, 6..6] #00019E07: f
 
 // CHECK:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "g"
 // CHECK-NEXT:    DeclareGlobalVar  "f"
 // CHECK-NEXT:    GetGlobalObject   r2
 // CHECK-NEXT:    LoadConstUndefined r0
 // CHECK-NEXT:    CreateClosure     r1, r0, Function<g>
-// CHECK-NEXT:    PutByIdStrict     r2, r1, 1, "g"
+// CHECK-NEXT:    PutByIdStrict     r2, r1, 0, "g"
 // CHECK-NEXT:    CreateClosure     r1, r0, Function<f>
-// CHECK-NEXT:    PutByIdStrict     r2, r1, 2, "f"
+// CHECK-NEXT:    PutByIdStrict     r2, r1, 1, "f"
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Function<g>(1 params, 1 registers, 0 numbers, 1 non-pointers):
@@ -117,9 +121,9 @@ function f(x) {
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Function<f>(2 params, 12 registers, 1 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0010, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0011
 // CHECK-NEXT:    LoadParam         r2, 1
-// CHECK-NEXT:    SwitchImm         r2, 292, L18, 0, 16
+// CHECK-NEXT:    UIntSwitchImm     r2, 292, L18, 0, 16
 // CHECK-NEXT:L17:
 // CHECK-NEXT:    LoadConstInt      r0, 3352
 // CHECK-NEXT:    Ret               r0
@@ -158,7 +162,7 @@ function f(x) {
 // CHECK-NEXT:    Ret               r0
 // CHECK-NEXT:L5:
 // CHECK-NEXT:    GetGlobalObject   r3
-// CHECK-NEXT:    GetByIdShort      r3, r3, 1, "g"
+// CHECK-NEXT:    GetByIdShort      r3, r3, 0, "g"
 // CHECK-NEXT:    LoadConstUndefined r1
 // CHECK-NEXT:    Call1             r3, r3, r1
 // CHECK-NEXT:    LoadConstInt      r0, 342
@@ -176,7 +180,7 @@ function f(x) {
 // CHECK-NEXT:    LoadConstUInt8    r0, 32
 // CHECK-NEXT:    Ret               r0
 // CHECK-NEXT:L18:
-// CHECK-NEXT:    SwitchImm         r2, 199, L23, 1, 14
+// CHECK-NEXT:    UIntSwitchImm     r2, 199, L23, 1, 14
 // CHECK-NEXT:L30:
 // CHECK-NEXT:    LoadConstInt      r0, 3342
 // CHECK-NEXT:    Ret               r0
@@ -200,7 +204,7 @@ function f(x) {
 // CHECK-NEXT:    Ret               r0
 // CHECK-NEXT:L22:
 // CHECK-NEXT:    GetGlobalObject   r2
-// CHECK-NEXT:    GetByIdShort      r2, r2, 1, "g"
+// CHECK-NEXT:    GetByIdShort      r2, r2, 0, "g"
 // CHECK-NEXT:    LoadConstUndefined r1
 // CHECK-NEXT:    Call1             r2, r2, r1
 // CHECK-NEXT:    LoadConstInt      r0, 342
@@ -216,7 +220,7 @@ function f(x) {
 // CHECK-NEXT:    Ret               r0
 // CHECK-NEXT:L23:
 // CHECK-NEXT:    GetGlobalObject   r2
-// CHECK-NEXT:    GetByIdShort      r2, r2, 1, "g"
+// CHECK-NEXT:    GetByIdShort      r2, r2, 0, "g"
 // CHECK-NEXT:    LoadConstUndefined r1
 // CHECK-NEXT:    Call1             r2, r2, r1
 // CHECK-NEXT:    Ret               r1
@@ -268,11 +272,11 @@ function f(x) {
 // CHECK-NEXT:    bc 5: line 10 col 1
 // CHECK-NEXT:    bc 19: line 10 col 1
 // CHECK-NEXT:    bc 30: line 10 col 1
-// CHECK-NEXT:  0x0010  function idx 2, starts at line 12 col 1
+// CHECK-NEXT:  0x0011  function idx 2, starts at line 12 col 1
 // CHECK-NEXT:    bc 119: line 23 col 13
 // CHECK-NEXT:    bc 126: line 23 col 14
 // CHECK-NEXT:    bc 240: line 58 col 13
 // CHECK-NEXT:    bc 247: line 58 col 14
 // CHECK-NEXT:    bc 282: line 75 col 13
 // CHECK-NEXT:    bc 289: line 75 col 14
-// CHECK-NEXT:  0x002a  end of debug source table
+// CHECK-NEXT:  0x002d  end of debug source table

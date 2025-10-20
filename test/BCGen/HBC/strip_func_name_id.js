@@ -19,6 +19,10 @@ Math['function-name-stripped'] = 123;
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 1
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -32,11 +36,11 @@ Math['function-name-stripped'] = 123;
 // CHECK-NEXT:i1[ASCII, 4..25] #D7615A1F: function-name-stripped
 
 // CHECK:Function<function-name-stripped>(1 params, 2 registers, 1 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    GetGlobalObject   r1
-// CHECK-NEXT:    TryGetById        r1, r1, 1, "Math"
+// CHECK-NEXT:    TryGetById        r1, r1, 0, "Math"
 // CHECK-NEXT:    LoadConstUInt8    r0, 123
-// CHECK-NEXT:    PutByIdStrict     r1, r0, 1, "function-name-str"...
+// CHECK-NEXT:    PutByIdStrict     r1, r0, 0, "function-name-str"...
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Debug filename table:
@@ -49,4 +53,4 @@ Math['function-name-stripped'] = 123;
 // CHECK-NEXT:  0x0000  function idx 0, starts at line 10 col 1
 // CHECK-NEXT:    bc 2: line 10 col 1
 // CHECK-NEXT:    bc 11: line 10 col 32
-// CHECK-NEXT:  0x000a  end of debug source table
+// CHECK-NEXT:  0x000b  end of debug source table

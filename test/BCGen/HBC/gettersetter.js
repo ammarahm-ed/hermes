@@ -24,6 +24,10 @@ var obj = {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -44,22 +48,22 @@ var obj = {
 // CHECK-NEXT:i8[ASCII, 26..28] #DC53DBCF: obj
 
 // CHECK:Function<global>(1 params, 5 registers, 0 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "obj"
-// CHECK-NEXT:    NewObject         r4
-// CHECK-NEXT:    LoadConstString   r3, "b"
+// CHECK-NEXT:    NewObject         r2
+// CHECK-NEXT:    LoadConstString   r4, "b"
 // CHECK-NEXT:    LoadConstUndefined r0
-// CHECK-NEXT:    CreateClosure     r2, r0, Function<set b>
+// CHECK-NEXT:    CreateClosure     r3, r0, Function<set b>
 // CHECK-NEXT:    CreateClosure     r1, r0, Function<get b>
-// CHECK-NEXT:    DefineOwnGetterSetterByVal r4, r3, r1, r2, 1
-// CHECK-NEXT:    LoadConstString   r2, "c"
+// CHECK-NEXT:    DefineOwnGetterSetterByVal r2, r4, r1, r3, 1
+// CHECK-NEXT:    LoadConstString   r3, "c"
 // CHECK-NEXT:    CreateClosure     r1, r0, Function<get c>
-// CHECK-NEXT:    DefineOwnGetterSetterByVal r4, r2, r1, r0, 1
-// CHECK-NEXT:    LoadConstString   r2, "d"
+// CHECK-NEXT:    DefineOwnGetterSetterByVal r2, r3, r1, r0, 1
+// CHECK-NEXT:    LoadConstString   r3, "d"
 // CHECK-NEXT:    CreateClosure     r1, r0, Function<set d>
-// CHECK-NEXT:    DefineOwnGetterSetterByVal r4, r2, r0, r1, 1
+// CHECK-NEXT:    DefineOwnGetterSetterByVal r2, r3, r0, r1, 1
 // CHECK-NEXT:    GetGlobalObject   r1
-// CHECK-NEXT:    PutByIdLoose      r1, r4, 1, "obj"
+// CHECK-NEXT:    PutByIdLoose      r1, r2, 0, "obj"
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Function<get b>(1 params, 1 registers, 0 numbers, 1 non-pointers):
@@ -91,4 +95,4 @@ var obj = {
 // CHECK-NEXT:    bc 38: line 10 col 11
 // CHECK-NEXT:    bc 53: line 10 col 11
 // CHECK-NEXT:    bc 61: line 10 col 9
-// CHECK-NEXT:  0x0013  end of debug source table
+// CHECK-NEXT:  0x0014  end of debug source table

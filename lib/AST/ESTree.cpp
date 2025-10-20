@@ -89,7 +89,7 @@ Node *getIdentifier(FunctionLikeNode *node) {
     case NodeKind::FunctionExpression:
       return cast<FunctionExpressionNode>(node)->_id;
     case NodeKind::ArrowFunctionExpression:
-      return cast<ArrowFunctionExpressionNode>(node)->_id;
+      return nullptr;
     case NodeKind::FunctionDeclaration:
       return cast<FunctionDeclarationNode>(node)->_id;
   }
@@ -225,7 +225,7 @@ bool isAsync(FunctionLikeNode *node) {
   }
 }
 
-Node *getSuperClass(ClassLikeNode *node) {
+Node *&getSuperClass(ClassLikeNode *node) {
   switch (node->getKind()) {
     case NodeKind::ClassExpression:
       return cast<ClassExpressionNode>(node)->_superClass;

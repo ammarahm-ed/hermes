@@ -52,6 +52,7 @@ RUNTIME_HV_FIELD(setConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(setPrototype, JSObject)
 RUNTIME_HV_FIELD(setPrototypeAdd, NativeFunction)
 RUNTIME_HV_FIELD(setPrototypeValues, NativeFunction)
+RUNTIME_HV_FIELD(setPrototypeHas, NativeFunction)
 RUNTIME_HV_FIELD(setIteratorPrototype, JSObject)
 RUNTIME_HV_FIELD(mapConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(mapPrototype, JSObject)
@@ -104,7 +105,6 @@ RUNTIME_HV_FIELD(functionPrototypeSymbolHasInstance, NativeFunction)
 // revisit this in stage 2
 RUNTIME_HV_FIELD(specialCodeBlockDomain_, Domain)
 
-RUNTIME_HV_FIELD(global_, JSObject)
 RUNTIME_HV_FIELD(thrownValue_, HermesValue)
 RUNTIME_HV_FIELD(keptObjects_, JSMapImpl<CellKind::JSSetKind>)
 #ifdef HERMES_ENABLE_DEBUGGER

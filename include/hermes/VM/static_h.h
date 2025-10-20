@@ -12,6 +12,8 @@
 #include "hermes/VM/sh_legacy_value.h"
 #include "hermes/VM/sh_mirror.h"
 #include "hermes/VM/sh_runtime.h"
+#include "hermes/VM/sh_stack_frame.h"
+#include "hermes/VMLayouts/sh_stack_frame_layout.h"
 
 #include <math.h>
 #include <setjmp.h>
@@ -85,6 +87,7 @@ typedef struct SHUnit {
   /// Sizes of the property caches.
   uint32_t num_read_prop_cache_entries;
   uint32_t num_write_prop_cache_entries;
+  uint32_t num_private_name_cache_entries;
 
   /// Pool of ASCII strings.
   const char *ascii_pool;
@@ -112,6 +115,10 @@ typedef struct SHUnit {
   /// `num_read_prop_cache_entries` elements.  Must be zeroed
   /// initially.
   SHReadPropertyCacheEntry *read_prop_cache;
+  /// Private name cache. Points to an array with
+  /// `num_private_name_cache_entries` elements.  Must be zeroed
+  /// initially.
+  SHPrivateNameCacheEntry *private_name_cache;
 
   /// Object key buffer.
   const unsigned char *obj_key_buffer;
@@ -285,8 +292,18 @@ SHERMES_EXPORT void
 _sh_pop_locals(SHRuntime *shr, SHLocals *locals, SHLegacyValue *savedSP);
 
 /// Index 0 loads "this", 1 the first param, etc.
-SHERMES_EXPORT SHLegacyValue
-_sh_ljs_param(SHLegacyValue *frame, uint32_t index);
+static inline SHLegacyValue _sh_ljs_param(
+    SHLegacyValue *frame,
+    uint32_t index) {
+  uint32_t argCount = _sh_stackframe_get_argcount(frame);
+  if (SH_LIKELY(index <= argCount)) {
+    // Subtract 1 (just like the interpreter) because -1 is used for "this" in
+    // _sh_stackframe_get_arg_ptr.
+    return *_sh_stackframe_get_arg_ptr(frame, (int32_t)index - 1);
+  } else {
+    return _sh_ljs_undefined();
+  }
+}
 
 /// Coerce a value assumed to contain 'this' to an object using non-strict
 /// mode rules. Primitives are boxed, \c null or \c undefed produce the global
@@ -529,29 +546,36 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_create_class(
     SHLegacyValue *homeObjectOut,
     SHLegacyValue *superClass);
 
-SHERMES_EXPORT SHLegacyValue _sh_ljs_get_global_object(SHRuntime *shr);
+static inline SHLegacyValue _sh_ljs_get_global_object(SHRuntime *shr) {
+  return shr->global_;
+}
+
 SHERMES_EXPORT void _sh_ljs_declare_global_var(SHRuntime *shr, SHSymbolID name);
 
 SHERMES_EXPORT void _sh_ljs_put_by_id_loose_rjs(
     SHRuntime *shr,
+    SHUnit *unit,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
     SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_put_by_id_strict_rjs(
     SHRuntime *shr,
+    SHUnit *unit,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
     SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_try_put_by_id_loose_rjs(
     SHRuntime *shr,
+    SHUnit *unit,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
     SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_try_put_by_id_strict_rjs(
     SHRuntime *shr,
+    SHUnit *unit,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
@@ -602,50 +626,65 @@ static inline SHLegacyValue _sh_ljs_get_by_val_rjs(
   return _sh_ljs_get_by_val_with_receiver_rjs(shr, source, key, source);
 }
 
+SHERMES_EXPORT SHLegacyValue _sh_ljs_get_own_private_by_sym(
+    SHRuntime *shr,
+    const SHLegacyValue *source,
+    const SHLegacyValue *privateNameKey,
+    SHPrivateNameCacheEntry *privateNameCacheEntry);
+
 /// Get a property from the given object \p source given a valid array index
 /// \p key.
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_get_by_index_rjs(SHRuntime *shr, SHLegacyValue *source, uint32_t key);
 
+/// Put an enumerable property by string id.
+SHERMES_EXPORT void _sh_ljs_define_own_by_id(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHSymbolID key,
+    SHLegacyValue *value,
+    SHWritePropertyCacheEntry *cacheEntry);
 /// Put an enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_own_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *value);
 /// Put a non-enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_own_ne_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_ne_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *value);
 
-SHERMES_EXPORT void _sh_ljs_put_own_by_index(
+SHERMES_EXPORT void _sh_ljs_define_own_by_index(
     SHRuntime *shr,
     SHLegacyValue *target,
     uint32_t key,
     SHLegacyValue *value);
 
-/// Put an enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_new_own_by_id(
-    SHRuntime *shr,
-    SHLegacyValue *target,
-    SHSymbolID key,
-    SHLegacyValue *value);
-/// Put a non-enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_new_own_ne_by_id(
-    SHRuntime *shr,
-    SHLegacyValue *target,
-    SHSymbolID key,
-    SHLegacyValue *value);
-
-SHERMES_EXPORT void _sh_ljs_put_own_getter_setter_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_getter_setter_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *getter,
     SHLegacyValue *setter,
     bool isEnumerable);
+
+/// Add a new private field. This must be a new property.
+SHERMES_EXPORT void _sh_ljs_add_own_private_by_sym(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHLegacyValue *key,
+    SHLegacyValue *value);
+
+/// Store to a private field.
+SHERMES_EXPORT void _sh_ljs_put_own_private_by_sym(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHLegacyValue *privateNameKey,
+    SHLegacyValue *value,
+    SHPrivateNameCacheEntry *privateNameCacheEntry);
 
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_del_by_id_strict(SHRuntime *shr, SHLegacyValue *target, SHSymbolID key);
@@ -720,6 +759,11 @@ SHERMES_EXPORT SHLegacyValue
 _sh_ljs_mod_rjs(SHRuntime *shr, const SHLegacyValue *a, const SHLegacyValue *b);
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_is_in_rjs(SHRuntime *shr, SHLegacyValue *name, SHLegacyValue *obj);
+SHERMES_EXPORT SHLegacyValue _sh_ljs_private_is_in_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *privateName,
+    SHLegacyValue *target,
+    SHPrivateNameCacheEntry *cacheEntry);
 SHERMES_EXPORT SHLegacyValue _sh_ljs_instance_of_rjs(
     SHRuntime *shr,
     SHLegacyValue *object,
@@ -762,6 +806,9 @@ _sh_ljs_minus_rjs(SHRuntime *shr, const SHLegacyValue *n);
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_add_empty_string_rjs(SHRuntime *shr, const SHLegacyValue *a);
 
+SHERMES_EXPORT SHLegacyValue
+_sh_ljs_create_private_name(SHRuntime *shr, SHSymbolID descStrID);
+
 /// Concatenate \p argCount strings together into a new StringPrimitive.
 /// \param argCount the number of varargs that follow.
 /// \param ... the (const SHLegacyValue *) string arguments to concatenate.
@@ -783,9 +830,16 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_new_object_with_buffer(
     uint32_t shapeTableIndex,
     uint32_t valBufferOffset);
 
-/// \p sizeHint the size of the resultant array.
-SHERMES_EXPORT SHLegacyValue
-_sh_ljs_new_array(SHRuntime *shr, uint32_t sizeHint);
+/// Like _sh_ljs_new_object_with_buffer, but also takes a \p parent.
+SHERMES_EXPORT SHLegacyValue _sh_ljs_new_object_with_buffer_and_parent(
+    SHRuntime *shr,
+    SHUnit *unit,
+    SHLegacyValue *parent,
+    uint32_t shapeTableIndex,
+    uint32_t valBufferOffset);
+
+/// \p size the size of the resultant array.
+SHERMES_EXPORT SHLegacyValue _sh_ljs_new_array(SHRuntime *shr, uint32_t size);
 
 /// \p numElements the size of the resultant array.
 /// \p numLiterals the number of literals to read off the buffer
@@ -801,12 +855,23 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_new_array_with_buffer(
 /// \p newTarget is the new.target value in the function.
 /// \p shapeTableIndex is the index into the shape table where the serialized
 ///   keys for this operation are stored.
+/// \p cacheEntry is the cache entry for this operation.
 SHERMES_EXPORT void _sh_ljs_cache_new_object(
     SHRuntime *shr,
     SHUnit *unit,
     SHLegacyValue *thisArg,
     SHLegacyValue *newTarget,
-    uint32_t shapeTableIndex);
+    uint32_t shapeTableIndex,
+    void **cacheEntry);
+
+/// Define an own property in a dense JavaScript array at a specific index.
+/// Requires that the array is dense and that the ArrayStorage
+/// underlying it has a size which is greater than the arrayIndex operand.
+SHERMES_EXPORT void _sh_ljs_define_own_in_dense_array(
+    SHRuntime *shr,
+    SHLegacyValue *array,
+    SHLegacyValue *prop,
+    uint32_t idx);
 
 /// \return a newly created fast array with the given \p capacity.
 SHERMES_EXPORT SHLegacyValue
@@ -1147,11 +1212,6 @@ static inline SHLegacyValue _sh_typed_load_parent(
       .raw = ((SHJSObject *)_sh_ljs_get_pointer(*object))->parent};
   return _sh_ljs_object(_sh_cp_decode_non_null(shr, parent));
 }
-
-SHERMES_EXPORT void _sh_typed_store_parent(
-    SHRuntime *shr,
-    const SHLegacyValue *storedValue,
-    const SHLegacyValue *object);
 
 /// If the double value is within representable integer range, convert it,
 /// otherwise throw.

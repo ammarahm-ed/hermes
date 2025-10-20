@@ -39,6 +39,11 @@
 #ifndef DEFINE_RET_TARGET
 #define DEFINE_RET_TARGET(...)
 #endif
+// Whenever a new value buffer user is added, be sure to add a new
+// handler in the delta mode code for literal buffers.
+#ifndef DEFINE_VALUE_BUFFER_USER
+#define DEFINE_VALUE_BUFFER_USER(...)
+#endif
 #ifndef ASSERT_EQUAL_LAYOUT1
 #define ASSERT_EQUAL_LAYOUT1(a, b)
 #endif
@@ -82,9 +87,19 @@ DEFINE_OPCODE_0(Unreachable)
 /// Any non-constant elements can be set afterwards with PutOwnByInd.
 /// Arg1 is the destination.
 /// Arg2 is the index in the object shape table.
-/// Arg3 is the index in the object val buffer table.
+/// Arg3 is the offset in the object val buffer table.
 DEFINE_OPCODE_3(NewObjectWithBuffer, Reg8, UInt16, UInt16)
 DEFINE_OPCODE_3(NewObjectWithBufferLong, Reg8, UInt32, UInt32)
+DEFINE_VALUE_BUFFER_USER(NewObjectWithBuffer)
+DEFINE_VALUE_BUFFER_USER(NewObjectWithBufferLong)
+
+/// Create an object from a static map of values, setting its parent.
+/// Arg1 is the destination.
+/// Arg2 is the parent.
+/// Arg3 is the index in the object shape table.
+/// Arg4 is the offset in the object val buffer table.
+DEFINE_OPCODE_4(NewObjectWithBufferAndParent, Reg8, Reg8, UInt32, UInt32)
+DEFINE_VALUE_BUFFER_USER(NewObjectWithBufferAndParent)
 
 /// Create a new, empty Object using the built-in constructor (regardless of
 /// whether it was overridden).
@@ -103,9 +118,11 @@ DEFINE_OPCODE_2(NewObjectWithParent, Reg8, Reg8)
 /// Arg1 is the destination.
 /// Arg2 is a preallocation size hint.
 /// Arg3 is the number of static elements.
-/// Arg4 is the index in the array buffer table.
+/// Arg4 is the offset in the array buffer table.
 DEFINE_OPCODE_4(NewArrayWithBuffer, Reg8, UInt16, UInt16, UInt16)
 DEFINE_OPCODE_4(NewArrayWithBufferLong, Reg8, UInt16, UInt16, UInt32)
+DEFINE_VALUE_BUFFER_USER(NewArrayWithBuffer)
+DEFINE_VALUE_BUFFER_USER(NewArrayWithBufferLong)
 
 /// Create a new array of a given size.
 /// Arg1 = new Array(Arg2)
@@ -137,8 +154,10 @@ DEFINE_OPCODE_2(FastArrayAppend, Reg8, Reg8)
 
 /// Perform a lookup on the new object cache.
 /// Arg1 = the 'this' value to lookup
-/// Arg2 = the index in the shape table.
-DEFINE_OPCODE_2(CacheNewObject, Reg8, UInt32)
+/// Arg2 = the new target to determine whether it is a constructor call
+/// Arg3 = the index in the shape table.
+/// Arg4 = the cache index within the current function
+DEFINE_OPCODE_4(CacheNewObject, Reg8, Reg8, UInt32, UInt8)
 
 /// Arg1 = Arg2 (Register copy)
 DEFINE_OPCODE_2(Mov, Reg8, Reg8)
@@ -243,6 +262,14 @@ DEFINE_OPCODE_3(InstanceOf, Reg8, Reg8, Reg8)
 
 /// Arg1 = Arg2 in Arg3 (JS relational 'in')
 DEFINE_OPCODE_3(IsIn, Reg8, Reg8, Reg8)
+
+/// Arg1 = Arg2 in Arg3 (JS relational 'in' for private names.)
+/// Arg2 must be a symbol.
+/// Arg4 is a private name cache index used to speed up the above operation.
+/// Note that this performs different logic than a normal `in` check. This
+/// instruction does not consult the prototype chain or trigger any proxy
+/// traps. It is a direct check on the own properties of the input object.
+DEFINE_OPCODE_4(PrivateIsIn, Reg8, Reg8, Reg8, Reg8)
 
 /// Arg1 = typeof Arg2 is in Arg3 (TypeOfIsTypes, see Typeof.h)
 DEFINE_OPCODE_3(TypeOfIs, Reg8, Reg8, UInt16)
@@ -367,21 +394,6 @@ OPERAND_STRING_ID(TryPutByIdStrict, 4)
 OPERAND_STRING_ID(TryPutByIdLooseLong, 4)
 OPERAND_STRING_ID(TryPutByIdStrictLong, 4)
 
-/// Create a new own property on an object. This is similar to PutById, but
-/// the destination must be an object, it only deals with own properties,
-/// ignoring the prototype chain, and the property must not already be defined.
-/// Similarly to PutById, the property name cannot be a valid array index.
-/// Arg1 is the destination object, which is known to be an object.
-/// Arg2 is the value to write.
-/// Arg3 is the string table ID of the property name.
-/// Arg1[stringtable[Arg3]] = Arg2
-DEFINE_OPCODE_3(PutNewOwnByIdShort, Reg8, Reg8, UInt8)
-DEFINE_OPCODE_3(PutNewOwnById, Reg8, Reg8, UInt16)
-DEFINE_OPCODE_3(PutNewOwnByIdLong, Reg8, Reg8, UInt32)
-OPERAND_STRING_ID(PutNewOwnByIdShort, 3)
-OPERAND_STRING_ID(PutNewOwnById, 3)
-OPERAND_STRING_ID(PutNewOwnByIdLong, 3)
-
 /// Set an existing own property identified at a slot index.
 /// Arg1 is the destination object.
 /// Arg2 is the value to write.
@@ -398,24 +410,12 @@ DEFINE_OPCODE_3(PutOwnBySlotIdxLong, Reg8, Reg8, UInt32)
 DEFINE_OPCODE_3(GetOwnBySlotIdx, Reg8, Reg8, UInt8)
 DEFINE_OPCODE_3(GetOwnBySlotIdxLong, Reg8, Reg8, UInt32)
 
-/// Create a new non-enumerable own property on an object. This is the same as
-/// PutNewOwnById, but creates the property with different enumerability.
-/// Arg1 is the destination object.
-/// Arg2 is the value to write.
-/// Arg3 is the string table ID of the property name.
-/// Arg1[stringtable[Arg3]] = Arg2
-DEFINE_OPCODE_3(PutNewOwnNEById, Reg8, Reg8, UInt16)
-DEFINE_OPCODE_3(PutNewOwnNEByIdLong, Reg8, Reg8, UInt32)
-OPERAND_STRING_ID(PutNewOwnNEById, 3)
-OPERAND_STRING_ID(PutNewOwnNEByIdLong, 3)
-
-// The "NE" versions must be ordered after the "normal" versions.
-ASSERT_MONOTONE_INCREASING(
-    PutNewOwnByIdShort,
-    PutNewOwnById,
-    PutNewOwnByIdLong,
-    PutNewOwnNEById,
-    PutNewOwnNEByIdLong)
+/// Define an object own property by string index.
+/// Arg1[stringtable[Arg4]] = Arg2.
+/// Arg3 is a cache index.
+DEFINE_OPCODE_4(DefineOwnById, Reg8, Reg8, UInt8, UInt16)
+DEFINE_OPCODE_4(DefineOwnByIdLong, Reg8, Reg8, UInt8, UInt32)
+OPERAND_STRING_ID(DefineOwnByIdLong, 4)
 
 /// Assign a value to a constant integer own property which will be created as
 /// enumerable. This is used (potentially in conjunction with
@@ -423,6 +423,18 @@ ASSERT_MONOTONE_INCREASING(
 /// Arg1[Arg3] = Arg2;
 DEFINE_OPCODE_3(DefineOwnByIndex, Reg8, Reg8, UInt8)
 DEFINE_OPCODE_3(DefineOwnByIndexL, Reg8, Reg8, UInt32)
+
+/// Define an own property in a dense JavaScript array at a specific index.
+/// Requires that the array is dense and that the ArrayStorage
+/// underlying it has a size which is greater than the arrayIndex operand.
+/// Arg1[Arg3] = Arg2;
+/// Arg1 is the dense array object where the property will be defined.
+/// Arg2 is the value to be stored.
+/// Arg3 is the array index where the property will be stored.
+/// NOTE: The "L" version only goes up to 16-bit array indices,
+/// because NewArray only takes UInt16 argument.
+DEFINE_OPCODE_3(DefineOwnInDenseArray, Reg8, Reg8, UInt8)
+DEFINE_OPCODE_3(DefineOwnInDenseArrayL, Reg8, Reg8, UInt16)
 
 /// Set an own property identified by value.
 /// Arg1 is the destination object.
@@ -465,6 +477,27 @@ DEFINE_OPCODE_5(PutByValWithReceiver, Reg8, Reg8, Reg8, Reg8, UInt8)
 /// Arg1 = delete Arg2[Arg3]
 /// Arg4 : Integer value set to 1 for strict mode semantics, 0 for loose.
 DEFINE_OPCODE_4(DelByVal, Reg8, Reg8, Reg8, UInt8)
+
+/// Add a private property to an object. This must be a new property.
+/// The property will be added with the privateName flag set on the PropertyFlags.
+/// Arg1[Arg2] = Arg3
+DEFINE_OPCODE_3(AddOwnPrivateBySym, Reg8, Reg8, Reg8)
+
+/// Get a private property from an object.
+/// Arg1 = Arg2[Arg5]
+/// Arg1 is the result
+/// Arg2 is the object to read from.
+/// Arg3 is a private name cache index used to speed up the above operation.
+/// Arg4 is the symbol value of the private name.
+DEFINE_OPCODE_4(GetOwnPrivateBySym, Reg8, Reg8, UInt8, Reg8)
+
+/// Store a private property to an object.
+/// Arg1[Arg5] = Arg2
+/// Arg1 is the object to store to.
+/// Arg2 is the value to store.
+/// Arg3 is a private name cache index used to speed up the above operation.
+/// Arg4 is the symbol value of the private name.
+DEFINE_OPCODE_4(PutOwnPrivateBySym, Reg8, Reg8, UInt8, Reg8)
 
 /// Add a getter and a setter for a property by value.
 /// Object.defineProperty(Arg1, Arg2, { get: Arg3, set: Arg4 }).
@@ -633,6 +666,11 @@ DEFINE_OPCODE_1(Throw, Reg8)
 /// Arg2 is the value to check
 DEFINE_OPCODE_2(ThrowIfEmpty, Reg8, Reg8)
 
+/// If Arg2 is Undefined, throw ReferenceError, otherwise move it into Arg1.
+/// Arg1 is the destination of the return value
+/// Arg2 is the value to check
+DEFINE_OPCODE_2(ThrowIfUndefined, Reg8, Reg8)
+
 /// If Arg1 is not Empty, throw ReferenceError.
 /// Arg1 is the checked this of a derived constructor.
 DEFINE_OPCODE_1(ThrowIfThisInitialized, Reg8)
@@ -763,6 +801,15 @@ DEFINE_OPCODE_2(ToInt32, Reg8, Reg8)
 /// with ToPrimitive (ES5.1 9.1) and ToString (ES5.1 9.8).
 DEFINE_OPCODE_2(AddEmptyString, Reg8, Reg8)
 
+/// Create a new primitive symbol, taking in a string description as input.
+/// This is almost equivalent to the following JS, with the important distinction
+/// an object is not computed- just the raw SymbolID.
+///   Arg1 is the result.
+///   Arg2 is the string id for the symbol description.
+///   Arg1 = new Symbol(Arg2)
+DEFINE_OPCODE_2(CreatePrivateName, Reg8, UInt32)
+OPERAND_STRING_ID(CreatePrivateName, 2)
+
 // `arguments` opcodes all work with a lazy register that contains either
 // undefined or a reified array. On the first ReifyArguments, the register
 // will be populated and the rest of the instruction will access it directly.
@@ -806,9 +853,9 @@ OPERAND_STRING_ID(CreateRegExp, 3)
 /// input or to the default block if out of range (or not right type)
 /// Arg 1 is the value to be branched upon
 /// Arg 2 is the relative offset of the jump table to be used by this
-/// instruction. Jump tables are appended to the bytecode. Arg 3 is the relative
-/// offset for the "default" jump. Arg 4 is the unsigned min value, if arg 1 is
-/// less than this value jmp to
+///   instruction. Jump tables are appended to the bytecode.
+/// Arg 3 is the relative offset for the "default" jump.
+/// Arg 4 is the unsigned min value, if arg 1 is/ less than this value jmp to
 ///   default block
 /// Arg 5 is the unsigned max value, if arg 1 is greater than this value jmp to
 ///   default block.
@@ -817,7 +864,22 @@ OPERAND_STRING_ID(CreateRegExp, 3)
 /// is located at offset ip + arg2 + arg1 - arg4. We subtract arg4 to avoid
 /// wasting space when compiling denses switches that do not start at zero. Note
 /// that Arg2 is *unaligned* it is dynamically aligned at runtime.
-DEFINE_OPCODE_5(SwitchImm, Reg8, UInt32, Addr32, UInt32, UInt32)
+DEFINE_OPCODE_5(UIntSwitchImm, Reg8, UInt32, Addr32, UInt32, UInt32)
+
+/// All-string switch (switch all of whose case labels are string literals).
+/// Arg 1 is the value to be branched upon
+/// Arg 2 is a global index for this StringSwitchImm instruction in the
+/// bytecode file.
+/// Arg 3 is the relative offset of the string switch table.  A string switch
+///   table is a sequence of pairs:
+///   <UInt32 string table index, UInt32 jump targets>
+/// Arg 4 is the relative offset for the "default" jump.
+/// Arg 5 is the size of the string switch table.
+///
+/// Given the above, the jump table entry for a given value (that is in range)
+/// is located at offset ip + arg3.  Note that Arg3 is *unaligned*; it is
+/// dynamically aligned at runtime.
+DEFINE_OPCODE_5(StringSwitchImm, Reg8, UInt32, UInt32, Addr32, UInt32)
 
 /// Create a generator.
 /// Arg1 is the register in which to store the generator.
@@ -860,10 +922,6 @@ DEFINE_OPCODE_2(IteratorClose, Reg8, UInt8)
 /// Arg1 [out] is the result.
 /// Arg2 [in] is the source (must be an object).
 DEFINE_OPCODE_2(TypedLoadParent, Reg8, Reg8)
-
-/// Arg1 is the new parent.
-/// Arg2 is the target (must be an object).
-DEFINE_OPCODE_2(TypedStoreParent, Reg8, Reg8)
 
 // Jump instructions must be defined through the following DEFINE_JUMP macros.
 // The numeric suffix indicates number of operands the instruction takes.
@@ -948,8 +1006,6 @@ ASSERT_EQUAL_LAYOUT3(PutByIdLoose, PutByIdLooseLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, PutByIdStrictLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, TryPutByIdLooseLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, TryPutByIdStrictLong)
-ASSERT_EQUAL_LAYOUT3(PutNewOwnById, PutNewOwnNEById)
-ASSERT_EQUAL_LAYOUT3(PutNewOwnByIdLong, PutNewOwnNEByIdLong)
 ASSERT_EQUAL_LAYOUT3(Add, AddN)
 ASSERT_EQUAL_LAYOUT3(Sub, SubN)
 ASSERT_EQUAL_LAYOUT3(Mul, MulN)
@@ -976,6 +1032,7 @@ ASSERT_EQUAL_LAYOUT2(CallWithNewTarget, CallWithNewTargetLong)
 #undef DEFINE_OPCODE
 #undef DEFINE_JUMP_LONG_VARIANT
 #undef DEFINE_RET_TARGET
+#undef DEFINE_VALUE_BUFFER_USER
 #undef ASSERT_EQUAL_LAYOUT1
 #undef ASSERT_EQUAL_LAYOUT2
 #undef ASSERT_EQUAL_LAYOUT3

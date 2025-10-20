@@ -28,6 +28,10 @@ try {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -46,49 +50,49 @@ try {
 // CHECK-NEXT:i6[ASCII, 32..36] #A689F65B: print
 
 // CHECK:Function<global>(1 params, 15 registers, 0 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    ProfilePoint      9
 // CHECK-NEXT:    DeclareGlobalVar  "condition"
 // CHECK-NEXT:    LoadConstUndefined r3
-// CHECK-NEXT:    LoadConstUndefined r5
-// CHECK-NEXT:    GetGlobalObject   r1
-// CHECK-NEXT:    LoadConstFalse    r0
-// CHECK-NEXT:    PutByIdStrict     r1, r0, 1, "condition"
+// CHECK-NEXT:    LoadConstUndefined r0
+// CHECK-NEXT:    GetGlobalObject   r2
+// CHECK-NEXT:    LoadConstFalse    r1
+// CHECK-NEXT:    PutByIdStrict     r2, r1, 0, "condition"
 // CHECK-NEXT:L8:
 // CHECK-NEXT:    ProfilePoint      6
 // CHECK-NEXT:L6:
 // CHECK-NEXT:    ProfilePoint      4
-// CHECK-NEXT:    TryGetById        r2, r1, 1, "print"
-// CHECK-NEXT:    GetByIdShort      r4, r1, 2, "condition"
-// CHECK-NEXT:    LoadConstString   r0, "no"
-// CHECK-NEXT:    JmpFalse          L1, r4
+// CHECK-NEXT:    TryGetById        r4, r2, 0, "print"
+// CHECK-NEXT:    GetByIdShort      r5, r2, 1, "condition"
+// CHECK-NEXT:    LoadConstString   r1, "no"
+// CHECK-NEXT:    JmpFalse          L1, r5
 // CHECK-NEXT:    ProfilePoint      3
-// CHECK-NEXT:    LoadConstString   r0, "yes"
+// CHECK-NEXT:    LoadConstString   r1, "yes"
 // CHECK-NEXT:L1:
 // CHECK-NEXT:    ProfilePoint      2
-// CHECK-NEXT:    Call2             r5, r2, r3, r0
+// CHECK-NEXT:    Call2             r0, r4, r3, r1
 // CHECK-NEXT:L7:
 // CHECK-NEXT:    ProfilePoint      1
-// CHECK-NEXT:    TryGetById        r2, r1, 1, "print"
-// CHECK-NEXT:    LoadConstString   r0, "rethrowing"
-// CHECK-NEXT:    Call2             r5, r2, r3, r0
+// CHECK-NEXT:    TryGetById        r4, r2, 0, "print"
+// CHECK-NEXT:    LoadConstString   r1, "rethrowing"
+// CHECK-NEXT:    Call2             r0, r4, r3, r1
 // CHECK-NEXT:    Jmp               L3
 // CHECK-NEXT:L2:
-// CHECK-NEXT:    Catch             r0
+// CHECK-NEXT:    Catch             r1
 // CHECK-NEXT:    ProfilePoint      5
-// CHECK-NEXT:    TryGetById        r4, r1, 1, "print"
-// CHECK-NEXT:    LoadConstString   r2, "rethrowing"
-// CHECK-NEXT:    Call2             r5, r4, r3, r2
-// CHECK-NEXT:    Throw             r0
+// CHECK-NEXT:    TryGetById        r5, r2, 0, "print"
+// CHECK-NEXT:    LoadConstString   r4, "rethrowing"
+// CHECK-NEXT:    Call2             r0, r5, r3, r4
+// CHECK-NEXT:    Throw             r1
 // CHECK-NEXT:L4:
-// CHECK-NEXT:    Catch             r0
+// CHECK-NEXT:    Catch             r1
 // CHECK-NEXT:    ProfilePoint      8
-// CHECK-NEXT:    TryGetById        r1, r1, 1, "print"
-// CHECK-NEXT:    GetByIdShort      r0, r0, 3, "stack"
-// CHECK-NEXT:    Call2             r5, r1, r3, r0
+// CHECK-NEXT:    TryGetById        r2, r2, 0, "print"
+// CHECK-NEXT:    GetByIdShort      r1, r1, 2, "stack"
+// CHECK-NEXT:    Call2             r0, r2, r3, r1
 // CHECK-NEXT:L3:
 // CHECK-NEXT:    ProfilePoint      7
-// CHECK-NEXT:    Ret               r5
+// CHECK-NEXT:    Ret               r0
 
 // CHECK:Exception Handlers:
 // CHECK-NEXT:0: start = L6, end = L7, target = L2
@@ -121,4 +125,4 @@ try {
 // CHECK-NEXT:    bc 108: line 18 col 3
 // CHECK-NEXT:    bc 114: line 18 col 10
 // CHECK-NEXT:    bc 119: line 18 col 8
-// CHECK-NEXT:  0x003d  end of debug source table
+// CHECK-NEXT:  0x003e  end of debug source table

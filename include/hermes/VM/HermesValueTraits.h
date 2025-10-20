@@ -52,7 +52,7 @@ HERMES_VM_GCOBJECT(JSDataView);
 HERMES_VM_GCOBJECT(JSDate);
 HERMES_VM_GCOBJECT(JSError);
 HERMES_VM_GCOBJECT(JSFunction);
-HERMES_VM_GCOBJECT(JSDerivedClass);
+HERMES_VM_GCOBJECT(JSClass);
 HERMES_VM_GCOBJECT(JSGeneratorObject);
 HERMES_VM_GCOBJECT(JSNumber);
 HERMES_VM_GCOBJECT(JSObject);
@@ -66,7 +66,7 @@ HERMES_VM_GCOBJECT(JSTypedArrayBase);
 HERMES_VM_GCOBJECT(JSWeakMapImplBase);
 HERMES_VM_GCOBJECT(JSWeakRef);
 HERMES_VM_GCOBJECT(NativeJSFunction);
-HERMES_VM_GCOBJECT(NativeJSDerivedClass);
+HERMES_VM_GCOBJECT(NativeJSClass);
 HERMES_VM_GCOBJECT(NativeConstructor);
 HERMES_VM_GCOBJECT(NativeFunction);
 HERMES_VM_GCOBJECT(NativeState);
@@ -76,20 +76,18 @@ HERMES_VM_GCOBJECT(StringPrimitive);
 
 namespace testhelpers {
 struct DummyObject;
-}
+struct LargeDummyObject;
+} // namespace testhelpers
 template <>
 struct IsGCObject<testhelpers::DummyObject> : public std::true_type {};
+template <>
+struct IsGCObject<testhelpers::LargeDummyObject> : public std::true_type {};
 
 // Typed arrays use templates and cannot use the macro above
 template <typename T, CellKind C>
 class JSTypedArray;
 template <typename T, CellKind C>
 struct IsGCObject<JSTypedArray<T, C>> : public std::true_type {};
-
-template <typename T>
-class HashMapEntryBase;
-template <typename Data>
-struct IsGCObject<HashMapEntryBase<Data>> : public std::true_type {};
 
 template <CellKind C>
 class JSMapImpl;
@@ -246,6 +244,12 @@ struct StringTraitsImpl {
 template <>
 struct HermesValueTraits<StringPrimitive, true>
     : public StringTraitsImpl<StringPrimitive> {};
+template <>
+struct HermesValueTraits<ExternalStringPrimitive<char>, true>
+    : public StringTraitsImpl<ExternalStringPrimitive<char>> {};
+template <>
+struct HermesValueTraits<ExternalStringPrimitive<char16_t>, true>
+    : public StringTraitsImpl<ExternalStringPrimitive<char16_t>> {};
 template <>
 struct HermesValueTraits<BufferedStringPrimitive<char>, true>
     : public StringTraitsImpl<BufferedStringPrimitive<char>> {};

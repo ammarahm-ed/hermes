@@ -140,10 +140,10 @@ void analyzeCreateCallable(BaseCreateCallableInst *create) {
   IRBuilder builder(M);
   auto *closureVarScope = llvh::dyn_cast<VariableScope>(create->getVarScope());
 
-  // The only kind of function which does not expect a made `this` parameter in
-  // a construct call is a derived class constructor.
-  bool funcExpectsThisInConstruct =
-      F->getDefinitionKind() != Function::DefinitionKind::ES6DerivedConstructor;
+  // Class constructors do not expect `this` to be allocated by the caller.
+  bool funcExpectsThisInConstruct = F->getDefinitionKind() !=
+          Function::DefinitionKind::ES6DerivedConstructor &&
+      F->getDefinitionKind() != Function::DefinitionKind::ES6BaseConstructor;
 
   /// Define an element in the worklist below.
   struct UserInfo {
@@ -180,8 +180,6 @@ void analyzeCreateCallable(BaseCreateCallableInst *create) {
   // For example, if the same function is stored to two vars we need
   // to avoid going back and forth between the corresponding loads.
   llvh::SmallPtrSet<Instruction *, 2> visited{};
-
-  IRBuilder::InstructionDestroyer destroyer{};
 
   worklist.push_back(
       {create,
@@ -230,29 +228,29 @@ void analyzeCreateCallable(BaseCreateCallableInst *create) {
 
       if (auto *CTI = llvh::dyn_cast<CreateThisInst>(closureUser)) {
         assert(
-            CTI->getClosure() == closureInst &&
-            "Closure must be closure argument to CreateThisInst");
-        if (funcExpectsThisInConstruct) {
-          // If the function must receive an object, then we know that the
-          // CreateThis will produce an object. Note that it may also throw, for
-          // instance if isAlwaysClosure is false, or if retrieving the
-          // .prototype property throws.
-          CTI->setType(Type::createObject());
-        } else {
-          // If a function does not expect any `this`, then we know that
-          // CreateThis will always produce undefined, or throw (as above).
-          CTI->replaceAllUsesWith(builder.getLiteralUndefined());
-          // If we know the closure operand is actually a closure, then we know
-          // CreateThis cannot throw, so we can remove it.
-          // TODO: Extend this to remove CreateThis even if it is not known to
-          //       be a closure, by detecting a subsequent call or speculative
-          //       inlining check that would throw instead.
+            (CTI->getClosure() == closureInst ||
+             CTI->getNewTarget() == closureInst) &&
+            "Unknown user");
+        if (CTI->getClosure() == closureInst) {
           if (isAlwaysClosure)
-            destroyer.add(CTI);
+            CTI->setFunctionCode(F);
+          if (funcExpectsThisInConstruct) {
+            // If the function must receive an object, then we know that the
+            // CreateThis will produce an object. Note that it may also throw,
+            // for instance if isAlwaysClosure is false, or if retrieving the
+            // .prototype property throws.
+            CTI->setType(Type::createObject());
+          } else {
+            // If a function does not expect any `this`, then we know that
+            // CreateThis will always produce undefined, or throw (as above).
+            CTI->replaceAllUsesWith(builder.getLiteralUndefined());
+          }
         }
-        // CreateThis leaks the closure because the created object can still
-        // access the function via its parent's `.constructor` prototype.
-        F->getAttributesRef(M)._allCallsitesKnownInStrictMode = false;
+        // CreateThis leaks the closure passed as the new target because the
+        // created object can still access the function via its parent's
+        // `.constructor` prototype.
+        if (CTI->getNewTarget() == closureInst)
+          F->getAttributesRef(M)._allCallsitesKnownInStrictMode = false;
         continue;
       }
 
@@ -454,6 +452,15 @@ void analyzeFunctionCallsites(Function *F) {
       assert(
           GCSI->getFunctionCode() == F &&
           "invalid use of Function as operand of GetClosureScopeInst");
+      continue;
+    }
+
+    if (auto *CTI = llvh::dyn_cast<CreateThisInst>(user)) {
+      // Ignore uses in CreateThisInst.
+      (void)CTI;
+      assert(
+          CTI->getFunctionCode() == F &&
+          "invalid use of Function as operand of CreateThisInst");
       continue;
     }
 

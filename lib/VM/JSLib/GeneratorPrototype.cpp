@@ -80,20 +80,26 @@ static CallResult<Handle<JSGeneratorObject>> generatorValidate(
 
 // The logic for ES6.0 25.3.1.(2|3|4) is handled by the inner
 // function. All we have to do here is give it the proper action and value.
-CallResult<HermesValue>
-generatorPrototypeResume(void *ctx, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> generatorPrototypeResume(void *ctx, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto generatorRes = generatorValidate(runtime, args.getThisHandle());
   if (LLVM_UNLIKELY(generatorRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
+
+  struct : public Locals {
+    PinnedValue<Callable> innerFunc;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
   Action action = *reinterpret_cast<Action *>(&ctx);
-  auto innerFunc = runtime.makeHandle(
-      JSGeneratorObject::getInnerFunction(runtime, generatorRes->get()));
+  lv.innerFunc =
+      JSGeneratorObject::getInnerFunction(runtime, generatorRes->get());
   auto value = args.getArgHandle(0);
   auto valueRes = Callable::executeCall2(
-      innerFunc,
+      lv.innerFunc,
       runtime,
-      innerFunc,
+      lv.innerFunc,
       HermesValue::encodeTrustedNumberValue((uint8_t)action),
       value.getHermesValue());
   if (LLVM_UNLIKELY(valueRes == ExecutionStatus::EXCEPTION)) {

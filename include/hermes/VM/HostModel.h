@@ -57,7 +57,13 @@ class FinalizableNativeFunction final : public NativeFunction {
       void *context,
       NativeFunctionPtr functionPtr,
       FinalizeNativeFunctionPtr finalizePtr)
-      : NativeFunction(runtime, parent, clazz, context, functionPtr),
+      : NativeFunction(
+            runtime,
+            parent,
+            clazz,
+            Runtime::makeNullHandle<Environment>(),
+            context,
+            functionPtr),
         finalizePtr_(finalizePtr) {}
 
  protected:
@@ -88,8 +94,9 @@ class HostObjectProxy : public DecoratedObject::Decoration {
 
   // This is called to query names of properties.  In case of failure it will
   // return \c ExecutionStatus::EXCEPTION, and set the runtime's thrown Value
-  // as appropriate.
-  virtual CallResult<Handle<JSArray>> getHostPropertyNames() = 0;
+  // as appropriate. The result is stored in the provided MutableHandle.
+  virtual ExecutionStatus getHostPropertyNames(
+      MutableHandle<JSArray> result) = 0;
 };
 
 class HostObject final : public DecoratedObject {
@@ -116,8 +123,8 @@ class HostObject final : public DecoratedObject {
     return getProxy()->set(name, value);
   }
 
-  CallResult<Handle<JSArray>> getHostPropertyNames() {
-    return getProxy()->getHostPropertyNames();
+  ExecutionStatus getHostPropertyNames(MutableHandle<JSArray> result) {
+    return getProxy()->getHostPropertyNames(result);
   }
 
   HostObjectProxy *getProxy() {

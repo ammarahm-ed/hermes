@@ -32,6 +32,8 @@ struct CodeGenerationSettings {
   bool test262{false};
   /// Whether we should emit TDZ checks.
   bool enableTDZ{false};
+  /// Whether we should emit fast (non-compliant) array destructuring.
+  bool enableFastDestructure{false};
   /// Dump register liveness intervals.
   bool dumpRegisterInterval{false};
   /// Print source location information in IR dumps.
@@ -58,7 +60,8 @@ struct OptimizationSettings {
 
   /// Maximum number of instructions (in addition to parameter handling)
   /// that is allowed for inlining of small functions.
-  unsigned inlineMaxSize{1};
+  static constexpr unsigned kDefaultInlineMaxSize = 50;
+  unsigned inlineMaxSize{kDefaultInlineMaxSize};
 
   /// Reuse property cache entries for same property name.
   bool reusePropCache{true};
@@ -76,6 +79,11 @@ struct OptimizationSettings {
   /// Whether to use old Mem2Reg pass instead of SimpleMem2Reg. This may produce
   /// better code for irreducible CFGs.
   bool useLegacyMem2Reg{false};
+
+  /// Whether to use a more complicated condition to prevent recursive inlining
+  /// (which will prevent unbounded code growth in "opt-to-fixed-point"
+  /// compilations).
+  bool limitRecursiveInlining{false};
 };
 
 enum class DebugInfoSetting {
@@ -236,8 +244,8 @@ class Context {
   /// Whether to parse TypeScript syntax.
   bool parseTS_{false};
 
-  /// Whether to convert ES6 classes to ES5 functions
-  bool convertES6Classes_{false};
+  /// Whether to enable support for async generators
+  bool enableAsyncGenerators_{false};
 
   /// Whether to enable support for ES6 block scoping.
   /// TODO: This is intended to provide a temporary way to configure block
@@ -346,6 +354,12 @@ class Context {
     return stringTable_.getIdentifier(str);
   }
 
+  /// Get or create a new identifier for the string value of a private name \p
+  /// str. The method copies the content of the string.
+  Identifier getPrivateNameIdentifier(UniqueString *str) {
+    return getIdentifier(llvh::Twine("#") + str->str());
+  }
+
   /// Return the textual representation of the identifier.
   llvh::StringRef toString(Identifier iden) {
     return iden.str();
@@ -424,16 +438,12 @@ class Context {
     return parseTS_;
   }
 
-  void setConvertES6Classes(bool convertES6Classes) {
-    convertES6Classes_ = convertES6Classes;
+  void setEnableAsyncGenerators(bool enableAsyncGenerators) {
+    enableAsyncGenerators_ = enableAsyncGenerators;
   }
 
-  bool getConvertES6Classes() const {
-#ifndef HERMES_FACEBOOK_BUILD
-    return convertES6Classes_;
-#else
-    return false;
-#endif
+  bool getEnableAsyncGenerators() const {
+    return enableAsyncGenerators_;
   }
 
   void setEnableES6BlockScoping(bool enableES6BlockScoping) {
@@ -503,6 +513,10 @@ class Context {
 
   bool getMetroRequireOpt() const {
     return optimizationSettings_.metroRequireOpt;
+  }
+
+  bool getLimitRecursiveInlining() const {
+    return optimizationSettings_.limitRecursiveInlining;
   }
 
   const CodeGenerationSettings &getCodeGenerationSettings() const {

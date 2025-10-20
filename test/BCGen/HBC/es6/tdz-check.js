@@ -22,6 +22,10 @@ function foo() {
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -35,18 +39,18 @@ function foo() {
 // CHECK-NEXT:i1[ASCII, 6..8] #9290584E: foo
 
 // CHECK:Function<global>(1 params, 3 registers, 0 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    CreateTopLevelEnvironment r1, 0
 // CHECK-NEXT:    DeclareGlobalVar  "foo"
 // CHECK-NEXT:    CreateClosure     r1, r1, Function<foo>
 // CHECK-NEXT:    GetGlobalObject   r2
-// CHECK-NEXT:    PutByIdLoose      r2, r1, 1, "foo"
+// CHECK-NEXT:    PutByIdLoose      r2, r1, 0, "foo"
 // CHECK-NEXT:    LoadConstUndefined r2
 // CHECK-NEXT:    Mov               r1, r2
 // CHECK-NEXT:    Ret               r1
 
 // CHECK:Function<foo>(1 params, 3 registers, 0 numbers, 0 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x000a, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x000b
 // CHECK-NEXT:    GetParentEnvironment r1, 0
 // CHECK-NEXT:    CreateEnvironment r1, r1, 1
 // CHECK-NEXT:    LoadConstEmpty    r2
@@ -65,6 +69,6 @@ function foo() {
 // CHECK-NEXT:  0x0000  function idx 0, starts at line 10 col 1
 // CHECK-NEXT:    bc 6: line 10 col 1
 // CHECK-NEXT:    bc 18: line 10 col 1
-// CHECK-NEXT:  0x000a  function idx 1, starts at line 10 col 1
+// CHECK-NEXT:  0x000b  function idx 1, starts at line 10 col 1
 // CHECK-NEXT:    bc 18: line 11 col 12
-// CHECK-NEXT:  0x0011  end of debug source table
+// CHECK-NEXT:  0x0013  end of debug source table

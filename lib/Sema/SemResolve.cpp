@@ -11,7 +11,6 @@
 #include "FlowChecker.h"
 #include "FlowTypesDumper.h"
 #include "SemanticResolver.h"
-#include "hermes/AST/ES6Class.h"
 #include "hermes/AST/ESTree.h"
 #include "hermes/Support/PerfSection.h"
 
@@ -49,9 +48,12 @@ class ASTPrinter {
     os_ << "\n";
   }
 
+#if HERMES_PARSE_FLOW
   bool shouldVisit(ESTree::TypeAnnotationNode *V) {
     return false;
   }
+#endif
+
   bool shouldVisit(ESTree::Node *V) {
     // If current parent node has been linearized, skip visiting children node.
     return !parentLinearized_;
@@ -160,9 +162,6 @@ bool resolveAST(
     flow::FlowContext *flowContext,
     ESTree::ProgramNode *root,
     const DeclarationFileListTy &ambientDecls) {
-  if (astContext.getConvertES6Classes())
-    transformES6Classes(astContext, root);
-
   PerfSection validation("Resolving JavaScript global AST");
   // Resolve the entire AST.
   DeclCollectorMapTy declCollectorMap{};
@@ -176,6 +175,7 @@ bool resolveAST(
   if (!resolver.run(root))
     return false;
 
+#if HERMES_PARSE_FLOW
   if (flowContext) {
     flow::FlowChecker checker(
         astContext, semCtx, *flowContext, declCollectorMap, true);
@@ -185,6 +185,7 @@ bool resolveAST(
     if (!lowerAST(astContext, semCtx, *flowContext, programNode))
       return false;
   }
+#endif
 
   return true;
 }

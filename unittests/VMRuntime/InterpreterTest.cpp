@@ -79,8 +79,8 @@ using namespace hermes::hbc;
 namespace {
 
 /// Convert all arguments to string and print them followed by new line.
-static CallResult<HermesValue>
-print(void *, Runtime &runtime, NativeArgs args) {
+static CallResult<HermesValue> print(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope scope(runtime);
   bool first = true;
 
@@ -180,7 +180,7 @@ TEST_F(InterpreterTest, SimpleSmokeTest) {
   instGen.emitLoadConstDoubleDirect(1, 2);
   instGen.emitSubN(2, 0, 1);
   instGen.emitGetGlobalObject(0);
-  instGen.emitGetById(1, 0, 1, printID);
+  instGen.emitGetById(1, 0, 0, printID);
   instGen.emitLoadConstUndefined(3);
   instGen.emitMov(
       static_cast<unsigned>(FRAME_SIZE + StackFrameLayout::ThisArg), 3);
@@ -197,13 +197,15 @@ TEST_F(InterpreterTest, SimpleSmokeTest) {
   ASSERT_EQ(detail::mapStringMayAllocate(*runtimeModule, "print"), printID);
   ASSERT_EQ(detail::mapStringMayAllocate(*runtimeModule, "result="), resultID);
 
-  auto printFn = runtime.makeHandle<NativeFunction>(
-      *NativeFunction::createWithoutPrototype(
-          runtime,
-          nullptr,
-          print,
-          Predefined::getSymbolID(Predefined::emptyString),
-          0));
+  auto printFn = runtime.makeHandle<NativeFunction>(*NativeFunction::create(
+      runtime,
+      runtime.functionPrototype,
+      Runtime::makeNullHandle<Environment>(),
+      nullptr,
+      print,
+      Predefined::getSymbolID(Predefined::emptyString),
+      0,
+      Runtime::makeNullHandle<JSObject>()));
 
   // Define the 'print' function.
   (void)JSObject::putNamed_RJS(
@@ -349,7 +351,7 @@ L1:
   SimpleBytecodeBuilder BMG;
   BytecodeInstructionGenerator instGen;
   emit(instGen, 1);
-  BMG.addFunction(1, FRAME_SIZE, instGen.acquireBytecode(), 255, 255);
+  BMG.addFunction(1, FRAME_SIZE, instGen.acquireBytecode(), 1, 0);
   auto *codeBlock = createSimpleCodeBlock(runtimeModule, runtime, BMG);
 
   Handle<JSFunction> factFn = runtime.makeHandle(JSFunction::create(
@@ -466,7 +468,7 @@ TEST_F(InterpreterTest, TestJmpBuiltinIs) {
   SimpleBytecodeBuilder BMG;
   BytecodeInstructionGenerator instGen;
   emit(instGen, 1);
-  BMG.addFunction(1, FRAME_SIZE, instGen.acquireBytecode(), 255, 255);
+  BMG.addFunction(1, FRAME_SIZE, instGen.acquireBytecode(), 1, 0);
   auto *codeBlock = createSimpleCodeBlock(runtimeModule, runtime, BMG);
 
   ASSERT_EQ(
@@ -523,8 +525,7 @@ TEST_F(InterpreterFunctionTest, TestToString) {
 #if defined(NDEBUG) && !defined(HERMES_UBSAN) && \
     !LLVM_THREAD_SANITIZER_BUILD && !LLVM_ADDRESS_SANITIZER_BUILD
 // Returns the native stack pointer of the callee frame.
-static CallResult<HermesValue>
-getSP(void *, Runtime &runtime, NativeArgs args) {
+static CallResult<HermesValue> getSP(void *, Runtime &runtime) {
   int dummy;
   return HermesValue::encodeNativePointer(&dummy);
 }
@@ -575,7 +576,7 @@ TEST_F(InterpreterTest, FrameSizeTest) {
   BytecodeInstructionGenerator instGen;
 
   instGen.emitGetGlobalObject(0);
-  instGen.emitGetById(1, 0, 1, getSPID);
+  instGen.emitGetById(1, 0, 0, getSPID);
   instGen.emitCall(0, 1, 0);
   instGen.emitRet(0);
 
@@ -584,13 +585,15 @@ TEST_F(InterpreterTest, FrameSizeTest) {
 
   ASSERT_EQ(detail::mapStringMayAllocate(*runtimeModule, "getSP"), getSPID);
 
-  auto getSPFn = runtime.makeHandle<NativeFunction>(
-      *NativeFunction::createWithoutPrototype(
-          runtime,
-          nullptr,
-          getSP,
-          Predefined::getSymbolID(Predefined::emptyString),
-          0));
+  auto getSPFn = runtime.makeHandle<NativeFunction>(*NativeFunction::create(
+      runtime,
+      runtime.functionPrototype,
+      Runtime::makeNullHandle<Environment>(),
+      nullptr,
+      getSP,
+      Predefined::getSymbolID(Predefined::emptyString),
+      0,
+      Runtime::makeNullHandle<JSObject>()));
 
   // Define the 'getSP' function.
   (void)JSObject::putNamed_RJS(

@@ -123,7 +123,6 @@ SynthTrace::SynthTrace(
     {
       json_->emitKey("gcConfig");
       json_->openDict();
-      json_->emitKeyValue("minHeapSize", conf.getGCConfig().getMinHeapSize());
       json_->emitKeyValue("initHeapSize", conf.getGCConfig().getInitHeapSize());
       json_->emitKeyValue("maxHeapSize", conf.getGCConfig().getMaxHeapSize());
       json_->emitKeyValue(
@@ -141,7 +140,6 @@ SynthTrace::SynthTrace(
       json_->closeDict();
     }
     json_->emitKeyValue("maxNumRegisters", conf.getMaxNumRegisters());
-    json_->emitKeyValue("ES6Promise", conf.getES6Promise());
     json_->emitKeyValue("ES6Proxy", conf.getES6Proxy());
     json_->emitKeyValue("Intl", conf.getIntl());
     json_->emitKeyValue("MicrotasksQueue", conf.getMicrotaskQueue());
@@ -294,6 +292,32 @@ SynthTrace::TraceValue SynthTrace::decode(const std::string &str) {
     llvm_unreachable("Illegal object encountered");
   }
 }
+
+#ifdef HERMESVM_API_TRACE_DEBUG
+std::string SynthTrace::getDescriptiveString(
+    jsi::Runtime &runtime,
+    const jsi::Value &value) {
+  if (value.isUndefined()) {
+    return "undefined:";
+  } else if (value.isNull()) {
+    return "null:";
+  } else if (value.isBool()) {
+    return value.getBool() ? "true" : "false";
+  } else if (value.isNumber()) {
+    return std::to_string(value.getNumber());
+  } else if (value.isBigInt()) {
+    return value.getBigInt(runtime).toString(runtime).utf8(runtime);
+  } else if (value.isString()) {
+    return value.getString(runtime).utf8(runtime);
+  } else if (value.isObject()) {
+    return "object:";
+  } else if (value.isSymbol()) {
+    return value.getSymbol(runtime).toString(runtime);
+  } else {
+    llvm_unreachable("No other values allowed in the trace");
+  }
+}
+#endif
 
 void SynthTrace::Record::toJSON(JSONEmitter &json) const {
   json.openDict();
@@ -604,6 +628,13 @@ void SynthTrace::GetStringDataRecord::toJSONInternal(JSONEmitter &json) const {
   json.emitKeyValue("objID", encode(objID_));
   json.emitKeyValue(
       "strData", llvh::ArrayRef(strData_.data(), strData_.size()));
+}
+
+void SynthTrace::DeletePropertyRecord::toJSONInternal(
+    ::hermes::JSONEmitter &json) const {
+  Record::toJSONInternal(json);
+  json.emitKeyValue("objID", objID_);
+  json.emitKeyValue("propID", encode(propID_));
 }
 
 void SynthTrace::GlobalRecord::toJSONInternal(JSONEmitter &json) const {

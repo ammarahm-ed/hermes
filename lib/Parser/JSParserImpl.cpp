@@ -67,6 +67,7 @@ void JSParserImpl::initializeIdentifiers() {
   packageIdent_ = lexer_.getIdentifier("package");
   privateIdent_ = lexer_.getIdentifier("private");
   protectedIdent_ = lexer_.getIdentifier("protected");
+  prototypeIdent_ = lexer_.getIdentifier("prototype");
   publicIdent_ = lexer_.getIdentifier("public");
   staticIdent_ = lexer_.getIdentifier("static");
   methodIdent_ = lexer_.getIdentifier("method");
@@ -89,7 +90,6 @@ void JSParserImpl::initializeIdentifiers() {
   keyofIdent_ = lexer_.getIdentifier("keyof");
   declareIdent_ = lexer_.getIdentifier("declare");
   protoIdent_ = lexer_.getIdentifier("proto");
-  prototypeIdent_ = lexer_.getIdentifier("prototype");
   opaqueIdent_ = lexer_.getIdentifier("opaque");
   plusIdent_ = lexer_.getIdentifier("plus");
   minusIdent_ = lexer_.getIdentifier("minus");
@@ -517,7 +517,7 @@ Optional<ESTree::FunctionLikeNode *> JSParserImpl::parseFunctionHelper(
           isGenerator,
           isAsync);
       // Initialize the node with a blank body.
-      decl->_body = new (context_) ESTree::BlockStatementNode({});
+      decl->_body = new (context_) ESTree::BlockStatementNode({}, false);
       node = decl;
     } else {
       auto *expr = new (context_) ESTree::FunctionExpressionNode(
@@ -530,7 +530,7 @@ Optional<ESTree::FunctionLikeNode *> JSParserImpl::parseFunctionHelper(
           isGenerator,
           isAsync);
       // Initialize the node with a blank body.
-      expr->_body = new (context_) ESTree::BlockStatementNode({});
+      expr->_body = new (context_) ESTree::BlockStatementNode({}, false);
       node = expr;
     }
 
@@ -744,6 +744,12 @@ Optional<ESTree::BlockStatementNode *> JSParserImpl::parseFunctionBody(
         context_.getPreemptiveFunctionCompilationThreshold()) {
       lexer_.seek(endLoc);
       advance(grammarContext);
+      // Ensure the prev token end loc is set correctly because we used seek to
+      // get to the current spot to the advance() had no way to restore it
+      // properly.
+      // This is necessary to ensure that arrow functions parsed lazily get the
+      // correct source range (for "show source").
+      lexer_.setPrevTokenEndLoc(endLoc);
 
       // Emulate parsing the "use strict" directive in parseBlock.
       setStrictMode(functionInfo.strictMode);
@@ -761,7 +767,7 @@ Optional<ESTree::BlockStatementNode *> JSParserImpl::parseFunctionBody(
       }
 
       auto *body =
-          new (context_) ESTree::BlockStatementNode(std::move(stmtList));
+          new (context_) ESTree::BlockStatementNode(std::move(stmtList), false);
       body->isLazyFunctionBody = true;
       // Set params based on what they were at the _start_ of the function's
       // source, not what they are now, because they might have changed.
@@ -816,7 +822,7 @@ Optional<ESTree::Node *> JSParserImpl::parseDeclaration(Param param) {
     return *optClass;
   }
 
-  if (checkN(TokenKind::rw_const, letIdent_)) {
+  if (check(TokenKind::rw_const) || checkUnescaped(letIdent_)) {
     auto optLexDecl = parseLexicalDeclaration(ParamIn);
     if (!optLexDecl)
       return None;
@@ -963,7 +969,7 @@ Optional<ESTree::BlockStatementNode *> JSParserImpl::parseBlock(
   auto *body = setLocation(
       startLoc,
       tok_,
-      new (context_) ESTree::BlockStatementNode(std::move(stmtList)));
+      new (context_) ESTree::BlockStatementNode(std::move(stmtList), false));
   if (!eat(
           TokenKind::r_brace,
           grammarContext,
@@ -1059,7 +1065,7 @@ Optional<ESTree::VariableDeclarationNode *>
 JSParserImpl::parseLexicalDeclaration(Param param) {
   assert(
       (check(TokenKind::rw_var) || check(TokenKind::rw_const) ||
-       check(letIdent_)) &&
+       checkUnescaped(letIdent_)) &&
       "parseLexicalDeclaration() expects var/const/let");
   bool isConst = check(TokenKind::rw_const);
   auto kindIdent = tok_->getResWordOrIdentifier();
@@ -1109,11 +1115,14 @@ JSParserImpl::parseVariableStatement(Param param) {
 
 Optional<ESTree::PrivateNameNode *> JSParserImpl::parsePrivateName() {
   assert(check(TokenKind::private_identifier));
+  auto *privateIdent = tok_->getPrivateIdentifier();
   ESTree::Node *ident = setLocation(
       tok_,
       tok_,
-      new (context_)
-          ESTree::IdentifierNode(tok_->getPrivateIdentifier(), nullptr, false));
+      new (context_) ESTree::IdentifierNode(privateIdent, nullptr, false));
+  if (privateIdent == constructorIdent_) {
+    error(ident->getSourceRange(), "Private names cannot be '#constructor'");
+  }
   SMLoc start = advance(JSLexer::GrammarContext::AllowDiv).Start;
   return setLocation(
       start, ident, new (context_) ESTree::PrivateNameNode(ident));
@@ -1437,7 +1446,7 @@ Optional<ESTree::PropertyNode *> JSParserImpl::parseBindingProperty(
     // Must validate BindingIdentifier, because there are certain identifiers
     // which are valid as PropertyName but not as BindingIdentifier.
     auto *ident = dyn_cast<ESTree::IdentifierNode>(key);
-    if (!ident ||
+    if (!ident || computed ||
         !validateBindingIdentifier(
             Param{},
             ident->getSourceRange(),
@@ -1534,7 +1543,7 @@ Optional<ESTree::Node *> JSParserImpl::parseExpressionOrLabelledStatement(
         "declaration not allowed as expression statement");
   }
 
-  if (check(letIdent_)) {
+  if (checkUnescaped(letIdent_)) {
     SMLoc letLoc = advance().Start;
     if (check(TokenKind::l_square)) {
       // let [
@@ -1624,7 +1633,8 @@ Optional<ESTree::IfStatementNode *> JSParserImpl::parseIfStatement(
   /// ES2022 B.3.3 allows FunctionDeclaration as consequent and alternate.
   /// These FunctionDeclarations are supposed to be processed precisely as if
   /// they were surrounded by BlockStatement, including function promotion.
-  /// To allow this, surround them with a synthetic BlockStatement.
+  /// To allow this, surround them with a synthetic BlockStatement and set the
+  /// 'implicit' flag to true to indicate that it wasn't in the original source.
   auto parseStatementOrFunctionDeclaration =
       [this, param]() -> Optional<ESTree::Node *> {
     if (check(TokenKind::rw_function)) {
@@ -1646,7 +1656,8 @@ Optional<ESTree::IfStatementNode *> JSParserImpl::parseIfStatement(
       return setLocation(
           *optFunction,
           *optFunction,
-          new (context_) ESTree::BlockStatementNode(std::move(stmts)));
+          new (context_) ESTree::BlockStatementNode(
+              std::move(stmts), /* implicit */ true));
     }
     auto optStatement = parseStatement(param.get(ParamReturn));
     if (!optStatement)
@@ -1781,7 +1792,8 @@ Optional<ESTree::Node *> JSParserImpl::parseForStatement(Param param) {
   ESTree::VariableDeclarationNode *decl = nullptr;
   ESTree::NodePtr expr1 = nullptr;
 
-  if (checkN(TokenKind::rw_var, TokenKind::rw_const, letIdent_)) {
+  if (checkN(TokenKind::rw_var, TokenKind::rw_const) ||
+      checkUnescaped(letIdent_)) {
     // Productions valid here:
     //   for ( var/let/const VariableDeclarationList
     //   for [await] ( var/let/const VariableDeclaration
@@ -2686,7 +2698,7 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
   bool async = false;
   bool method = false;
 
-  if (check(getIdent_)) {
+  if (checkUnescaped(getIdent_)) {
     UniqueString *ident = tok_->getResWordOrIdentifier();
     SMRange identRng = tok_->getSourceRange();
     advance();
@@ -2730,6 +2742,7 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
       if (!optKey)
         return None;
 
+      SMLoc parenLoc = tok_->getStartLoc();
       if (!eat(
               TokenKind::l_paren,
               JSLexer::AllowRegExp,
@@ -2784,13 +2797,13 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
           false,
           false);
       funcExpr->isMethodDefinition = true;
-      setLocation(startLoc, block.getValue(), funcExpr);
+      setLocation(parenLoc, block.getValue(), funcExpr);
 
       auto *node = new (context_) ESTree::PropertyNode(
           optKey.getValue(), funcExpr, getIdent_, computed, false, false);
       return setLocation(startLoc, block.getValue(), node);
     }
-  } else if (check(setIdent_)) {
+  } else if (checkUnescaped(setIdent_)) {
     UniqueString *ident = tok_->getResWordOrIdentifier();
     SMRange identRng = tok_->getSourceRange();
     advance();
@@ -2838,6 +2851,7 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
       llvh::SaveAndRestore<bool> oldParamAwait(paramAwait_, false);
 
       ESTree::NodeList params;
+      SMLoc parenLoc = tok_->getStartLoc();
       eat(TokenKind::l_paren,
           JSLexer::AllowRegExp,
           "in setter declaration",
@@ -2895,13 +2909,13 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
           false,
           false);
       funcExpr->isMethodDefinition = true;
-      setLocation(startLoc, block.getValue(), funcExpr);
+      setLocation(parenLoc, block.getValue(), funcExpr);
 
       auto *node = new (context_) ESTree::PropertyNode(
           optKey.getValue(), funcExpr, setIdent_, computed, false, false);
       return setLocation(startLoc, block.getValue(), node);
     }
-  } else if (check(asyncIdent_)) {
+  } else if (checkUnescaped(asyncIdent_)) {
     UniqueString *ident = tok_->getResWordOrIdentifier();
     SMRange identRng = tok_->getSourceRange();
     advance();
@@ -2988,7 +3002,8 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
   ESTree::Node *value;
   bool shorthand = false;
 
-  if (isa<ESTree::IdentifierNode>(key) && check(TokenKind::equal)) {
+  if (isa<ESTree::IdentifierNode>(key) && check(TokenKind::equal) &&
+      !computed) {
     // Check for CoverInitializedName: IdentifierReference Initializer
     auto startLoc = advance().Start;
     auto optInit = parseAssignmentExpression();
@@ -3037,6 +3052,7 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
 #endif
 
     // (
+    SMLoc parenLoc = tok_->getStartLoc();
     if (!need(
             TokenKind::l_paren,
             "in method definition",
@@ -3085,7 +3101,7 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyAssignment(bool eagerly) {
         generator,
         async);
     funcExpr->isMethodDefinition = true;
-    setLocation(startLoc, optBody.getValue(), funcExpr);
+    setLocation(parenLoc, optBody.getValue(), funcExpr);
 
     value = funcExpr;
   } else {
@@ -3126,6 +3142,15 @@ Optional<ESTree::Node *> JSParserImpl::parsePropertyName() {
           tok_,
           tok_,
           new (context_) ESTree::NumericLiteralNode(tok_->getNumericLiteral()));
+      advance();
+      return res;
+    }
+
+    case TokenKind::bigint_literal: {
+      auto *res = setLocation(
+          tok_,
+          tok_,
+          new (context_) ESTree::BigIntLiteralNode(tok_->getBigIntLiteral()));
       advance();
       return res;
     }
@@ -4741,6 +4766,7 @@ bool JSParserImpl::parseClassBodyImpl(
     if (optNext.hasValue() &&
         (*optNext == TokenKind::rw_static ||
          *optNext == TokenKind::identifier || *optNext == TokenKind::plus ||
+         *optNext == TokenKind::private_identifier ||
          *optNext == TokenKind::minus)) {
       declare = true;
       advance();
@@ -4815,7 +4841,8 @@ bool JSParserImpl::parseClassBodyImpl(
             constructor = method;
           }
         }
-      } else if (auto *prop = dyn_cast<ESTree::ClassPropertyNode>(*optElem)) {
+      } else if (auto *prop = dyn_cast<ESTree::ClassPropertyNode>(*optElem);
+                 prop && !prop->_computed) {
         if (auto *propId = dyn_cast<ESTree::IdentifierNode>(prop->_key)) {
           if (propId->_name == constructorIdent_) {
             error(prop->getSourceRange(), "invalid class property name");
@@ -4896,7 +4923,8 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
             TokenKind::r_brace,
             TokenKind::equal,
             TokenKind::colon,
-            TokenKind::semi)) {
+            TokenKind::semi,
+            TokenKind::star)) {
       // This was actually a getter.
       special = SpecialKind::Get;
     } else {
@@ -4914,7 +4942,8 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
             TokenKind::r_brace,
             TokenKind::equal,
             TokenKind::colon,
-            TokenKind::semi)) {
+            TokenKind::semi,
+            TokenKind::star)) {
       // If we don't see '(' then this was actually a setter.
       special = SpecialKind::Set;
     } else {
@@ -5088,6 +5117,10 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
       return None;
     }
     if (isPrivate) {
+      if (llvh::cast<ESTree::IdentifierNode>(prop)->_name ==
+          constructorIdent_) {
+        error(prop->getSourceRange(), "Private names cannot be '#constructor'");
+      }
       if (accessibility) {
         error(
             startRange,
@@ -5119,7 +5152,7 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
           new (context_) ESTree::TSModifiersNode(accessibility, readonly);
     }
 #endif
-    if (isStatic && propName == prototypeIdent_) {
+    if (isStatic && !computed && propName == prototypeIdent_) {
       error(
           prop->getSourceRange(),
           "Static class properties cannot be named 'prototype'");
@@ -5244,12 +5277,22 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
   }
 #endif
 
-  if (isStatic && propName == prototypeIdent_) {
+  if (isStatic && !isPrivate && !computed && propName == prototypeIdent_) {
     // ClassElement : static MethodDefinition
     // It is a Syntax Error if PropName of MethodDefinition is "prototype".
     error(
         {startLoc, funcExpr->getEndLoc()},
         "prototype method must not be static");
+    return None;
+  }
+
+  if (isPrivate && propName == constructorIdent_) {
+    // ClassElementName : PrivateIdentifier
+    // It is a Syntax Error if the StringValue of PrivateIdentifier is
+    // "#constructor".
+    error(
+        {startLoc, funcExpr->getEndLoc()},
+        "constructor method must not be private");
     return None;
   }
 
@@ -5489,15 +5532,17 @@ Optional<ESTree::Node *> JSParserImpl::parseArrowFunctionExpression(
     expression = true;
   }
 
-  auto *arrow = new (context_) ESTree::ArrowFunctionExpressionNode(
-      nullptr,
-      std::move(paramList),
-      body,
-      typeParams,
-      returnType,
-      predicate,
-      expression,
-      isAsync);
+  auto *arrow = setLocation(
+      startLoc,
+      getPrevTokenEndLoc(),
+      new (context_) ESTree::ArrowFunctionExpressionNode(
+          std::move(paramList),
+          body,
+          typeParams,
+          returnType,
+          predicate,
+          expression,
+          isAsync));
 
   if (pass_ == PreParse) {
     auto [it, inserted] = preParsed_->functionInfo.try_emplace(
@@ -5513,7 +5558,7 @@ Optional<ESTree::Node *> JSParserImpl::parseArrowFunctionExpression(
     assert(inserted);
   }
 
-  return setLocation(startLoc, body->getEndLoc(), arrow);
+  return arrow;
 }
 
 Optional<ESTree::Node *> JSParserImpl::reparseAssignmentPattern(
@@ -7041,17 +7086,29 @@ ESTree::ExpressionStatementNode *JSParserImpl::parseDirective() {
   if (!lexer_.isCurrentTokenADirective())
     return nullptr;
 
-  // Allocate a StringLiteralNode for the directive.
+  // Allocate a StringLiteralNode for the string expression.
   auto *strLit = setLocation(
       tok_,
       tok_,
       new (context_) ESTree::StringLiteralNode(tok_->getStringLiteral()));
   auto endLoc = tok_->getEndLoc();
 
+  // The directive is the raw input string excluding the quotes. We want to
+  // avoid a second string "uniquing", so we only do it if there are escapes.
+  UniqueString *rawDirective;
+  if (LLVM_LIKELY(!tok_->getStringLiteralContainsEscapes())) {
+    rawDirective = tok_->getStringLiteral();
+  } else {
+    auto rng = tok_->getSourceRange();
+    rawDirective = lexer_.getIdentifier(llvh::StringRef(
+        rng.Start.getPointer() + 1,
+        rng.End.getPointer() - rng.Start.getPointer() - 2));
+  }
+
   // Actually process the directive. Note that we want to do that before we
   // have consumed any more tokens - strictness can affect the interpretation
   // of tokens.
-  processDirective(strLit->_value);
+  processDirective(rawDirective);
 
   advance(JSLexer::AllowDiv);
 
@@ -7063,7 +7120,7 @@ ESTree::ExpressionStatementNode *JSParserImpl::parseDirective() {
   return setLocation(
       strLit,
       endLoc,
-      new (context_) ESTree::ExpressionStatementNode(strLit, strLit->_value));
+      new (context_) ESTree::ExpressionStatementNode(strLit, rawDirective));
 }
 
 namespace {

@@ -8,10 +8,10 @@
 #ifndef HERMES_VM_STACKFRAME_H
 #define HERMES_VM_STACKFRAME_H
 
-#include "hermes/BCGen/HBC/StackFrameLayout.h"
 #include "hermes/Support/Compiler.h"
 #include "hermes/VM/Handle.h"
 #include "hermes/VM/NativeArgs.h"
+#include "hermes/VMLayouts/StackFrameLayout.h"
 
 #include <iterator>
 #include <type_traits>
@@ -102,7 +102,6 @@ class StackFramePtrT {
 
   // Declare convenience accessors to the underlying HermesValue slots.
   _HERMESVM_DEFINE_STACKFRAME_REF(FirstLocal)
-  _HERMESVM_DEFINE_STACKFRAME_REF(Scratch)
   _HERMESVM_DEFINE_STACKFRAME_REF(DebugEnvironment)
   _HERMESVM_DEFINE_STACKFRAME_REF(PreviousFrame)
   _HERMESVM_DEFINE_STACKFRAME_REF(SavedIP)
@@ -275,7 +274,7 @@ class StackFramePtrT {
   /// Create an instance of NativeArgs pointing to the arguments in this
   /// frame.
   NativeArgs getNativeArgs() const {
-    return NativeArgs{argsBegin(), getArgCount(), &getNewTargetRef()};
+    return NativeArgs{argsBegin(), getArgCount()};
   }
 };
 

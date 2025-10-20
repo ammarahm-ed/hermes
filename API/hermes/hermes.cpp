@@ -29,6 +29,7 @@
 #include "hermes/VM/JSArray.h"
 #include "hermes/VM/JSArrayBuffer.h"
 #include "hermes/VM/JSLib.h"
+#include "hermes/VM/JSLib/JSLibStorage.h"
 #include "hermes/VM/JSLib/RuntimeJSONUtils.h"
 #include "hermes/VM/NativeState.h"
 #include "hermes/VM/Operations.h"
@@ -107,25 +108,31 @@ void hermesFatalErrorHandler(
     void * /*user_data*/,
     const std::string &reason,
     bool /*gen_crash_diag*/) {
-  // Actually crash and let breakpad handle the reporting.
+  // Copied from ErrorHandling.cpp.
+  // Blast the result out to stderr.  We don't try hard to make sure this
+  // succeeds (e.g. handling EINTR) and we can't use errs() here because
+  // raw ostreams can call report_fatal_error.
+  llvh::SmallVector<char, 64> buffer;
+  llvh::raw_svector_ostream OS(buffer);
+  OS << "LLVM ERROR: " << reason << "\n";
+  llvh::StringRef messageStr = OS.str();
+  ssize_t written = ::write(2, messageStr.data(), messageStr.size());
+  (void)written; // If something went wrong, we deliberately just give up.
+
   if (sApiFatalHandler) {
-    sApiFatalHandler(reason);
+    try {
+      sApiFatalHandler(reason);
+    } catch (...) {
+      // Catch the exception and do nothing as the fatal handler must not throw
+      // exceptions.
+    }
   } else {
 #ifdef HERMES_IS_MOBILE_BUILD
+    // Actually crash and let breakpad handle the reporting.
     *((volatile int *)nullptr) = 42;
-#else
-    // Copied from ErrorHandling.cpp.
-    // Blast the result out to stderr.  We don't try hard to make sure this
-    // succeeds (e.g. handling EINTR) and we can't use errs() here because
-    // raw ostreams can call report_fatal_error.
-    llvh::SmallVector<char, 64> buffer;
-    llvh::raw_svector_ostream OS(buffer);
-    OS << "LLVM ERROR: " << reason << "\n";
-    llvh::StringRef messageStr = OS.str();
-    ssize_t written = ::write(2, messageStr.data(), messageStr.size());
-    (void)written; // If something went wrong, we deliberately just give up.
 #endif
   }
+  abort();
 }
 
 } // namespace detail
@@ -163,16 +170,58 @@ void throwHermesNotCompiledWithSamplingProfilerSupport() {
       "Hermes was not compiled with SamplingProfiler support");
 }
 #endif // !HERMESVM_SAMPLING_PROFILER_AVAILABLE
+
+struct UUIDInfo : llvh::DenseMapInfo<jsi::UUID> {
+  static inline jsi::UUID getEmptyKey() {
+    return jsi::UUID{};
+  }
+  static inline jsi::UUID getTombstoneKey() {
+    return jsi::UUID{0xffffffff, 0xffff, 0xffff, 0xffff, 0xfffffffffff};
+  }
+  static inline bool isEqual(const jsi::UUID &a, const jsi::UUID &b) {
+    return a == b;
+  }
+  static unsigned getHashValue(const jsi::UUID &Val) {
+    return jsi::UUID::Hash()(Val);
+  }
+};
 } // namespace
 
-HermesRuntime::~HermesRuntime() {}
+class HermesRootAPI final : public IHermesRootAPI, public ISetFatalHandler {
+ public:
+  jsi::ICast *castInterface(const jsi::UUID &interfaceUUID) override;
 
+  std::unique_ptr<HermesRuntime> makeHermesRuntime(
+      const ::hermes::vm::RuntimeConfig &runtimeConfig) override;
+
+  bool isHermesBytecode(const uint8_t *data, size_t len) override;
+  uint32_t getBytecodeVersion() override;
+  void prefetchHermesBytecode(const uint8_t *data, size_t len) override;
+  bool hermesBytecodeSanityCheck(
+      const uint8_t *data,
+      size_t len,
+      std::string *errorMessage = nullptr) override;
+  std::pair<const uint8_t *, size_t> getBytecodeEpilogue(
+      const uint8_t *data,
+      size_t len) override;
+  void setFatalHandler(void (*handler)(const std::string &)) override;
+  void enableSamplingProfiler(double meanHzFreq = 100) override;
+  void disableSamplingProfiler() override;
+  void dumpSampledTraceToFile(const std::string &fileName) override;
+  void dumpSampledTraceToStream(std::ostream &stream) override;
+  std::unordered_map<std::string, std::vector<std::string>>
+  getExecutedFunctions() override;
+  bool isCodeCoverageProfilerEnabled() override;
+  void enableCodeCoverageProfiler() override;
+  void disableCodeCoverageProfiler() override;
+};
+
+namespace {
 class HermesRuntimeImpl final : public HermesRuntime,
+                                private IHermesTestHelpers,
                                 private InstallHermesFatalErrorHandler,
                                 private jsi::Instrumentation {
  public:
-  static constexpr uint32_t kSentinelNativeValue = 0x6ef71fe1;
-
   HermesRuntimeImpl(const vm::RuntimeConfig &runtimeConfig)
       : hermesValues_(runtimeConfig.getGCConfig().getOccupancyTarget()),
         weakHermesValues_(runtimeConfig.getGCConfig().getOccupancyTarget()),
@@ -199,8 +248,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
     }
 
     compileFlags_.enableGenerator = runtimeConfig.getEnableGenerator();
-    compileFlags_.enableES6Classes = runtimeConfig.getES6Class();
     compileFlags_.enableES6BlockScoping = runtimeConfig.getES6BlockScoping();
+    compileFlags_.enableAsyncGenerators =
+        runtimeConfig.getEnableAsyncGenerators();
     compileFlags_.emitAsyncBreakCheck =
         runtimeConfig.getAsyncBreakCheckInEval();
     runtime_.addCustomRootsFunction(
@@ -259,6 +309,11 @@ class HermesRuntimeImpl final : public HermesRuntime,
     // This must be done before we check hermesValues_ below.
     debugger_.reset();
 #endif
+    // Free the resources in the custom data map
+    for (auto [_, entry] : dataMap_) {
+      auto *deleter = entry.second;
+      deleter(entry.first);
+    }
   }
 
   // This should only be called once by the factory.
@@ -472,6 +527,17 @@ class HermesRuntimeImpl final : public HermesRuntime,
 #endif
   }
 
+  void dumpOpcodeStats(std::ostream &stream) const override {
+#ifdef HERMESVM_PROFILER_OPCODE
+    llvh::raw_os_ostream os(stream);
+    static_cast<const HermesRuntimeImpl *>(this)->runtime_.dumpOpcodeStats(os);
+#else
+    throw std::logic_error(
+        "Cannot write the basic block profile trace out if Hermes wasn't built with "
+        "hermes.profiler=OPCODE");
+#endif
+  }
+
   void dumpProfilerSymbolsToFile(const std::string &fileName) const override {
     throw std::logic_error(
         "Cannot dump profiler symbols out if Hermes wasn't built with "
@@ -543,7 +609,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
     }
   }
 
-  vm::Handle<> vmHandleFromValue(const jsi::Value &value) {
+  static vm::Handle<> vmHandleFromValue(
+      const jsi::Value &value,
+      vm::PinnedHermesValue *numberStorage) {
     if (value.isUndefined()) {
       return vm::Runtime::getUndefinedValue();
     } else if (value.isNull()) {
@@ -551,8 +619,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
     } else if (value.isBool()) {
       return vm::Runtime::getBoolValue(value.getBool());
     } else if (value.isNumber()) {
-      return runtime_.makeHandle(
-          vm::HermesValue::encodeUntrustedNumberValue(value.getNumber()));
+      *numberStorage =
+          vm::HermesValue::encodeUntrustedNumberValue(value.getNumber());
+      return vm::Handle<>(numberStorage);
     } else if (
         value.isSymbol() || value.isBigInt() || value.isString() ||
         value.isObject()) {
@@ -590,8 +659,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
       const std::shared_ptr<const jsi::Buffer> &sourceMapBuf,
       std::string sourceURL);
 
-  // Concrete declarations of jsi::Runtime pure virtual methods
+  ICast *castInterface(const jsi::UUID &interfaceUUID) override;
 
+  // Concrete declarations of jsi::Runtime pure virtual methods
   std::shared_ptr<const jsi::PreparedJavaScript> prepareJavaScript(
       const std::shared_ptr<const jsi::Buffer> &buffer,
       std::string sourceURL) override;
@@ -671,8 +741,10 @@ class HermesRuntimeImpl final : public HermesRuntime,
   jsi::Value getProperty(const jsi::Object &, const jsi::PropNameID &name)
       override;
   jsi::Value getProperty(const jsi::Object &, const jsi::String &name) override;
+  jsi::Value getProperty(const jsi::Object &, const jsi::Value &name) override;
   bool hasProperty(const jsi::Object &, const jsi::PropNameID &name) override;
   bool hasProperty(const jsi::Object &, const jsi::String &name) override;
+  bool hasProperty(const jsi::Object &, const jsi::Value &name) override;
   void setPropertyValue(
       const jsi::Object &,
       const jsi::PropNameID &name,
@@ -681,6 +753,15 @@ class HermesRuntimeImpl final : public HermesRuntime,
       const jsi::Object &,
       const jsi::String &name,
       const jsi::Value &value) override;
+  void setPropertyValue(
+      const jsi::Object &,
+      const jsi::Value &name,
+      const jsi::Value &value) override;
+  void deleteProperty(const jsi::Object &, const jsi::PropNameID &name)
+      override;
+  void deleteProperty(const jsi::Object &, const jsi::String &name) override;
+  void deleteProperty(const jsi::Object &, const jsi::Value &name) override;
+
   bool isArray(const jsi::Object &) const override;
   bool isArrayBuffer(const jsi::Object &) const override;
   bool isFunction(const jsi::Object &) const override;
@@ -720,6 +801,12 @@ class HermesRuntimeImpl final : public HermesRuntime,
       const jsi::Function &,
       const jsi::Value *args,
       size_t count) override;
+
+  void setRuntimeDataImpl(
+      const jsi::UUID &uuid,
+      const void *data,
+      void (*deleter)(const void *data)) override;
+  const void *getRuntimeDataImpl(const jsi::UUID &uuid) override;
 
   bool strictEquals(const jsi::Symbol &a, const jsi::Symbol &b) const override;
   bool strictEquals(const jsi::BigInt &a, const jsi::BigInt &b) const override;
@@ -812,7 +899,13 @@ class HermesRuntimeImpl final : public HermesRuntime,
       return true;
     }
 
-    vm::CallResult<vm::Handle<vm::JSArray>> getHostPropertyNames() override {
+    vm::ExecutionStatus getHostPropertyNames(
+        vm::MutableHandle<vm::JSArray> result) override {
+      struct : public vm::Locals {
+        vm::PinnedValue<vm::SymbolID> tmpHandle;
+      } lv;
+      vm::LocalsRAII lraii(rt_.runtime_, &lv);
+
       try {
         auto names = ho_->getPropertyNames(rt_);
 
@@ -821,18 +914,20 @@ class HermesRuntimeImpl final : public HermesRuntime,
         if (arrayRes == vm::ExecutionStatus::EXCEPTION) {
           return vm::ExecutionStatus::EXCEPTION;
         }
-        vm::Handle<vm::JSArray> arrayHandle =
-            rt_.runtime_.makeHandle(std::move(*arrayRes));
+        result.castAndSetHermesValue<vm::JSArray>(arrayRes->getHermesValue());
 
         vm::GCScope gcScope{rt_.runtime_};
-        vm::MutableHandle<vm::SymbolID> tmpHandle{rt_.runtime_};
         size_t i = 0;
         for (auto &name : names) {
-          tmpHandle = phv(name).getSymbol();
-          vm::JSArray::setElementAt(arrayHandle, rt_.runtime_, i++, tmpHandle);
+          lv.tmpHandle = phv(name).getSymbol();
+          if (LLVM_UNLIKELY(
+                  vm::JSArray::setElementAt(
+                      result, rt_.runtime_, i++, lv.tmpHandle) ==
+                  vm::ExecutionStatus::EXCEPTION))
+            return vm::ExecutionStatus::EXCEPTION;
         }
 
-        return arrayHandle;
+        return vm::ExecutionStatus::RETURNED;
       }
 #ifdef HERMESVM_EXCEPTION_ON_OOM
       catch (const vm::JSOutOfMemoryError &) {
@@ -857,8 +952,10 @@ class HermesRuntimeImpl final : public HermesRuntime,
     HFContext(jsi::HostFunctionType hf, HermesRuntimeImpl &hri)
         : hostFunction(std::move(hf)), hermesRuntimeImpl(hri) {}
 
-    static vm::CallResult<vm::HermesValue>
-    func(void *context, vm::Runtime &runtime, vm::NativeArgs hvArgs) {
+    static vm::CallResult<vm::HermesValue> func(
+        void *context,
+        vm::Runtime &runtime) {
+      vm::NativeArgs hvArgs = runtime.getCurrentFrame().getNativeArgs();
       HFContext *hfc = reinterpret_cast<HFContext *>(context);
       HermesRuntimeImpl &rt = hfc->hermesRuntimeImpl;
       assert(&runtime == &rt.runtime_);
@@ -1086,7 +1183,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
   LLVM_ATTRIBUTE_NORETURN void throwJSErrorWithMessage(Args &&...args);
 
   /// Concrete declarations of HermesRuntime methods.
+  ICast *getHermesRootAPI() override;
   void sampledTraceToStreamInDevToolsFormat(std::ostream &stream) override;
+  void resetTimezoneCache() override;
   sampling_profiler::Profile dumpSampledTraceToProfile() override;
   void loadSegment(
       std::unique_ptr<const jsi::Buffer> buffer,
@@ -1100,19 +1199,11 @@ class HermesRuntimeImpl final : public HermesRuntime,
   jsi::Value getObjectForID(uint64_t id) override;
   const ::hermes::vm::GCExecTrace &getGCExecTrace() const override;
   std::string getIOTrackingInfoJSON() override;
-#ifdef HERMESVM_PROFILER_BB
-  void dumpBasicBlockProfileTrace(std::ostream &os) const override;
-#endif
-#ifdef HERMESVM_PROFILER_OPCODE
-  void dumpOpcodeStats(std::ostream &os) const override;
-#endif
   debugger::Debugger &getDebugger() override;
-#ifdef HERMES_ENABLE_DEBUGGER
   void debugJavaScript(
       const std::string &src,
       const std::string &sourceURL,
       const DebugFlags &debugFlags) override;
-#endif
   void registerForProfiling() override;
   void unregisterForProfiling() override;
   void asyncTriggerTimeout() override;
@@ -1122,9 +1213,10 @@ class HermesRuntimeImpl final : public HermesRuntime,
       const std::shared_ptr<const jsi::Buffer> &buffer,
       const std::shared_ptr<const jsi::Buffer> &sourceMapBuf,
       const std::string &sourceURL) override;
-  jsi::Value evaluateSHUnit(SHUnit *(*shUnitCreator)()) override;
+  SHUnitCreator getSHUnitCreator() const override;
+  jsi::Value evaluateSHUnit(SHUnitCreator shUnitCreator) override;
   SHRuntime *getSHRuntime() noexcept override;
-  ::hermes::vm::Runtime *getVMRuntimeUnsafe() const override;
+  void *getVMRuntimeUnsafe() const override;
   size_t rootsListLengthForTests() const override;
 
   ManagedValues<vm::PinnedHermesValue> hermesValues_;
@@ -1134,45 +1226,75 @@ class HermesRuntimeImpl final : public HermesRuntime,
   friend class debugger::Debugger;
   std::unique_ptr<debugger::Debugger> debugger_;
   ::hermes::vm::experiments::VMExperimentFlags vmExperimentFlags_{0};
+  friend struct ::HermesTestHelper;
 
   /// Compilation flags used by prepareJavaScript().
   ::hermes::hbc::CompileFlags compileFlags_{};
+  /// Custom data stored by the user of the runtime.
+  llvh::DenseMap<
+      jsi::UUID,
+      std::pair<const void *, void (*)(const void *data)>,
+      UUIDInfo>
+      dataMap_;
 };
-
-namespace {
-inline HermesRuntimeImpl *impl(HermesRuntime *rt) {
-  // This is guaranteed safe because HermesRuntime is abstract so
-  // cannot be constructed, and the only instances created are
-  // HermesRuntimeImpl's created by the factory function.  It's kind
-  // of like pimpl, but different.
-  return static_cast<HermesRuntimeImpl *>(rt);
-}
-
-inline const HermesRuntimeImpl *impl(const HermesRuntime *rt) {
-  // See above comment
-  return static_cast<const HermesRuntimeImpl *>(rt);
-}
 } // namespace
 
-void HermesRuntime::createNapiEnv(napi_env *env) {
+void HermesRootAPI::createNapiEnv(napi_env *env) {
   auto imp = impl(this);
   hermes_create_napi_env(imp->runtime_, true, nullptr, {}, env);
 }
 
-bool HermesRuntime::isHermesBytecode(const uint8_t *data, size_t len) {
+jsi::ICast *HermesRootAPI::castInterface(const jsi::UUID &interfaceUUID) {
+  if (interfaceUUID == IHermesRootAPI::uuid) {
+    return static_cast<IHermesRootAPI *>(this);
+  }
+  if (interfaceUUID == ISetFatalHandler::uuid) {
+    return static_cast<ISetFatalHandler *>(this);
+  }
+  return nullptr;
+}
+
+std::unique_ptr<HermesRuntime> HermesRootAPI::makeHermesRuntime(
+    const vm::RuntimeConfig &runtimeConfig) {
+#ifdef HERMESVM_PLATFORM_LOGGING
+  auto ret = std::make_unique<HermesRuntimeImpl>(
+      runtimeConfig.rebuild()
+          .withGCConfig(runtimeConfig.getGCConfig()
+                            .rebuild()
+                            .withShouldRecordStats(true)
+                            .build())
+          .build());
+#else
+  auto ret = std::make_unique<HermesRuntimeImpl>(runtimeConfig);
+#endif
+
+#ifdef HERMES_ENABLE_DEBUGGER
+  // Only HermesRuntime can create a debugger instance.  This requires
+  // the setter and not using make_unique, so the call to new is here
+  // in this function, which is a friend of debugger::Debugger.
+  ret->setDebugger(std::unique_ptr<debugger::Debugger>(
+      new debugger::Debugger(ret.get(), ret->runtime_)));
+#else
+  ret->setDebugger(std::make_unique<debugger::Debugger>());
+#endif
+
+  return ret;
+}
+
+bool HermesRootAPI::isHermesBytecode(const uint8_t *data, size_t len) {
   return hbc::BCProviderFromBuffer::isBytecodeStream(
       llvh::ArrayRef<uint8_t>(data, len));
 }
 
-uint32_t HermesRuntime::getBytecodeVersion() {
+uint32_t HermesRootAPI::getBytecodeVersion() {
   return hbc::BYTECODE_VERSION;
 }
 
-void HermesRuntime::prefetchHermesBytecode(const uint8_t *data, size_t len) {
+void HermesRootAPI::prefetchHermesBytecode(const uint8_t *data, size_t len) {
   hbc::BCProviderFromBuffer::prefetch(llvh::ArrayRef<uint8_t>(data, len));
 }
 
-bool HermesRuntime::hermesBytecodeSanityCheck(
+bool HermesRootAPI::hermesBytecodeSanityCheck(
     const uint8_t *data,
     size_t len,
     std::string *errorMessage) {
@@ -1180,7 +1302,7 @@ bool HermesRuntime::hermesBytecodeSanityCheck(
       llvh::ArrayRef<uint8_t>(data, len), errorMessage);
 }
 
-std::pair<const uint8_t *, size_t> HermesRuntime::getBytecodeEpilogue(
+std::pair<const uint8_t *, size_t> HermesRootAPI::getBytecodeEpilogue(
     const uint8_t *data,
     size_t len) {
   auto epi = hbc::BCProviderFromBuffer::getEpilogueFromBytecode(
@@ -1188,7 +1310,11 @@ std::pair<const uint8_t *, size_t> HermesRuntime::getBytecodeEpilogue(
   return std::make_pair(epi.data(), epi.size());
 }
 
-void HermesRuntime::enableSamplingProfiler(double meanHzFreq) {
+void HermesRootAPI::setFatalHandler(void (*handler)(const std::string &)) {
+  detail::sApiFatalHandler = handler;
+}
+
+void HermesRootAPI::enableSamplingProfiler(double meanHzFreq) {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   ::hermes::vm::SamplingProfiler::enable(meanHzFreq);
 #else
@@ -1196,7 +1322,7 @@ void HermesRuntime::enableSamplingProfiler(double meanHzFreq) {
 #endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
 }
 
-void HermesRuntime::disableSamplingProfiler() {
+void HermesRootAPI::disableSamplingProfiler() {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   ::hermes::vm::SamplingProfiler::disable();
 #else
@@ -1204,7 +1330,7 @@ void HermesRuntime::disableSamplingProfiler() {
 #endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
 }
 
-void HermesRuntime::dumpSampledTraceToFile(const std::string &fileName) {
+void HermesRootAPI::dumpSampledTraceToFile(const std::string &fileName) {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   std::error_code ec;
   llvh::raw_fd_ostream os(fileName.c_str(), ec, llvh::sys::fs::F_Text);
@@ -1218,7 +1344,7 @@ void HermesRuntime::dumpSampledTraceToFile(const std::string &fileName) {
 #endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
 }
 
-void HermesRuntime::dumpSampledTraceToStream(std::ostream &stream) {
+void HermesRootAPI::dumpSampledTraceToStream(std::ostream &stream) {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   llvh::raw_os_ostream os(stream);
   ::hermes::vm::SamplingProfiler::dumpTraceryTraceGlobal(os);
@@ -1227,34 +1353,8 @@ void HermesRuntime::dumpSampledTraceToStream(std::ostream &stream) {
 #endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
 }
 
-void HermesRuntimeImpl::sampledTraceToStreamInDevToolsFormat(
-    std::ostream &stream) {
-#if HERMESVM_SAMPLING_PROFILER_AVAILABLE
-  vm::SamplingProfiler *sp = runtime_.samplingProfiler.get();
-  if (!sp) {
-    throw jsi::JSINativeException("Runtime not registered for profiling");
-  }
-  llvh::raw_os_ostream os(stream);
-  sp->dumpChromeTrace(os);
-#else
-  throwHermesNotCompiledWithSamplingProfilerSupport();
-#endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
-}
-
-sampling_profiler::Profile HermesRuntimeImpl::dumpSampledTraceToProfile() {
-#if HERMESVM_SAMPLING_PROFILER_AVAILABLE
-  vm::SamplingProfiler *sp = runtime_.samplingProfiler.get();
-  if (!sp) {
-    throw jsi::JSINativeException("Runtime not registered for profiling");
-  }
-  return sp->dumpAsProfile();
-#else
-  throwHermesNotCompiledWithSamplingProfilerSupport();
-#endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
-}
-
-/*static*/ std::unordered_map<std::string, std::vector<std::string>>
-HermesRuntime::getExecutedFunctions() {
+std::unordered_map<std::string, std::vector<std::string>>
+HermesRootAPI::getExecutedFunctions() {
   std::unordered_map<
       std::string,
       std::vector<::hermes::vm::CodeCoverageProfiler::FuncInfo>>
@@ -1282,20 +1382,16 @@ HermesRuntime::getExecutedFunctions() {
   return result;
 }
 
-/*static*/ bool HermesRuntime::isCodeCoverageProfilerEnabled() {
+bool HermesRootAPI::isCodeCoverageProfilerEnabled() {
   return ::hermes::vm::CodeCoverageProfiler::globallyEnabled();
 }
 
-/*static*/ void HermesRuntime::enableCodeCoverageProfiler() {
+void HermesRootAPI::enableCodeCoverageProfiler() {
   ::hermes::vm::CodeCoverageProfiler::enableGlobal();
 }
 
-/*static*/ void HermesRuntime::disableCodeCoverageProfiler() {
+void HermesRootAPI::disableCodeCoverageProfiler() {
   ::hermes::vm::CodeCoverageProfiler::disableGlobal();
-}
-
-void HermesRuntime::setFatalHandler(void (*handler)(const std::string &)) {
-  detail::sApiFatalHandler = handler;
 }
 
 namespace {
@@ -1322,6 +1418,51 @@ class BufferAdapter final : public ::hermes::Buffer {
 };
 } // namespace
 
+jsi::ICast *HermesRuntimeImpl::getHermesRootAPI() {
+  return makeHermesRootAPI();
+}
+
+jsi::ICast *HermesRuntimeImpl::castInterface(const jsi::UUID &interfaceUUID) {
+  if (interfaceUUID == IHermesTestHelpers::uuid) {
+    return static_cast<IHermesTestHelpers *>(this);
+  } else if (interfaceUUID == IHermes::uuid) {
+    return static_cast<IHermes *>(this);
+  } else if (interfaceUUID == IHermesSHUnit::uuid) {
+    return static_cast<IHermesSHUnit *>(this);
+  }
+  return nullptr;
+}
+
+sampling_profiler::Profile HermesRuntimeImpl::dumpSampledTraceToProfile() {
+#if HERMESVM_SAMPLING_PROFILER_AVAILABLE
+  vm::SamplingProfiler *sp = runtime_.samplingProfiler.get();
+  if (!sp) {
+    throw jsi::JSINativeException("Runtime not registered for profiling");
+  }
+  return sp->dumpAsProfile();
+#else
+  throwHermesNotCompiledWithSamplingProfilerSupport();
+#endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
+}
+
+void HermesRuntimeImpl::resetTimezoneCache() {
+  runtime_.getJSLibStorage()->localTimeOffsetCache.reset();
+}
+
+void HermesRuntimeImpl::sampledTraceToStreamInDevToolsFormat(
+    std::ostream &stream) {
+#if HERMESVM_SAMPLING_PROFILER_AVAILABLE
+  vm::SamplingProfiler *sp = runtime_.samplingProfiler.get();
+  if (!sp) {
+    throw jsi::JSINativeException("Runtime not registered for profiling");
+  }
+  llvh::raw_os_ostream os(stream);
+  sp->dumpChromeTrace(os);
+#else
+  throwHermesNotCompiledWithSamplingProfilerSupport();
+#endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
+}
+
 void HermesRuntimeImpl::loadSegment(
     std::unique_ptr<const jsi::Buffer> buffer,
     const jsi::Value &context) {
@@ -1332,8 +1473,9 @@ void HermesRuntimeImpl::loadSegment(
     throw jsi::JSINativeException("Error evaluating javascript: " + ret.second);
   }
 
-  auto requireContext =
-      vm::Handle<vm::RequireContext>::dyn_vmcast(vmHandleFromValue(context));
+  vm::PinnedHermesValue numberStorage;
+  auto requireContext = vm::Handle<vm::RequireContext>::dyn_vmcast(
+      vmHandleFromValue(context, &numberStorage));
   if (!requireContext) {
     LOG_EXCEPTION_CAUSE("Error loading segment: Invalid context");
     throw jsi::JSINativeException("Error loading segment: Invalid context");
@@ -1400,39 +1542,22 @@ std::string HermesRuntimeImpl::getIOTrackingInfoJSON() {
   return buf;
 }
 
-#ifdef HERMESVM_PROFILER_BB
-void HermesRuntimeImpl::dumpBasicBlockProfileTrace(std::ostream &stream) const {
-  llvh::raw_os_ostream os(stream);
-  static_cast<const HermesRuntimeImpl *>(this)
-      ->runtime_.dumpBasicBlockProfileTrace(os);
-}
-#endif
-
-#ifdef HERMESVM_PROFILER_OPCODE
-void HermesRuntimeImpl::dumpOpcodeStats(std::ostream &stream) const {
-  llvh::raw_os_ostream os(stream);
-  static_cast<const HermesRuntimeImpl *>(this)->runtime_.dumpOpcodeStats(os);
-}
-#endif
-
 debugger::Debugger &HermesRuntimeImpl::getDebugger() {
   return *(debugger_);
 }
-
-#ifdef HERMES_ENABLE_DEBUGGER
 
 void HermesRuntimeImpl::debugJavaScript(
     const std::string &src,
     const std::string &sourceURL,
     const DebugFlags &debugFlags) {
+#ifdef HERMES_ENABLE_DEBUGGER
   vm::Runtime &runtime = runtime_;
   vm::GCScope gcScope(runtime);
   vm::ExecutionStatus res =
       runtime.run(src, sourceURL, compileFlags_).getStatus();
   checkStatus(res);
-}
-
 #endif
+}
 
 void HermesRuntimeImpl::registerForProfiling() {
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
@@ -1487,6 +1612,18 @@ jsi::Value HermesRuntimeImpl::evaluateJavaScriptWithSourceMap(
       prepareJavaScriptWithSourceMap(buffer, sourceMapBuf, sourceURL));
 }
 
+#ifdef HERMES_SH_UNIT_FN
+extern "C" SHUnit *HERMES_SH_UNIT_FN(void);
+#endif
+
+SHUnitCreator HermesRuntimeImpl::getSHUnitCreator() const {
+#ifdef HERMES_SH_UNIT_FN
+  return HERMES_SH_UNIT_FN;
+#else
+  return nullptr;
+#endif
+}
+
 jsi::Value HermesRuntimeImpl::evaluateSHUnit(SHUnitCreator shUnitCreator) {
   vm::Runtime &runtime = runtime_;
 
@@ -1506,7 +1643,7 @@ SHRuntime *HermesRuntimeImpl::getSHRuntime() noexcept {
   return vm::getSHRuntime(runtime_);
 }
 
-::hermes::vm::Runtime *HermesRuntimeImpl::getVMRuntimeUnsafe() const {
+void *HermesRuntimeImpl::getVMRuntimeUnsafe() const {
   return rt_.get();
 }
 
@@ -1581,7 +1718,8 @@ HermesRuntimeImpl::prepareJavaScriptWithSourceMap(
   std::pair<std::unique_ptr<hbc::BCProvider>, std::string> bcErr{};
   vm::RuntimeModuleFlags runtimeFlags{};
 
-  bool isBytecode = isHermesBytecode(jsiBuffer->data(), jsiBuffer->size());
+  auto *api = jsi::castInterface<IHermesRootAPI>(makeHermesRootAPI());
+  bool isBytecode = api->isHermesBytecode(jsiBuffer->data(), jsiBuffer->size());
 #ifdef HERMESVM_PLATFORM_LOGGING
   hermesLog(
       "HermesVM", "Prepare JS on %s.", isBytecode ? "bytecode" : "source");
@@ -1610,9 +1748,13 @@ HermesRuntimeImpl::prepareJavaScriptWithSourceMap(
     }
   }
   if (!bcErr.first) {
-    LOG_EXCEPTION_CAUSE("Compiling JS failed: %s", bcErr.second.c_str());
+    LOG_EXCEPTION_CAUSE(
+        "Compiling JS failed: %s, sourceURL: %s",
+        bcErr.second.c_str(),
+        sourceURL.c_str());
     throw jsi::JSINativeException(
-        "Compiling JS failed: " + std::move(bcErr.second));
+        "Compiling JS failed: " + std::move(bcErr.second) +
+        ", sourceURL: " + sourceURL);
   }
   return std::make_shared<const HermesPreparedJavaScript>(
       std::move(bcErr.first), runtimeFlags, std::move(sourceURL), runtime_);
@@ -1995,9 +2137,11 @@ jsi::Object HermesRuntimeImpl::createObjectWithPrototype(
         *this, "Object prototype argument must be an Object or null");
   }
 
+  vm::PinnedHermesValue numberStorage;
   auto object = vm::JSObject::create(
       runtime_,
-      vm::Handle<vm::JSObject>::dyn_vmcast(vmHandleFromValue(prototype)));
+      vm::Handle<vm::JSObject>::dyn_vmcast(
+          vmHandleFromValue(prototype, &numberStorage)));
   return add<jsi::Object>(object.getHermesValue());
 }
 
@@ -2029,6 +2173,11 @@ static void deleteShared(vm::GC &, vm::NativeState *ns) {
 void HermesRuntimeImpl::setNativeState(
     const jsi::Object &obj,
     std::shared_ptr<jsi::NativeState> state) {
+  struct : public vm::Locals {
+    vm::PinnedValue<vm::NativeState> ns;
+  } lv;
+  vm::LocalsRAII lraii(runtime_, &lv);
+
   vm::GCScope gcScope(runtime_);
   auto h = handle(obj);
   if (h->isProxyObject()) {
@@ -2039,14 +2188,13 @@ void HermesRuntimeImpl::setNativeState(
   // Allocate a shared_ptr on the C++ heap and use it as context of
   // NativeState.
   auto *ptr = new std::shared_ptr<jsi::NativeState>(std::move(state));
-  auto ns =
-      runtime_.makeHandle(vm::NativeState::create(runtime_, ptr, deleteShared));
+  lv.ns = vm::NativeState::create(runtime_, ptr, deleteShared);
   auto res = vm::JSObject::defineOwnProperty(
       h,
       runtime_,
       vm::Predefined::getSymbolID(vm::Predefined::InternalPropertyNativeState),
       vm::DefinePropertyFlags::getDefaultNewPropertyFlags(),
-      ns);
+      lv.ns);
   // NB: If setting the property failed, then the NativeState cell will soon
   // be unreachable, and when it's later finalized, the shared_ptr will be
   // deleted.
@@ -2082,6 +2230,11 @@ std::shared_ptr<jsi::NativeState> HermesRuntimeImpl::getNativeState(
 void HermesRuntimeImpl::setExternalMemoryPressure(
     const jsi::Object &obj,
     size_t amt) {
+  struct : public vm::Locals {
+    vm::PinnedValue<vm::NativeState> nsHnd;
+  } lv;
+  vm::LocalsRAII lraii(runtime_, &lv);
+
   vm::GCScope gcScope(runtime_);
   auto h = handle(obj);
   if (h->isProxyObject())
@@ -2111,8 +2264,8 @@ void HermesRuntimeImpl::setExternalMemoryPressure(
     // This is the first time adding external memory to this object. Create a
     // new NativeState. We use the context pointer to store the external memory
     // amount.
-    auto nsHnd = runtime_.makeHandle(vm::NativeState::create(
-        runtime_, reinterpret_cast<void *>(0), debitMem));
+    lv.nsHnd = vm::NativeState::create(
+        runtime_, reinterpret_cast<void *>(0), debitMem);
 
     // Use defineNewOwnProperty to create the new property since we know it
     // doesn't exist. Note that this also bypasses the extensibility check on
@@ -2123,9 +2276,9 @@ void HermesRuntimeImpl::setExternalMemoryPressure(
         vm::Predefined::getSymbolID(
             vm::Predefined::InternalPropertyExternalMemoryPressure),
         vm::PropertyFlags::defaultNewNamedPropertyFlags(),
-        nsHnd);
+        lv.nsHnd);
     checkStatus(res);
-    ns = *nsHnd;
+    ns = *lv.nsHnd;
   }
 
   auto curAmt = reinterpret_cast<uintptr_t>(ns->context());
@@ -2196,6 +2349,18 @@ jsi::Value HermesRuntimeImpl::getProperty(
   return valueFromHermesValue(res->get());
 }
 
+jsi::Value HermesRuntimeImpl::getProperty(
+    const jsi::Object &obj,
+    const jsi::Value &name) {
+  vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue numStorage;
+  auto nameHandle = vmHandleFromValue(name, &numStorage);
+  auto objHandle = handle(obj);
+  auto res = vm::JSObject::getComputed_RJS(objHandle, runtime_, nameHandle);
+  checkStatus(res.getStatus());
+  return valueFromHermesValue(res->get());
+}
+
 bool HermesRuntimeImpl::hasProperty(
     const jsi::Object &obj,
     const jsi::String &name) {
@@ -2217,17 +2382,30 @@ bool HermesRuntimeImpl::hasProperty(
   return result.getValue();
 }
 
+bool HermesRuntimeImpl::hasProperty(
+    const jsi::Object &obj,
+    const jsi::Value &name) {
+  vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue numStorage;
+  auto nameHandle = vmHandleFromValue(name, &numStorage);
+  auto objHandle = handle(obj);
+  auto res = vm::JSObject::hasComputed(objHandle, runtime_, nameHandle);
+  checkStatus(res.getStatus());
+  return res.getValue();
+}
+
 void HermesRuntimeImpl::setPropertyValue(
     const jsi::Object &obj,
     const jsi::String &name,
     const jsi::Value &value) {
   vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue valueStorage;
   auto h = handle(obj);
   checkStatus(h->putComputed_RJS(
                    h,
                    runtime_,
                    stringHandle(name),
-                   vmHandleFromValue(value),
+                   vmHandleFromValue(value, &valueStorage),
                    vm::PropOpFlags().plusThrowOnError())
                   .getStatus());
 }
@@ -2237,15 +2415,72 @@ void HermesRuntimeImpl::setPropertyValue(
     const jsi::PropNameID &name,
     const jsi::Value &value) {
   vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue valueStorage;
   auto h = handle(obj);
   vm::SymbolID nameID = phv(name).getSymbol();
   checkStatus(h->putNamedOrIndexed(
                    h,
                    runtime_,
                    nameID,
-                   vmHandleFromValue(value),
+                   vmHandleFromValue(value, &valueStorage),
                    vm::PropOpFlags().plusThrowOnError())
                   .getStatus());
+}
+
+void HermesRuntimeImpl::setPropertyValue(
+    const jsi::Object &obj,
+    const jsi::Value &name,
+    const jsi::Value &value) {
+  vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue nameNumStorage;
+  vm::PinnedHermesValue valNumStorage;
+  auto nameHandle = vmHandleFromValue(name, &nameNumStorage);
+  auto valhandle = vmHandleFromValue(value, &valNumStorage);
+  auto objHandle = handle(obj);
+  auto res = vm::JSObject::putComputed_RJS(
+      objHandle,
+      runtime_,
+      nameHandle,
+      valhandle,
+      vm::PropOpFlags().plusThrowOnError());
+  checkStatus(res.getStatus());
+}
+
+void HermesRuntimeImpl::deleteProperty(
+    const jsi::Object &obj,
+    const jsi::PropNameID &name) {
+  vm::GCScope gcScope(runtime_);
+  auto res = vm::JSObject::deleteNamed(
+      handle(obj),
+      runtime_,
+      phv(name).getSymbol(),
+      vm::PropOpFlags().plusThrowOnError());
+  checkStatus(res.getStatus());
+}
+
+void HermesRuntimeImpl::deleteProperty(
+    const jsi::Object &obj,
+    const jsi::String &name) {
+  vm::GCScope gcScope(runtime_);
+  auto res = vm::JSObject::deleteComputed(
+      handle(obj),
+      runtime_,
+      stringHandle(name),
+      vm::PropOpFlags().plusThrowOnError());
+  checkStatus(res.getStatus());
+}
+
+void HermesRuntimeImpl::deleteProperty(
+    const jsi::Object &obj,
+    const jsi::Value &name) {
+  vm::GCScope gcScope(runtime_);
+  vm::PinnedHermesValue numStorage;
+  auto res = vm::JSObject::deleteComputed(
+      handle(obj),
+      runtime_,
+      vmHandleFromValue(name, &numStorage),
+      vm::PropOpFlags().plusThrowOnError());
+  checkStatus(res.getStatus());
 }
 
 bool HermesRuntimeImpl::isArray(const jsi::Object &obj) const {
@@ -2277,32 +2512,33 @@ jsi::Array HermesRuntimeImpl::getPropertyNames(const jsi::Object &obj) {
   vm::GCScope gcScope(runtime_);
   uint32_t beginIndex;
   uint32_t endIndex;
-  vm::CallResult<vm::Handle<vm::SegmentedArray>> cr =
+  vm::CallResult<vm::Handle<vm::ArrayStorageSmall>> cr =
       vm::getForInPropertyNames(runtime_, handle(obj), beginIndex, endIndex);
   checkStatus(cr.getStatus());
-  vm::Handle<vm::SegmentedArray> arr = *cr;
+  vm::Handle<vm::ArrayStorageSmall> arr = *cr;
   size_t length = endIndex - beginIndex;
 
   auto ret = createArray(length);
   for (size_t i = 0; i < length; ++i) {
-    vm::PseudoHandle<> name =
-        vm::createPseudoHandle(arr->at(runtime_, beginIndex + i));
-    if (name->isString()) {
+    vm::SmallHermesValue name = arr->at(beginIndex + i);
+    if (name.isString()) {
       ret.setValueAtIndex(
-          *this, i, valueFromHermesValue(name.getHermesValue()));
-    } else if (name->isSymbol()) {
+          *this,
+          i,
+          valueFromHermesValue(
+              vm::HermesValue::encodeStringValue(name.getString(runtime_))));
+    } else if (name.isSymbol()) {
       // May allocate. 'name' must not be used afterwards.
       vm::StringPrimitive *str =
-          runtime_.getStringPrimFromSymbolID(name->getSymbol());
-      name.invalidate();
+          runtime_.getStringPrimFromSymbolID(name.getSymbol());
       ret.setValueAtIndex(
           *this,
           i,
           valueFromHermesValue(vm::HermesValue::encodeStringValue(str)));
-    } else if (name->isNumber()) {
+    } else if (name.isNumber()) {
       std::string s;
       llvh::raw_string_ostream os(s);
-      os << static_cast<size_t>(name->getNumber());
+      os << static_cast<size_t>(name.getNumber(runtime_));
       ret.setValueAtIndex(
           *this, i, jsi::String::createFromAscii(*this, os.str()));
     } else {
@@ -2336,10 +2572,15 @@ jsi::Array HermesRuntimeImpl::createArray(size_t length) {
 
 jsi::ArrayBuffer HermesRuntimeImpl::createArrayBuffer(
     std::shared_ptr<jsi::MutableBuffer> buffer) {
+  struct : public vm::Locals {
+    vm::PinnedValue<vm::JSArrayBuffer> buf;
+  } lv;
+  vm::LocalsRAII lraii(runtime_, &lv);
+
   vm::GCScope gcScope(runtime_);
-  auto buf = runtime_.makeHandle(vm::JSArrayBuffer::create(
+  lv.buf = vm::JSArrayBuffer::create(
       runtime_,
-      vm::Handle<vm::JSObject>::vmcast(&runtime_.arrayBufferPrototype)));
+      vm::Handle<vm::JSObject>::vmcast(&runtime_.arrayBufferPrototype));
   auto size = buffer->size();
   auto *data = buffer->data();
   auto *ctx = new std::shared_ptr<jsi::MutableBuffer>(std::move(buffer));
@@ -2347,9 +2588,9 @@ jsi::ArrayBuffer HermesRuntimeImpl::createArrayBuffer(
     delete static_cast<std::shared_ptr<jsi::MutableBuffer> *>(ns->context());
   };
   auto res = vm::JSArrayBuffer::setExternalDataBlock(
-      runtime_, buf, data, size, ctx, finalize);
+      runtime_, lv.buf, data, size, ctx, finalize);
   checkStatus(res);
-  return add<jsi::ArrayBuffer>(buf.getHermesValue());
+  return add<jsi::ArrayBuffer>(lv.buf.getHermesValue());
 }
 
 size_t HermesRuntimeImpl::size(const jsi::Array &arr) {
@@ -2396,10 +2637,7 @@ jsi::Value HermesRuntimeImpl::getValueAtIndex(const jsi::Array &arr, size_t i) {
         "getValueAtIndex: index ", i, " is out of bounds [0, ", size(arr), ")");
   }
 
-  auto res = vm::JSObject::getComputed_RJS(
-      handle(arr),
-      runtime_,
-      runtime_.makeHandle(vm::HermesValue::encodeTrustedNumberValue(i)));
+  auto res = vm::getIndexed_RJS(runtime_, handle(arr), i);
   checkStatus(res.getStatus());
 
   return valueFromHermesValue(res->get());
@@ -2415,11 +2653,14 @@ void HermesRuntimeImpl::setValueAtIndexImpl(
         "setValueAtIndex: index ", i, " is out of bounds [0, ", size(arr), ")");
   }
 
+  vm::PinnedHermesValue indexStorage =
+      vm::HermesValue::encodeTrustedNumberValue(i);
+  vm::PinnedHermesValue valueStorage;
   auto res = vm::JSObject::putComputed_RJS(
       handle(arr),
       runtime_,
-      runtime_.makeHandle(vm::HermesValue::encodeTrustedNumberValue(i)),
-      vmHandleFromValue(value));
+      vm::Handle<>(&indexStorage),
+      vmHandleFromValue(value, &valueStorage));
   checkStatus(res.getStatus());
 }
 
@@ -2499,6 +2740,11 @@ jsi::Value HermesRuntimeImpl::callAsConstructor(
     const jsi::Function &func,
     const jsi::Value *args,
     size_t count) {
+  struct : public vm::Locals {
+    vm::PinnedValue<> thisArg;
+  } lv;
+  vm::LocalsRAII lraii(runtime_, &lv);
+
   vm::GCScope gcScope(runtime_);
   vm::Handle<vm::Callable> funcHandle =
       vm::Handle<vm::Callable>::vmcast(&phv(func));
@@ -2528,7 +2774,7 @@ jsi::Value HermesRuntimeImpl::callAsConstructor(
   checkStatus(thisArgRes.getStatus());
   // We need to capture this in case the ctor doesn't return an object,
   // we need to return this object.
-  auto thisArg = runtime_.makeHandle<>(std::move(*thisArgRes));
+  lv.thisArg = std::move(*thisArgRes);
 
   // 13.2.2.8:
   //    Let result be the result of calling the [[Call]] internal property of
@@ -2542,7 +2788,7 @@ jsi::Value HermesRuntimeImpl::callAsConstructor(
       static_cast<uint32_t>(count),
       funcHandle.getHermesValue(),
       funcHandle.getHermesValue(),
-      thisArg.getHermesValue()};
+      lv.thisArg.getHermesValue()};
   if (newFrame.overflowed()) {
     checkStatus(runtime_.raiseStackOverflow(
         ::hermes::vm::Runtime::StackOverflowKind::NativeStack));
@@ -2560,8 +2806,26 @@ jsi::Value HermesRuntimeImpl::callAsConstructor(
   //    Return obj
   auto resultValue = callRes->get();
   vm::HermesValue resultHValue =
-      resultValue.isObject() ? resultValue : thisArg.getHermesValue();
+      resultValue.isObject() ? resultValue : lv.thisArg.getHermesValue();
   return valueFromHermesValue(resultHValue);
+}
+
+void HermesRuntimeImpl::setRuntimeDataImpl(
+    const jsi::UUID &uuid,
+    const void *data,
+    void (*deleter)(const void *data)) {
+  if (auto it = dataMap_.find(uuid); it != dataMap_.end()) {
+    // Free the data currently keyed at UUID
+    auto oldData = it->second.first;
+    auto oldDataDeleter = it->second.second;
+    oldDataDeleter(oldData);
+  }
+  dataMap_[uuid] = {data, deleter};
+}
+
+const void *HermesRuntimeImpl::getRuntimeDataImpl(const jsi::UUID &uuid) {
+  auto entry = dataMap_.lookup(uuid);
+  return entry.first;
 }
 
 bool HermesRuntimeImpl::strictEquals(const jsi::Symbol &a, const jsi::Symbol &b)
@@ -2638,6 +2902,11 @@ vm::HermesValue HermesRuntimeImpl::stringHVFromUtf16(
 }
 
 void HermesRuntimeImpl::throwPendingError() {
+  struct : public vm::Locals {
+    vm::PinnedValue<vm::StringPrimitive> propHandle;
+  } lv;
+  vm::LocalsRAII lraii(runtime_, &lv);
+
   vm::GCScope scope{runtime_};
 
   // Retrieve the exception value and clear as we will rethrow it as a C++
@@ -2645,7 +2914,8 @@ void HermesRuntimeImpl::throwPendingError() {
   auto hv = runtime_.getThrownValue();
   runtime_.clearThrownValue();
   auto jsiVal = valueFromHermesValue(hv);
-  auto hnd = vmHandleFromValue(jsiVal);
+  vm::PinnedHermesValue valueStorage;
+  auto hnd = vmHandleFromValue(jsiVal, &valueStorage);
 
   std::string msg = "No message";
   std::string stack = "No stack";
@@ -2659,7 +2929,7 @@ void HermesRuntimeImpl::throwPendingError() {
 
     /// Attempt to retrieve a string property \p sym from \c obj and store it
     /// in \p out. Ignore any catchable errors and non-string properties.
-    auto getStrProp = [this, obj](vm::SymbolID sym, std::string &out) {
+    auto getStrProp = [this, obj, &lv](vm::SymbolID sym, std::string &out) {
       auto propRes = vm::JSObject::getNamed_RJS(obj, runtime_, sym);
       if (LLVM_UNLIKELY(propRes == vm::ExecutionStatus::EXCEPTION)) {
         // An exception was thrown while retrieving the property, if it is
@@ -2682,8 +2952,9 @@ void HermesRuntimeImpl::throwPendingError() {
       // If the property is a string, update out. Otherwise ignore it.
       auto prop = propRes->get();
       if (prop.isString()) {
-        auto view = vm::StringPrimitive::createStringView(
-            runtime_, runtime_.makeHandle(prop.getString()));
+        lv.propHandle = prop.getString();
+        auto view =
+            vm::StringPrimitive::createStringView(runtime_, lv.propHandle);
         out = utf8FromStringView(view);
       }
     };
@@ -2728,7 +2999,6 @@ vm::RuntimeConfig hardenedHermesRuntimeConfig() {
   vm::RuntimeConfig::Builder config;
   // Disable optional JS features.
   config.withEnableEval(false);
-  config.withArrayBuffer(false);
   config.withES6Proxy(false);
   config.withEnableHermesInternal(false);
   config.withEnableHermesInternalTestMethods(false);
@@ -2738,38 +3008,15 @@ vm::RuntimeConfig hardenedHermesRuntimeConfig() {
   return config.build();
 }
 
+jsi::ICast *makeHermesRootAPI() {
+  static HermesRootAPI api;
+  return (IHermesRootAPI *)&api;
+}
+
 std::unique_ptr<HermesRuntime> makeHermesRuntime(
     const vm::RuntimeConfig &runtimeConfig) {
-  // This is insurance against someone adding data members to
-  // HermesRuntime.  If on some weird platform it fails, it can be
-  // updated or removed.
-  static_assert(
-      sizeof(HermesRuntime) == sizeof(void *),
-      "HermesRuntime should only include a vtable ptr");
-
-#if defined(HERMESVM_PLATFORM_LOGGING)
-  auto ret = std::make_unique<HermesRuntimeImpl>(
-      runtimeConfig.rebuild()
-          .withGCConfig(runtimeConfig.getGCConfig()
-                            .rebuild()
-                            .withShouldRecordStats(true)
-                            .build())
-          .build());
-#else
-  auto ret = std::make_unique<HermesRuntimeImpl>(runtimeConfig);
-#endif
-
-#ifdef HERMES_ENABLE_DEBUGGER
-  // Only HermesRuntime can create a debugger instance.  This requires
-  // the setter and not using make_unique, so the call to new is here
-  // in this function, which is a friend of debugger::Debugger.
-  ret->setDebugger(std::unique_ptr<debugger::Debugger>(
-      new debugger::Debugger(ret.get(), ret->runtime_)));
-#else
-  ret->setDebugger(std::make_unique<debugger::Debugger>());
-#endif
-
-  return ret;
+  auto *api = jsi::castInterface<IHermesRootAPI>(makeHermesRootAPI());
+  return api->makeHermesRuntime(runtimeConfig);
 }
 
 std::unique_ptr<HermesRuntime> makeHermesRuntimeNoThrow(

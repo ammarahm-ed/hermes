@@ -29,7 +29,6 @@ TEST_F(SynthTraceParserTest, ParseHeader) {
   "globalObjID": 258,
   "runtimeConfig": {
     "gcConfig": {
-      "minHeapSize": 1000,
       "initHeapSize": 33554432,
       "maxHeapSize": 536870912,
       "occupancyTarget": 0.75,
@@ -55,7 +54,6 @@ TEST_F(SynthTraceParserTest, ParseHeader) {
   EXPECT_EQ(trace.records().size(), 0);
 
   const ::hermes::vm::GCConfig &gcconf = rtconf.getGCConfig();
-  EXPECT_EQ(gcconf.getMinHeapSize(), 1000);
   EXPECT_EQ(gcconf.getInitHeapSize(), 33554432);
   EXPECT_EQ(gcconf.getMaxHeapSize(), 536870912);
   EXPECT_EQ(gcconf.getOccupancyTarget(), 0.75);
@@ -83,7 +81,6 @@ TEST_F(SynthTraceParserTest, RuntimeConfigDefaults) {
   auto result = parseSynthTrace(bufFromStr(src));
   hermes::vm::RuntimeConfig rtconf = std::get<1>(result).build();
 
-  EXPECT_EQ(rtconf.getGCConfig().getMinHeapSize(), 0);
   EXPECT_EQ(rtconf.getGCConfig().getInitHeapSize(), 33554432);
   EXPECT_EQ(rtconf.getGCConfig().getMaxHeapSize(), 3221225472);
   EXPECT_FALSE(rtconf.getEnableSampledStats());
@@ -466,6 +463,59 @@ TEST_F(SynthTraceParserTest, ParseCreateObjectWithPrototypeRecord) {
           *trace.records().at(1));
   ASSERT_EQ(record1.objID_, 2);
   ASSERT_EQ(record1.prototype_, SynthTrace::encodeObject(1));
+}
+
+TEST_F(SynthTraceParserTest, ParseDeletePropertyRecord) {
+  const char *src = R"(
+{
+  "version": 5,
+  "globalObjID": 100,
+  "runtimeConfig": {
+    "gcConfig": {
+      "initHeapSize": 33554432,
+      "maxHeapSize": 536870912
+    }
+  },
+  "trace": [
+    {
+      "type": "DeletePropertyRecord",
+      "time": 101,
+      "objID": 1,
+      "propID": "string:123"
+    },
+    {
+      "type": "DeletePropertyRecord",
+      "time": 102,
+      "objID": 2,
+      "propID": "propNameID:456"
+    },
+    {
+      "type": "DeletePropertyRecord",
+      "time": 103,
+      "objID": 2,
+      "propID": "number:0x0"
+    },
+  ]
+}
+  )";
+
+  auto parseResult = parseSynthTrace(bufFromStr(src));
+  SynthTrace &trace = std::get<0>(parseResult);
+
+  auto record0 = dynamic_cast<const SynthTrace::DeletePropertyRecord &>(
+      *trace.records().at(0));
+  EXPECT_EQ(record0.objID_, 1);
+  EXPECT_EQ(record0.propID_, SynthTrace::encodeString(123));
+
+  auto record1 = dynamic_cast<const SynthTrace::DeletePropertyRecord &>(
+      *trace.records().at(1));
+  EXPECT_EQ(record1.objID_, 2);
+  EXPECT_EQ(record1.propID_, SynthTrace::encodePropNameID(456));
+
+  auto record3 = dynamic_cast<const SynthTrace::DeletePropertyRecord &>(
+      *trace.records().at(2));
+  EXPECT_EQ(record3.objID_, 2);
+  EXPECT_EQ(record3.propID_, SynthTrace::encodeNumber(0));
 }
 
 } // namespace

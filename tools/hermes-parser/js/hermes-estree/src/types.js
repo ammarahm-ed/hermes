@@ -1047,7 +1047,7 @@ export interface ImportAttribute extends BaseNode {
   +key: Identifier;
   +value: StringLiteral;
 
-  +parent: ImportDeclaration | ImportExpression;
+  +parent: ImportDeclaration;
 }
 
 export interface ImportSpecifier extends BaseNode {
@@ -1062,7 +1062,7 @@ export interface ImportSpecifier extends BaseNode {
 export interface ImportExpression extends BaseNode {
   +type: 'ImportExpression';
   +source: Expression;
-  +attributes: $ReadOnlyArray<ImportAttribute> | null;
+  +options: Expression | null;
 }
 
 export interface ImportDefaultSpecifier extends BaseNode {
@@ -1156,6 +1156,9 @@ export type TypeAnnotationType =
   | ThisTypeAnnotation
   | MixedTypeAnnotation
   | VoidTypeAnnotation
+  | UnknownTypeAnnotation
+  | NeverTypeAnnotation
+  | UndefinedTypeAnnotation
   | StringLiteralTypeAnnotation
   | NumberLiteralTypeAnnotation
   | BigIntLiteralTypeAnnotation
@@ -1208,6 +1211,8 @@ export interface TypeAlias extends BaseTypeAlias {
 interface BaseOpaqueType extends BaseNode {
   +id: Identifier;
   +supertype: TypeAnnotationType | null;
+  +lowerBound: TypeAnnotationType | null;
+  +upperBound: TypeAnnotationType | null;
   +typeParameters: TypeParameterDeclaration | null;
 }
 export interface OpaqueType extends BaseOpaqueType {
@@ -1247,6 +1252,15 @@ export interface MixedTypeAnnotation extends BaseNode {
 }
 export interface VoidTypeAnnotation extends BaseNode {
   +type: 'VoidTypeAnnotation';
+}
+export interface UnknownTypeAnnotation extends BaseNode {
+  +type: 'UnknownTypeAnnotation';
+}
+export interface NeverTypeAnnotation extends BaseNode {
+  +type: 'NeverTypeAnnotation';
+}
+export interface UndefinedTypeAnnotation extends BaseNode {
+  +type: 'UndefinedTypeAnnotation';
 }
 export interface StringLiteralTypeAnnotation extends BaseNode {
   +type: 'StringLiteralTypeAnnotation';
@@ -1306,7 +1320,7 @@ export interface KeyofTypeAnnotation extends BaseNode {
 }
 export interface TupleTypeAnnotation extends BaseNode {
   +type: 'TupleTypeAnnotation';
-  +types: $ReadOnlyArray<TypeAnnotationType>;
+  +elementTypes: $ReadOnlyArray<TypeAnnotationType>;
   +inexact: boolean;
 }
 export interface TupleTypeSpreadElement extends BaseNode {

@@ -68,7 +68,7 @@ TEST_F(ObjectModelTest, SmokeTest) {
   auto prop2ID = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"prop2"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto obj1 = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
   // Try to get a property which hasn't been defined and expect undefined.
@@ -113,7 +113,7 @@ TEST_F(ObjectModelTest, SimplePrototypeTest) {
       runtime, createUTF16Ref(u"prop2"));
 
   // Create and populate a prototype object.
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto prototypeObj = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
   // prototypeObj.prop1 = 10;
@@ -163,7 +163,7 @@ TEST_F(ObjectModelTest, DefineOwnPropertyTest) {
   auto prop2ID = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"prop2"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
 
   {
     // Empty flags.
@@ -359,7 +359,7 @@ TEST_F(ObjectModelTest, SimpleReadOnlyTest) {
   auto prop2ID = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"prop2"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto obj = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
   // Define a read-only property.
@@ -453,7 +453,7 @@ TEST_F(ObjectModelTest, SimpleDeleteTest) {
   auto prop4ID = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"prop4"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto obj = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
   // Attempt to delete a nonexistent property.
@@ -553,6 +553,11 @@ TEST_F(ObjectModelTest, EnvironmentSmokeTest) {
 
 /// Test "computed" methods on a non-array object.
 TEST_F(ObjectModelTest, NonArrayComputedTest) {
+  struct : Locals {
+    PinnedValue<SymbolID> tmpPropNameStorage;
+    PinnedValue<JSObject> propObj;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
   GCScope gcScope{runtime, "ObjectModelTest.NonArrayComputedTest", 128};
 
   auto prop1Name = StringPrimitive::createNoThrow(runtime, "prop1");
@@ -566,7 +571,7 @@ TEST_F(ObjectModelTest, NonArrayComputedTest) {
   auto value11 = runtime.makeHandle(HermesValue::encodeTrustedNumberValue(11));
   auto value12 = runtime.makeHandle(HermesValue::encodeTrustedNumberValue(12));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
 
   auto obj1 = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
@@ -592,25 +597,22 @@ TEST_F(ObjectModelTest, NonArrayComputedTest) {
 
   // Get the two properties computed descriptors and the values using the
   // descriptors.
-  ComputedPropertyDescriptor cdesc;
-  MutableHandle<JSObject> propObjHandle{runtime};
-  MutableHandle<SymbolID> tmpPropNameStorage{runtime};
+  ComputedPropertyDescWithSymStorage cdesc{lv.tmpPropNameStorage};
+  MutableHandle<JSObject> propObjHandle{lv.propObj};
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, index5, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, index5, propObjHandle, cdesc);
   ASSERT_TRUE(propObjHandle);
   ASSERT_FALSE(cdesc.flags.indexed);
   ASSERT_EQ(
       value10.get(),
-      JSObject::getComputedSlotValue(obj1, runtime, tmpPropNameStorage, cdesc)
-          ->get());
+      JSObject::getComputedSlotValue(obj1, runtime, cdesc.get())->get());
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, prop1Name, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, prop1Name, propObjHandle, cdesc);
   ASSERT_TRUE(propObjHandle);
   ASSERT_FALSE(cdesc.flags.indexed);
   ASSERT_EQ(
       value11.get(),
-      JSObject::getComputedSlotValue(obj1, runtime, tmpPropNameStorage, cdesc)
-          ->get());
+      JSObject::getComputedSlotValue(obj1, runtime, cdesc)->get());
 
   // Use getComputed() to obtain the values.
   EXPECT_CALLRESULT_VALUE(
@@ -629,10 +631,10 @@ TEST_F(ObjectModelTest, NonArrayComputedTest) {
 
   // Try to get missing properties.
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, index6, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, index6, propObjHandle, cdesc);
   ASSERT_FALSE(propObjHandle);
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, prop2Name, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, prop2Name, propObjHandle, cdesc);
   ASSERT_FALSE(propObjHandle);
 
   // Delete a missing property.
@@ -642,11 +644,11 @@ TEST_F(ObjectModelTest, NonArrayComputedTest) {
   // Delete existing properties.
   ASSERT_TRUE(*JSObject::deleteComputed(obj1, runtime, index5));
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, index5, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, index5, propObjHandle, cdesc);
   ASSERT_FALSE(propObjHandle);
   ASSERT_TRUE(*JSObject::deleteComputed(obj1, runtime, prop1Name));
   JSObject::getComputedPrimitiveDescriptor(
-      obj1, runtime, prop1Name, propObjHandle, tmpPropNameStorage, cdesc);
+      obj1, runtime, prop1Name, propObjHandle, cdesc);
   ASSERT_FALSE(propObjHandle);
 }
 
@@ -662,7 +664,7 @@ TEST_F(ObjectModelTest, NamedOrIndexed) {
   auto indexID2 = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"100000000"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto nonIndexObj = runtime.makeHandle(JSObject::create(runtime, nullObj));
 
   auto indexObjRes = JSArray::create(runtime, 10, 0);
@@ -818,7 +820,7 @@ TEST_F(ObjectModelTest, UpdatePropertyFlagsWithoutTransitionsTest) {
   auto cHnd = *runtime.getIdentifierTable().getSymbolHandle(
       runtime, createUTF16Ref(u"c"));
 
-  Handle<JSObject> nullObj(runtime, nullptr);
+  auto nullObj = runtime.makeHandle<JSObject>(nullptr);
   auto obj = runtime.makeHandle(JSObject::create(runtime, nullObj));
   ASSERT_TRUE(*JSObject::defineOwnProperty(
       obj,
@@ -879,35 +881,38 @@ TEST_F(ObjectModelTest, UpdatePropertyFlagsWithoutTransitionsTest) {
   EXPECT_PROPERTY_FLAG(FALSE, obj, *cHnd, configurable);
 }
 
-#ifndef HERMESVM_GC_MALLOC
-struct ObjectModelLargeHeapTest : public RuntimeTestFixtureBase {
-  ObjectModelLargeHeapTest()
-      : RuntimeTestFixtureBase(
-            RuntimeConfig::Builder()
-                .withGCConfig(GCConfig::Builder(kTestGCConfigBuilder)
-                                  .withInitHeapSize(1 << 20)
-                                  .withMaxHeapSize(1 << 26)
-                                  .build())
-                .build()) {}
-};
+TEST_F(ObjectModelTest, ParentCacheEpochTest) {
+  auto *runtimeModule = RuntimeModule::createUninitialized(runtime, domain);
 
-// This test will OOM before it throws on non-NC GCs.
-TEST_F(ObjectModelLargeHeapTest, LargeObjectThrowsRangeError) {
-  Handle<JSObject> obj = runtime.makeHandle(JSObject::create(runtime));
-  MutableHandle<> i{runtime, HermesValue::encodeTrustedNumberValue(0)};
-  while (true) {
-    GCScopeMarkerRAII marker{gcScope};
-    CallResult<bool> res = JSObject::putComputed_RJS(obj, runtime, i, i);
-    if (res == ExecutionStatus::EXCEPTION) {
-      // Check that RangeError was thrown.
-      auto *err = vmcast<JSObject>(runtime.getThrownValue());
-      EXPECT_EQ(err->getParent(runtime), *runtime.RangeErrorPrototype);
-      return;
-    }
-    i = HermesValue::encodeTrustedNumberValue(i->getNumber() + 1);
-  }
-  FAIL() << "Didn't throw";
+  struct : public Locals {
+    PinnedValue<JSObject> obj;
+    PinnedValue<JSObject> parent;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
+
+  // Start with setting the epoch to 1, which is the same value it will have
+  // after overflowing.
+  runtime.testSetParentCacheEpoch(1);
+  runtime.setArrayFastPathParentEpoch();
+  EXPECT_TRUE(runtime.checkArrayFastPathParentEpoch());
+
+  lv.parent = JSObject::create(runtime);
+  lv.obj = JSObject::create(runtime, lv.parent);
+  uint32_t idx = *runtimeModule->allocateAddCacheEntry();
+  AddPropertyCacheEntry &entry = runtimeModule->getAddCacheEntry(idx);
+  entry.parent = lv.obj->getParentGCPtr();
+  entry.startClazz = lv.obj->getClassGCPtr();
+  entry.setParentEpochAndSlot(runtime.getParentCacheEpoch(), 5);
+
+  // Ensure that these get invalidated by incrementing.
+  runtime.testSetParentCacheEpoch(AddPropertyCacheEntry::kMaxParentEpoch - 2);
+  EXPECT_EQ(
+      AddPropertyCacheEntry::kMaxParentEpoch - 1,
+      runtime.incParentCacheEpoch());
+  EXPECT_TRUE(entry.startClazz);
+  EXPECT_EQ(1, runtime.incParentCacheEpoch());
+  EXPECT_FALSE(entry.startClazz);
+  EXPECT_FALSE(runtime.checkArrayFastPathParentEpoch());
 }
-#endif
 
 } // namespace

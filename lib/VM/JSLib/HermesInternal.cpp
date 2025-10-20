@@ -35,8 +35,10 @@ static inline CallResult<Handle<SymbolID>> symbolForCStr(
 }
 
 // ES7 24.1.1.3
-CallResult<HermesValue>
-hermesInternalDetachArrayBuffer(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalDetachArrayBuffer(
+    void *,
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto buffer = args.dyncastArg<JSArrayBuffer>(0);
   if (!buffer) {
     return runtime.raiseTypeError(
@@ -50,8 +52,7 @@ hermesInternalDetachArrayBuffer(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-hermesInternalGetEpilogues(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetEpilogues(void *, Runtime &runtime) {
   // Create outer array with one element per module.
   auto eps = runtime.getEpilogues();
   auto outerLen = eps.size();
@@ -60,8 +61,12 @@ hermesInternalGetEpilogues(void *, Runtime &runtime, NativeArgs args) {
   if (outerResult == ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
-  Handle<JSArray> outer = runtime.makeHandle(std::move(*outerResult));
-  if (outer->setStorageEndIndex(outer, runtime, outerLen) ==
+  struct : public Locals {
+    PinnedValue<JSArray> outer;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.outer = std::move(*outerResult);
+  if (lv.outer->setStorageEndIndex(lv.outer, runtime, outerLen) ==
       ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -74,18 +79,18 @@ hermesInternalGetEpilogues(void *, Runtime &runtime, NativeArgs args) {
         return ExecutionStatus::EXCEPTION;
       }
       auto ta = result.getValue();
-      std::memcpy(ta->begin(runtime), eps[i].begin(), innerLen);
+      std::memcpy(ta->data(runtime), eps[i].begin(), innerLen);
       const auto shv = SmallHermesValue::encodeObjectValue(*ta, runtime);
-      JSArray::unsafeSetExistingElementAt(*outer, runtime, i, shv);
+      JSArray::unsafeSetExistingElementAt(*lv.outer, runtime, i, shv);
     }
   }
-  return HermesValue::encodeObjectValue(*outer);
+  return HermesValue::encodeObjectValue(*lv.outer);
 }
 
 /// Used for testing, determines how many live values
 /// are in the given WeakMap or WeakSet.
-CallResult<HermesValue>
-hermesInternalGetWeakSize(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetWeakSize(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (auto M = args.dyncastArg<JSWeakMap>(0)) {
     return HermesValue::encodeTrustedNumberValue(
         JSWeakMap::debugFreeSlotsAndGetSize(runtime, *M));
@@ -101,27 +106,33 @@ hermesInternalGetWeakSize(void *, Runtime &runtime, NativeArgs args) {
 }
 
 /// \return an object containing various instrumented statistics.
-CallResult<HermesValue>
-hermesInternalGetInstrumentedStats(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetInstrumentedStats(
+    void *,
+    Runtime &runtime) {
   GCScope gcScope(runtime);
-  auto resultHandle = runtime.makeHandle(JSObject::create(runtime));
+  struct : public Locals {
+    PinnedValue<JSObject> resultHandle;
+    PinnedValue<> valHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.resultHandle = JSObject::create(runtime);
 
   /// Adds \p key with \p val to the resultHandle object.
   auto addToResultHandle = [&](llvh::StringRef key, double v) {
     GCScopeMarkerRAII marker{gcScope};
     HermesValue val = HermesValue::encodeUntrustedNumberValue(v);
-    Handle<> valHandle = runtime.makeHandle(val);
+    lv.valHandle = val;
     auto keySym = symbolForCStr(runtime, key.data());
     if (LLVM_UNLIKELY(keySym == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
 
     return JSObject::defineNewOwnProperty(
-        resultHandle,
+        lv.resultHandle,
         runtime,
         **keySym,
         PropertyFlags::defaultNewNamedPropertyFlags(),
-        valHandle);
+        lv.valHandle);
   };
 
   /// Adds a property to resultHandle. \p key provides its name, and \p val,
@@ -149,7 +160,7 @@ hermesInternalGetInstrumentedStats(void *, Runtime &runtime, NativeArgs args) {
   ADD_PROP("js_markStackOverflows", info.numMarkStackOverflows);
 #undef ADD_PROP
 
-  return resultHandle.getHermesValue();
+  return lv.resultHandle.getHermesValue();
 }
 
 /// \return a static string summarising the presence and resolution type of
@@ -179,11 +190,16 @@ static const char *getCJSModuleModeDescription(Runtime &runtime) {
 }
 
 /// \return an object mapping keys to runtime property values.
-CallResult<HermesValue>
-hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetRuntimeProperties(
+    void *,
+    Runtime &runtime) {
   GCScope gcScope(runtime);
-  auto resultHandle = runtime.makeHandle(JSObject::create(runtime));
-  MutableHandle<> tmpHandle{runtime};
+  struct : public Locals {
+    PinnedValue<JSObject> resultHandle;
+    PinnedValue<> tmpHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.resultHandle = JSObject::create(runtime);
 
   /// Add a property \p value keyed under \p key to resultHandle.
   /// Return an ExecutionStatus.
@@ -193,49 +209,39 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
       return ExecutionStatus::EXCEPTION;
     }
     return JSObject::defineNewOwnProperty(
-        resultHandle,
+        lv.resultHandle,
         runtime,
         **keySym,
         PropertyFlags::defaultNewNamedPropertyFlags(),
         value);
   };
 
-#ifdef HERMES_FACEBOOK_BUILD
-  tmpHandle =
-      HermesValue::encodeBoolValue(std::strstr(__FILE__, "hermes-snapshot"));
-  if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Snapshot VM") ==
-          ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
-#endif
-
-  tmpHandle =
+  lv.tmpHandle =
       HermesValue::encodeTrustedNumberValue(::hermes::hbc::BYTECODE_VERSION);
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Bytecode Version") ==
+          addProperty(lv.tmpHandle, "Bytecode Version") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  tmpHandle = HermesValue::encodeBoolValue(true);
+  lv.tmpHandle = HermesValue::encodeBoolValue(true);
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Static Hermes") ==
+          addProperty(lv.tmpHandle, "Static Hermes") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  tmpHandle = HermesValue::encodeBoolValue(runtime.builtinsAreFrozen());
+  lv.tmpHandle = HermesValue::encodeBoolValue(runtime.builtinsAreFrozen());
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Builtins Frozen") ==
+          addProperty(lv.tmpHandle, "Builtins Frozen") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  tmpHandle =
+  lv.tmpHandle =
       HermesValue::encodeTrustedNumberValue(runtime.getVMExperimentFlags());
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "VM Experiments") ==
+          addProperty(lv.tmpHandle, "VM Experiments") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -254,9 +260,9 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(buildModeRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  tmpHandle = *buildModeRes;
+  lv.tmpHandle = *buildModeRes;
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Build") == ExecutionStatus::EXCEPTION)) {
+          addProperty(lv.tmpHandle, "Build") == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
@@ -266,9 +272,9 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(gcKindRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  tmpHandle = *gcKindRes;
+  lv.tmpHandle = *gcKindRes;
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "GC") == ExecutionStatus::EXCEPTION)) {
+          addProperty(lv.tmpHandle, "GC") == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
@@ -278,9 +284,9 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(relVerRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  tmpHandle = *relVerRes;
+  lv.tmpHandle = *relVerRes;
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "OSS Release Version") ==
+          addProperty(lv.tmpHandle, "OSS Release Version") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -294,9 +300,9 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
 #endif
       ;
 
-  tmpHandle = HermesValue::encodeBoolValue(debuggerEnabled);
+  lv.tmpHandle = HermesValue::encodeBoolValue(debuggerEnabled);
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "Debugger Enabled") ==
+          addProperty(lv.tmpHandle, "Debugger Enabled") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -307,14 +313,14 @@ hermesInternalGetRuntimeProperties(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(cjsModuleModeRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  tmpHandle = *cjsModuleModeRes;
+  lv.tmpHandle = *cjsModuleModeRes;
   if (LLVM_UNLIKELY(
-          addProperty(tmpHandle, "CommonJS Modules") ==
+          addProperty(lv.tmpHandle, "CommonJS Modules") ==
           ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
 
-  return resultHandle.getHermesValue();
+  return lv.resultHandle.getHermesValue();
 }
 
 #ifdef HERMESVM_PLATFORM_LOGGING
@@ -347,8 +353,7 @@ static void logGCStats(Runtime &runtime, const char *msg) {
 }
 #endif
 
-CallResult<HermesValue>
-hermesInternalTTIReached(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalTTIReached(void *, Runtime &runtime) {
   runtime.ttiReached();
 #ifdef HERMESVM_LLVM_PROFILE_DUMP
   __llvm_profile_dump();
@@ -360,38 +365,30 @@ hermesInternalTTIReached(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-hermesInternalTTRCReached(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalTTRCReached(void *, Runtime &runtime) {
   // Currently does nothing, but could change in the future.
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-hermesInternalIsProxy(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalIsProxy(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   Handle<JSObject> obj = args.dyncastArg<JSObject>(0);
   return HermesValue::encodeBoolValue(obj && obj->isProxyObject());
 }
 
-CallResult<HermesValue>
-hermesInternalHasPromise(void *, Runtime &runtime, NativeArgs args) {
-  return HermesValue::encodeBoolValue(runtime.hasES6Promise());
+CallResult<HermesValue> hermesInternalHasPromise(void *, Runtime &runtime) {
+  return HermesValue::encodeBoolValue(true);
 }
 
-CallResult<HermesValue>
-hermesInternalHasES6Class(void *, Runtime &runtime, NativeArgs args) {
-  return HermesValue::encodeBoolValue(runtime.hasES6Class());
-}
-
-CallResult<HermesValue>
-hermesInternalUseEngineQueue(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalUseEngineQueue(void *, Runtime &runtime) {
   return HermesValue::encodeBoolValue(runtime.hasMicrotaskQueue());
 }
 
 /// \code
 ///   HermesInternal.enqueueJob = function (func) {}
 /// \endcode
-CallResult<HermesValue>
-hermesInternalEnqueueJob(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalEnqueueJob(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto callable = args.dyncastArg<Callable>(0);
   if (!callable) {
     return runtime.raiseTypeError(
@@ -405,8 +402,7 @@ hermesInternalEnqueueJob(void *, Runtime &runtime, NativeArgs args) {
 ///   HermesInternal.drainJobs = function () {}
 /// \endcode
 /// Throw if the drainJobs throws.
-CallResult<HermesValue>
-hermesInternalDrainJobs(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalDrainJobs(void *, Runtime &runtime) {
   auto drainRes = runtime.drainJobs();
   if (drainRes == ExecutionStatus::EXCEPTION) {
     // No need to rethrow since it's already throw.
@@ -417,8 +413,7 @@ hermesInternalDrainJobs(void *, Runtime &runtime, NativeArgs args) {
 
 /// Gets the current call stack as a JS String value.  Intended (only)
 /// to allow testing of Runtime::callStack() from JS code.
-CallResult<HermesValue>
-hermesInternalGetCallStack(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetCallStack(void *, Runtime &runtime) {
   std::string stack = runtime.getCallStackNoAlloc();
   return StringPrimitive::create(runtime, ASCIIRef(stack.data(), stack.size()));
 }
@@ -470,8 +465,10 @@ static CallResult<HermesValue> getCodeBlockFileName(
 /// * virtualOffset (number) - 0 based
 /// * isNative (boolean)
 /// TypeError if func is not a function.
-CallResult<HermesValue>
-hermesInternalGetFunctionLocation(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalGetFunctionLocation(
+    void *,
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope(runtime);
 
   auto callable = args.dyncastArg<Callable>(0);
@@ -479,13 +476,17 @@ hermesInternalGetFunctionLocation(void *, Runtime &runtime, NativeArgs args) {
     return runtime.raiseTypeError(
         "Argument to HermesInternal.getFunctionLocation must be callable");
   }
-  auto resultHandle = runtime.makeHandle(JSObject::create(runtime));
-  MutableHandle<> tmpHandle{runtime};
+  struct : public Locals {
+    PinnedValue<JSObject> resultHandle;
+    PinnedValue<> tmpHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.resultHandle = JSObject::create(runtime);
 
   auto codeBlock = getLeafCodeBlock(callable, runtime);
   bool isNative = !codeBlock;
   auto res = JSObject::defineOwnProperty(
-      resultHandle,
+      lv.resultHandle,
       runtime,
       Predefined::getSymbolID(Predefined::isNative),
       DefinePropertyFlags::getDefaultNewPropertyFlags(),
@@ -497,45 +498,45 @@ hermesInternalGetFunctionLocation(void *, Runtime &runtime, NativeArgs args) {
     OptValue<hbc::DebugSourceLocation> location =
         codeBlock->getSourceLocationForFunction();
     if (location) {
-      tmpHandle = HermesValue::encodeTrustedNumberValue(location->line);
+      lv.tmpHandle = HermesValue::encodeTrustedNumberValue(location->line);
       res = JSObject::defineOwnProperty(
-          resultHandle,
+          lv.resultHandle,
           runtime,
           Predefined::getSymbolID(Predefined::lineNumber),
           DefinePropertyFlags::getDefaultNewPropertyFlags(),
-          tmpHandle);
+          lv.tmpHandle);
       assert(res != ExecutionStatus::EXCEPTION && "Failed to set lineNumber");
       (void)res;
 
-      tmpHandle = HermesValue::encodeTrustedNumberValue(location->column);
+      lv.tmpHandle = HermesValue::encodeTrustedNumberValue(location->column);
       res = JSObject::defineOwnProperty(
-          resultHandle,
+          lv.resultHandle,
           runtime,
           Predefined::getSymbolID(Predefined::columnNumber),
           DefinePropertyFlags::getDefaultNewPropertyFlags(),
-          tmpHandle);
+          lv.tmpHandle);
       assert(res != ExecutionStatus::EXCEPTION && "Failed to set columnNumber");
       (void)res;
     } else {
-      tmpHandle = HermesValue::encodeTrustedNumberValue(
+      lv.tmpHandle = HermesValue::encodeTrustedNumberValue(
           codeBlock->getRuntimeModule()->getBytecode()->getSegmentID());
       res = JSObject::defineOwnProperty(
-          resultHandle,
+          lv.resultHandle,
           runtime,
           Predefined::getSymbolID(Predefined::segmentID),
           DefinePropertyFlags::getDefaultNewPropertyFlags(),
-          tmpHandle);
+          lv.tmpHandle);
       assert(res != ExecutionStatus::EXCEPTION && "Failed to set segmentID");
       (void)res;
 
-      tmpHandle =
+      lv.tmpHandle =
           HermesValue::encodeTrustedNumberValue(codeBlock->getVirtualOffset());
       res = JSObject::defineOwnProperty(
-          resultHandle,
+          lv.resultHandle,
           runtime,
           Predefined::getSymbolID(Predefined::virtualOffset),
           DefinePropertyFlags::getDefaultNewPropertyFlags(),
-          tmpHandle);
+          lv.tmpHandle);
       assert(
           res != ExecutionStatus::EXCEPTION && "Failed to set virtualOffset");
       (void)res;
@@ -545,18 +546,18 @@ hermesInternalGetFunctionLocation(void *, Runtime &runtime, NativeArgs args) {
     if (LLVM_UNLIKELY(fileNameRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
-    tmpHandle = *fileNameRes;
+    lv.tmpHandle = *fileNameRes;
     res = JSObject::defineOwnProperty(
-        resultHandle,
+        lv.resultHandle,
         runtime,
         Predefined::getSymbolID(Predefined::fileName),
         DefinePropertyFlags::getDefaultNewPropertyFlags(),
-        tmpHandle);
+        lv.tmpHandle);
     assert(res != ExecutionStatus::EXCEPTION && "Failed to set fileName");
     (void)res;
   }
-  JSObject::preventExtensions(*resultHandle);
-  return resultHandle.getHermesValue();
+  JSObject::preventExtensions(*lv.resultHandle);
+  return lv.resultHandle.getHermesValue();
 }
 
 /// \code
@@ -572,8 +573,8 @@ hermesInternalGetFunctionLocation(void *, Runtime &runtime, NativeArgs args) {
 /// \endcode
 CallResult<HermesValue> hermesInternalSetPromiseRejectionTrackingHook(
     void *,
-    Runtime &runtime,
-    NativeArgs args) {
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   runtime.promiseRejectionTrackingHook_ = args.getArg(0);
   return HermesValue::encodeUndefinedValue();
 }
@@ -584,8 +585,8 @@ CallResult<HermesValue> hermesInternalSetPromiseRejectionTrackingHook(
 /// Enable promise rejection tracking with the given opts.
 CallResult<HermesValue> hermesInternalEnablePromiseRejectionTracker(
     void *,
-    Runtime &runtime,
-    NativeArgs args) {
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto opts = args.getArgHandle(0);
   if (!vmisa<Callable>(*runtime.promiseRejectionTrackingHook_)) {
     return runtime.raiseTypeError(
@@ -619,18 +620,24 @@ CallResult<HermesValue> hermesInternalEnablePromiseRejectionTracker(
 /// ata write file decriptor (REPRL_DWFD). The secong argument "arg" can be an
 /// integer specifying the type of crash (if op is "FUZZILLI_CRASH") or a string
 /// which value will be sent to fuzzilli (if op is "FUZZILLI_PRINT")
-CallResult<HermesValue>
-hermesInternalFuzzilli(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> hermesInternalFuzzilli(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // REPRL = read-eval-print-reset-loop
   // This file descriptor is being opened by Fuzzilli
   constexpr int REPRL_DWFD = 103; // Data write file decriptor
+
+  struct : public Locals {
+    PinnedValue<StringPrimitive> operation;
+    PinnedValue<StringPrimitive> print;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
 
   auto operationRes = toString_RJS(runtime, args.getArgHandle(0));
   if (LLVM_UNLIKELY(operationRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto operation = StringPrimitive::createStringView(
-      runtime, runtime.makeHandle(std::move(*operationRes)));
+  lv.operation = std::move(*operationRes);
+  auto operation = StringPrimitive::createStringView(runtime, lv.operation);
 
   if (operation.equals(createUTF16Ref(u"FUZZILLI_CRASH"))) {
     auto crashTypeRes = toIntegerOrInfinity(runtime, args.getArgHandle(1));
@@ -661,8 +668,8 @@ hermesInternalFuzzilli(void *, Runtime &runtime, NativeArgs args) {
     if (LLVM_UNLIKELY(printRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
-    auto print = StringPrimitive::createStringView(
-        runtime, runtime.makeHandle(std::move(*printRes)));
+    lv.print = std::move(*printRes);
+    auto print = StringPrimitive::createStringView(runtime, lv.print);
 
     vm::SmallU16String<32> allocator;
     std::string outputString;
@@ -676,8 +683,8 @@ hermesInternalFuzzilli(void *, Runtime &runtime, NativeArgs args) {
 }
 #endif // HERMES_ENABLE_FUZZILLI
 
-static CallResult<HermesValue>
-hermesInternalIsLazy(void *, Runtime &runtime, NativeArgs args) {
+static CallResult<HermesValue> hermesInternalIsLazy(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto callable = args.dyncastArg<Callable>(0);
   if (!callable) {
     return HermesValue::encodeBoolValue(false);
@@ -692,11 +699,16 @@ hermesInternalIsLazy(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeBoolValue(codeBlock->isLazy());
 }
 
-Handle<JSObject> createHermesInternalObject(
+HermesValue createHermesInternalObject(
     Runtime &runtime,
     const JSLibFlags &flags) {
   namespace P = Predefined;
-  Handle<JSObject> intern = runtime.makeHandle(JSObject::create(runtime));
+  struct : public Locals {
+    PinnedValue<JSObject> intern;
+    PinnedValue<> propRes;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.intern = JSObject::create(runtime);
   GCScope gcScope{runtime};
 
   DefinePropertyFlags constantDPF =
@@ -709,7 +721,8 @@ Handle<JSObject> createHermesInternalObject(
       [&](Predefined::Str symID, NativeFunctionPtr func, uint8_t count = 0) {
         (void)defineMethod(
             runtime,
-            intern,
+            lv.intern,
+            Predefined::getSymbolID(symID),
             Predefined::getSymbolID(symID),
             nullptr /* context */,
             func,
@@ -724,7 +737,8 @@ Handle<JSObject> createHermesInternalObject(
             runtime.getIdentifierTable().getSymbolHandle(runtime, ref));
         (void)defineMethod(
             runtime,
-            intern,
+            lv.intern,
+            *symHandle,
             *symHandle,
             nullptr /* context */,
             func,
@@ -747,12 +761,13 @@ Handle<JSObject> createHermesInternalObject(
   assert(
       propRes != ExecutionStatus::EXCEPTION && !(*propRes)->isUndefined() &&
       "Failed to get String.prototype.concat.");
+  lv.propRes = std::move(*propRes);
   auto putRes = JSObject::defineOwnProperty(
-      intern,
+      lv.intern,
       runtime,
       Predefined::getSymbolID(Predefined::concat),
       constantDPF,
-      runtime.makeHandle(std::move(*propRes)));
+      lv.propRes);
   assert(
       putRes != ExecutionStatus::EXCEPTION && *putRes &&
       "Failed to set HermesInternal.concat.");
@@ -762,7 +777,6 @@ Handle<JSObject> createHermesInternalObject(
   // present by the VM internals even under a security-sensitive environment
   // where HermesInternal might be explicitly disabled.
   defineInternMethod(P::hasPromise, hermesInternalHasPromise);
-  defineInternMethod(P::hasES6Class, hermesInternalHasES6Class);
   defineInternMethod(P::enqueueJob, hermesInternalEnqueueJob);
   defineInternMethod(
       P::setPromiseRejectionTrackingHook,
@@ -778,8 +792,8 @@ Handle<JSObject> createHermesInternalObject(
 
   // All functions are known to be safe can be defined above this flag check.
   if (!flags.enableHermesInternal) {
-    JSObject::preventExtensions(*intern);
-    return intern;
+    JSObject::preventExtensions(*lv.intern);
+    return lv.intern.getHermesValue();
   }
 
   // HermesInternal functions that are not necessarily required but are
@@ -796,7 +810,8 @@ Handle<JSObject> createHermesInternalObject(
     // overridden for synth trace case. See TracingRuntime.cpp.
     (void)defineMethod(
         runtime,
-        intern,
+        lv.intern,
+        Predefined::getSymbolID(P::getInstrumentedStats),
         Predefined::getSymbolID(P::getInstrumentedStats),
         nullptr /* context */,
         hermesInternalGetInstrumentedStats,
@@ -821,9 +836,9 @@ Handle<JSObject> createHermesInternalObject(
     defineInternMethodAndSymbol("getCallStack", hermesInternalGetCallStack, 0);
   }
 
-  JSObject::preventExtensions(*intern);
+  JSObject::preventExtensions(*lv.intern);
 
-  return intern;
+  return lv.intern.getHermesValue();
 }
 
 } // namespace vm

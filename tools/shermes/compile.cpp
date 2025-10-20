@@ -290,13 +290,17 @@ bool invokeCC(
         args.emplace_back("Foundation");
         args.emplace_back("-lc++");
         args.emplace_back("-ljsi");
-        args.emplace_back("-lshermes_console_a");
+        if (!params.noHermesLibs) {
+          args.emplace_back("-lshermes_console_a");
+        }
 #else
         llvh::errs() << "Static linking unsupported on this platform\n";
         return false;
 #endif
       } else {
-        args.emplace_back("-lshermes_console");
+        if (!params.noHermesLibs) {
+          args.emplace_back("-lshermes_console");
+        }
         for (const auto &s : cfg.hermesLibPath) {
           args.emplace_back("-Wl,-rpath");
           args.emplace_back(s);
@@ -317,13 +321,15 @@ bool invokeCC(
       splitArgs(cfg.ldflags, args);
     }
 
-    // Either hermesvm_a, hermesvmlean_a, hermesvm, or hermesvmlean.
-    std::string libParam = "-lhermesvm";
-    if (params.lean == ShermesCompileParams::Lean::on)
-      libParam += "lean";
-    if (params.staticLink == ShermesCompileParams::StaticLink::on)
-      libParam += "_a";
-    args.emplace_back(std::move(libParam));
+    if (!params.noHermesLibs) {
+      // Either hermesvm_a, hermesvmlean_a, hermesvm, or hermesvmlean.
+      std::string libParam = "-lhermesvm";
+      if (params.lean == ShermesCompileParams::Lean::on)
+        libParam += "lean";
+      if (params.staticLink == ShermesCompileParams::StaticLink::on)
+        libParam += "_a";
+      args.emplace_back(std::move(libParam));
+    }
 
     splitArgs(cfg.ldlibs, args);
   }
@@ -479,14 +485,14 @@ bool execute(
                  << ", error: " << dlerror() << "\n";
     return false;
   }
-  // Note that main technically takes a non-const char**, but we know it is
-  // never modified.
-  auto *main = (int (*)(int, const char **))dlsym(handle, "main");
+  auto *main = (int (*)(int, char **))dlsym(handle, "main");
   if (!main) {
     llvh::errs() << "dlsym(main) error: " << dlerror() << "\n";
     return false;
   }
-  return !main(args.size(), args.data());
+  // The main function takes a non-const char**, but we know it doesn't actually
+  // modify it, so it is harmless to cast.
+  return !main(args.size(), const_cast<char **>(args.data()));
 }
 
 } // namespace

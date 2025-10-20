@@ -1798,6 +1798,55 @@ TEST_F(CDPAgentTest, DebuggerStepIntoBlackboxedRange) {
   waitForScheduledScripts();
 }
 
+TEST_F(CDPAgentTest, DebuggerStepIntoBlackboxedRangeWithBreakpoint) {
+  int msgId = 1;
+
+  sendAndCheckResponse("Debugger.enable", msgId++);
+
+  scheduleScript(R"(             // line 0
+    function addOne(val) {       // line 1 |
+      const val2 = val + 1;      // line 2 | [3] stop on this manual breakpoint
+      return val2;               // line 3 |
+    }                            // line 4 |
+
+    var a = 1 + 2;
+    debugger;                    // line 7 | [1] hit debugger statement, step over
+    var b = addOne(a);           // line 8 | [2] set blackboxed ranges, set manual breakpoint on line 2, step into
+    var c = b * b;
+  )");
+  auto note = expectNotification("Debugger.scriptParsed");
+  auto scriptID = jsonScope_.getString(note, {"params", "scriptId"});
+
+  // [1] -line 7- hit debugger statement, step over to line 8
+  ensurePaused(waitForMessage(), "other", {{"global", 7, 1}});
+  sendAndCheckResponse("Debugger.stepOver", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  ensurePaused(waitForMessage(), "step", {{"global", 8, 1}});
+
+  // [2] -line 8- set manual breakpoint on line 2
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 2);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{2}});
+
+  // [2] -line 8- blackbox the lines for addOne
+  sendSetBlackboxedRangesAndCheckResponse(msgId++, scriptID, {{0, 0}, {5, 0}});
+
+  // [2] -line 8- step into, verify stopping on the manual breakpoint on line 2
+  sendAndCheckResponse("Debugger.stepInto", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  ensurePaused(waitForMessage(), "step", {{"addOne", 2, 2}, {"global", 8, 1}});
+
+  // resume
+  sendAndCheckResponse("Debugger.resume", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  waitForScheduledScripts();
+}
+
 TEST_F(CDPAgentTest, DebuggerStepOverInsideBlackboxedRange) {
   int msgId = 1;
 
@@ -2780,6 +2829,118 @@ TEST_F(CDPAgentTest, DebuggerRemoveBreakpoint) {
   waitForScheduledScripts();
 }
 
+TEST_F(CDPAgentTest, DebuggerBreakpointsSurviveDomainReload) {
+  int msgId = 1;
+
+  // Wait for a script to be run in the VM prior to Debugger.enable
+  scheduleScript(R"(
+    const a = 100;
+    const b = a + 1;
+  )");
+
+  // Verify that upon enable, we get notification of existing scripts
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 1);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{1}});
+
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureNotification(waitForMessage(), "Debugger.breakpointResolved");
+  ensureOkResponse(waitForMessage(), msgId++);
+}
+
+TEST_F(CDPAgentTest, DebuggerBreakpointsValidatedAcrossMultipleScripts) {
+  int msgId = 1;
+  std::string script = R"(
+    const a = 100;
+    const b = a + 1;
+  )";
+  std::string firstScriptURL = "file://foo-script.js";
+  std::string secondScriptURL = "file://bar-script.js";
+
+  // Wait for a script to be run in the VM prior to Debugger.enable
+  scheduleScript(script, firstScriptURL);
+  scheduleScript(script, secondScriptURL);
+  waitForScheduledScripts();
+
+  // Verify that upon enable, we get notification of existing scripts
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl",
+      msgId,
+      [scriptURL = firstScriptURL](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", scriptURL);
+        json.emitKeyValue("lineNumber", 1);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{1}});
+
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  // The breakpoint will be resolved first, because it was applied to the first
+  // script.
+  ensureNotification(waitForMessage(), "Debugger.breakpointResolved");
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+}
+
+TEST_F(CDPAgentTest, DebuggerBreakpointsPauseVMAfterDomainReload) {
+  int msgId = 1;
+
+  scheduleScript(R"(
+    signalTest();
+
+    while (!shouldStop()) {}
+
+    const x = 1; // (line 5)
+  )");
+  // Wait for the script to start.
+  waitForTestSignal();
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 5);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{5}});
+
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureNotification(waitForMessage(), "Debugger.breakpointResolved");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  // Allow the JavaScript code to continue running.
+  stopFlag_.store(true);
+
+  ensurePaused(waitForMessage(), "other", {{"global", 5, 0}});
+}
+
 TEST_F(CDPAgentTest, DebuggerRestoreState) {
   int msgId = 1;
 
@@ -2895,11 +3056,93 @@ TEST_F(CDPAgentTest, DebuggerDeactivateBreakpointsWhileDisabled) {
   // Now hitting debugger statement on line #3.
   auto pausedNotification =
       ensurePaused(waitForMessage(), "other", {{"global", 3, 1}});
-  if (pausedNotification.callFrames[0].location.lineNumber == 2) {
-    FAIL()
-        << "Debugger paused on the breakpoint at line #2. Expected to skip this breakpoint and pause on the debugger statement on line #3. ";
-    return;
-  }
+
+  // Re-enable breakpoints
+  sendRequest(
+      "Debugger.setBreakpointsActive", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("active", true);
+      });
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  // Resume
+  sendAndCheckResponse("Debugger.resume", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+
+  // Expect the breakpoint on line #4 to trigger
+  ensurePaused(waitForMessage(), "other", {{"global", 4, 1}});
+
+  // Continue and exit
+  sendAndCheckResponse("Debugger.resume", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+}
+
+TEST_F(CDPAgentTest, DebuggerPersistsBreakpointsActiveState) {
+  int msgId = 1;
+
+  sendAndCheckResponse("Debugger.enable", msgId++);
+
+  std::string script = R"(
+    debugger;      // line 1
+    x=100          //      2
+    debugger;      //      3
+    x=101;         //      4
+  )";
+
+  scheduleScript(script, kDefaultUrl);
+  expectNotification("Debugger.scriptParsed");
+
+  // Expect the debugger statement on line #1 to trigger
+  ensurePaused(waitForMessage(), "other", {{"global", 1, 1}});
+
+  // First, create breakpoints that will be persisted.
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 2);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(waitForMessage(), msgId++, {{2}});
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 4);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(waitForMessage(), msgId++, {{4}});
+
+  // Disable Debugger domain
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  // Disable breakpoints before enabling debugger
+  sendRequest(
+      "Debugger.setBreakpointsActive", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("active", false);
+      });
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  // Preserve breakpoints
+  preserveStateAndResetTestEnv(false);
+
+  sendAndCheckResponse("Debugger.enable", msgId++);
+
+  scheduleScript(script, kDefaultUrl);
+  expectNotification("Debugger.scriptParsed");
+
+  expectNotification("Debugger.breakpointResolved");
+  expectNotification("Debugger.breakpointResolved");
+
+  // Expect the debugger statement on line #1 to trigger
+  ensurePaused(waitForMessage(), "other", {{"global", 1, 1}});
+
+  // Resume
+  sendAndCheckResponse("Debugger.resume", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+
+  // Expect the breakpoint on line #2 to be skipped.
+  // Now hitting debugger statement on line #3.
+  auto pausedNotification =
+      ensurePaused(waitForMessage(), "other", {{"global", 3, 1}});
 
   // Re-enable breakpoints
   sendRequest(
@@ -3592,7 +3835,7 @@ TEST_F(CDPAgentTest, RuntimeEvaluateWhilePaused) {
   )");
   expectNotification("Debugger.scriptParsed");
   auto pausedNote = ensurePaused(
-      waitForMessage(), "other", {{"func", 4, 2}, {"global", 5, 1}});
+      waitForMessage(), "other", {{"func", 4, 3}, {"global", 5, 1}});
 
   // Runtime evaluate should not happen while paused.
   int evaluateMsgId = msgId++;

@@ -18,6 +18,7 @@
 #include "hermes/VM/Runtime.h"
 #include "hermes/VM/RuntimeModule-inline.h"
 #include "hermes/VM/StringPrimitive.h"
+#include "hermes/VM/StringPrimitiveValueDenseMapInfo-inline.h"
 #include "hermes/VM/WeakRoot-inline.h"
 
 namespace hermes {
@@ -34,6 +35,9 @@ RuntimeModule::RuntimeModule(
       flags_(flags),
       sourceURL_(sourceURL),
       scriptID_(scriptID) {
+  // Reserve add cache entry 0 as an "always miss" entry.
+  addCacheEntries_.emplace_back();
+
   runtime_.addRuntimeModule(this);
   Domain::addRuntimeModule(domain, runtime, this);
 }
@@ -122,6 +126,7 @@ void RuntimeModule::initializeWithoutCJSModulesMayAllocate(
   // Initialize the object literal hidden class cache.
   auto numObjShapes = bcProvider_->getObjectShapeTable().size();
   objectLiteralHiddenClasses_.resize(numObjShapes);
+  stringSwitchImmTables_.resize(bcProvider_->getNumStringSwitchImmInstrs());
 }
 
 ExecutionStatus RuntimeModule::initializeMayAllocate(
@@ -131,6 +136,19 @@ ExecutionStatus RuntimeModule::initializeMayAllocate(
     return ExecutionStatus::EXCEPTION;
   }
   return ExecutionStatus::RETURNED;
+}
+
+void RuntimeModule::initAfterLazyCompilation() {
+  importStringIDMapMayAllocate();
+  initializeFunctionMap();
+  // Initialize the object literal hidden class cache.
+  auto numObjShapes = bcProvider_->getObjectShapeTable().size();
+  objectLiteralHiddenClasses_.resize(numObjShapes);
+  assert(
+      bcProvider_->getNumStringSwitchImmInstrs() >=
+          stringSwitchImmTables_.size() &&
+      "Number of string switches detected should only grow.");
+  stringSwitchImmTables_.resize(bcProvider_->getNumStringSwitchImmInstrs());
 }
 
 CodeBlock *RuntimeModule::getCodeBlockSlowPath(unsigned index) {
@@ -292,7 +310,8 @@ SymbolID RuntimeModule::mapStringMayAllocate(
   if (flags_.persistent) {
     // Registering a lazy identifier does not allocate, so we do not need a
     // GC scope.
-    id = runtime_.getIdentifierTable().registerLazyIdentifier(str, hash);
+    id = runtime_.getIdentifierTable().registerLazyIdentifier(
+        runtime_, str, hash);
   } else {
     // Accessing a symbol non-lazily may allocate in the GC heap, so add a scope
     // marker.
@@ -302,6 +321,15 @@ SymbolID RuntimeModule::mapStringMayAllocate(
   }
   stringIDMap_[stringID] = RootSymbolID(id);
   return id;
+}
+
+OptValue<uint32_t> RuntimeModule::allocateAddCacheEntry() {
+  if (addCacheEntries_.size() < WritePropertyCacheEntry::kMaxAddCacheIndex) {
+    uint32_t index = addCacheEntries_.size();
+    addCacheEntries_.emplace_back();
+    return index;
+  }
+  return llvh::None;
 }
 
 void RuntimeModule::markRoots(RootAcceptor &acceptor, bool markLongLived) {
@@ -315,21 +343,42 @@ void RuntimeModule::markRoots(RootAcceptor &acceptor, bool markLongLived) {
         acceptor.accept(symbol);
       }
     }
+    for (auto &table : stringSwitchImmTables_) {
+      for (auto &[str, _] : table) {
+        acceptor.acceptPtr(str);
+      }
+    }
   }
 
   acceptor.acceptPtr(moduleExports_);
 }
 
-void RuntimeModule::markLongLivedWeakRoots(WeakRootAcceptor &acceptor) {
-  for (auto &cbPtr : functionMap_) {
-    // Only mark a CodeBlock is its non-null, and has not been scanned
-    // previously in this top-level markRoots invocation.
-    if (cbPtr != nullptr && cbPtr->getRuntimeModule() == this) {
-      cbPtr->markCachedHiddenClasses(runtime_, acceptor);
+void RuntimeModule::markWeakRoots(
+    WeakRootAcceptor &acceptor,
+    bool markLongLived) {
+  if (markLongLived) {
+    for (auto &cbPtr : functionMap_) {
+      // Only mark a CodeBlock is its non-null, and has not been scanned
+      // previously in this top-level markRoots invocation.
+      if (cbPtr != nullptr && cbPtr->getRuntimeModule() == this) {
+        cbPtr->markWeakElementsInCaches(runtime_, acceptor);
+      }
+    }
+    for (auto &entry : objectLiteralHiddenClasses_) {
+      acceptor.acceptWeak(entry);
     }
   }
-  for (auto &entry : objectLiteralHiddenClasses_) {
-    acceptor.acceptWeak(entry);
+
+  if (markLongLived) {
+    for (auto &entry : addCacheEntries_) {
+      acceptor.acceptWeak(entry.startClazz);
+      acceptor.acceptWeak(entry.resultClazz);
+      acceptor.acceptWeak(entry.parent);
+    }
+  } else {
+    for (auto &entry : addCacheEntries_) {
+      acceptor.acceptWeak(entry.parent);
+    }
   }
 }
 
@@ -343,7 +392,7 @@ HiddenClass *RuntimeModule::findCachedLiteralHiddenClass(
       runtime, runtime.getHeap());
 }
 
-void RuntimeModule::tryCacheLiteralHiddenClass(
+void RuntimeModule::setCachedLiteralHiddenClass(
     Runtime &runtime,
     unsigned shapeTableIndex,
     HiddenClass *clazz) {
@@ -355,6 +404,7 @@ void RuntimeModule::tryCacheLiteralHiddenClass(
 
 size_t RuntimeModule::additionalMemorySize() const {
   return stringIDMap_.capacity() * sizeof(SymbolID) +
+      addCacheEntries_.capacity_in_bytes() +
       objectLiteralHiddenClasses_.size() * sizeof(WeakRoot<HiddenClass>) +
       templateMap_.getMemorySize();
 }
@@ -365,6 +415,21 @@ void RuntimeModule::setModuleExport(
     uint32_t modIndex,
     Handle<> modExport) {
   module_export_cache::set(runtime, moduleExports_, modIndex, modExport);
+}
+
+void RuntimeModule::initializeStringSwitchImmTable(
+    StringSwitchDenseMap &table,
+    const hbc::StringSwitchTableCase *cases,
+    uint32_t size) {
+  assert(
+      table.empty() &&
+      "precondition -- should only be called with empty table.");
+  for (unsigned i = 0; i < size; i++) {
+    const hbc::StringSwitchTableCase &switchCase = cases[i];
+    StringPrimitive *strPrim =
+        getStringPrimFromStringIDMayAllocate(switchCase.caseLabelStringID);
+    table[strPrim].bytecodeOffset = switchCase.target;
+  }
 }
 
 #ifdef HERMES_MEMORY_INSTRUMENTATION

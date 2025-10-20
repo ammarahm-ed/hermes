@@ -24,7 +24,14 @@ namespace vm {
 //===----------------------------------------------------------------------===//
 /// ErrorObject.
 
-Handle<NativeConstructor> createErrorConstructor(Runtime &runtime) {
+HermesValue createErrorConstructor(Runtime &runtime) {
+  struct : public Locals {
+    PinnedValue<> nameValue;
+    PinnedValue<> messageValue;
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
   auto errorPrototype = Handle<JSObject>::vmcast(&runtime.ErrorPrototype);
 
   // Error.prototype.xxx methods.
@@ -39,22 +46,25 @@ Handle<NativeConstructor> createErrorConstructor(Runtime &runtime) {
   // Error.prototype.xxx properties.
   // Error.prototype has three own properties: name, message, and stack.
   auto defaultName = runtime.getPredefinedString(Predefined::Error);
+  lv.nameValue = HermesValue::encodeStringValue(defaultName);
   defineProperty(
       runtime,
       errorPrototype,
       Predefined::getSymbolID(Predefined::name),
-      runtime.makeHandle(HermesValue::encodeStringValue(defaultName)));
+      lv.nameValue);
 
   auto defaultMessage = runtime.getPredefinedString(Predefined::emptyString);
+  lv.messageValue = HermesValue::encodeStringValue(defaultMessage);
   defineProperty(
       runtime,
       errorPrototype,
       Predefined::getSymbolID(Predefined::message),
-      runtime.makeHandle(HermesValue::encodeStringValue(defaultMessage)));
+      lv.messageValue);
 
   auto getter = NativeFunction::create(
       runtime,
       Handle<JSObject>::vmcast(&runtime.functionPrototype),
+      Runtime::makeNullHandle<Environment>(),
       nullptr,
       errorStackGetter,
       Predefined::getSymbolID(Predefined::emptyString),
@@ -64,6 +74,7 @@ Handle<NativeConstructor> createErrorConstructor(Runtime &runtime) {
   auto setter = NativeFunction::create(
       runtime,
       Handle<JSObject>::vmcast(&runtime.functionPrototype),
+      Runtime::makeNullHandle<Environment>(),
       nullptr,
       errorStackSetter,
       Predefined::getSymbolID(Predefined::emptyString),
@@ -95,49 +106,64 @@ Handle<NativeConstructor> createErrorConstructor(Runtime &runtime) {
 
   assert(*stackRes && "Failed to define stack accessor");
 
-  auto cons = defineSystemConstructor(
+  defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::Error),
       ErrorConstructor,
       errorPrototype,
-      1);
+      1,
+      lv.cons);
 
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::captureStackTrace),
       nullptr,
       errorCaptureStackTrace,
       2);
+  defineMethod(
+      runtime,
+      lv.cons,
+      Predefined::getSymbolID(Predefined::isError),
+      nullptr,
+      errorIsError,
+      1);
 
-  return cons;
+  return lv.cons.getHermesValue();
 }
 
 // The constructor creation functions have to be expanded from macros because
 // the constructor functions are expanded from macros.
 #define ERR_HELPER(error_name, argCount)                                    \
-  Handle<NativeConstructor> create##error_name##Constructor(                \
-      Runtime &runtime) {                                                   \
+  HermesValue create##error_name##Constructor(Runtime &runtime) {           \
+    struct : public Locals {                                                \
+      PinnedValue<> nameValue;                                              \
+      PinnedValue<NativeConstructor> cons;                                  \
+    } lv;                                                                   \
+    LocalsRAII lraii(runtime, &lv);                                         \
     auto errorPrototype =                                                   \
         Handle<JSObject>::vmcast(&runtime.error_name##Prototype);           \
     auto defaultName = runtime.getPredefinedString(Predefined::error_name); \
+    lv.nameValue = HermesValue::encodeStringValue(defaultName);             \
     defineProperty(                                                         \
         runtime,                                                            \
         errorPrototype,                                                     \
         Predefined::getSymbolID(Predefined::name),                          \
-        runtime.makeHandle(HermesValue::encodeStringValue(defaultName)));   \
+        lv.nameValue);                                                      \
     defineProperty(                                                         \
         runtime,                                                            \
         errorPrototype,                                                     \
         Predefined::getSymbolID(Predefined::message),                       \
         runtime.getPredefinedStringHandle(Predefined::emptyString));        \
-    return defineSystemConstructor(                                         \
+    defineSystemConstructor(                                                \
         runtime,                                                            \
         Predefined::getSymbolID(Predefined::error_name),                    \
         error_name##Constructor,                                            \
         errorPrototype,                                                     \
         Handle<JSObject>::vmcast(&runtime.ErrorConstructor),                \
-        argCount);                                                          \
+        argCount,                                                           \
+        lv.cons);                                                           \
+    return lv.cons.getHermesValue();                                        \
   }
 // The AggregateError constructor takes in two parameters, while all the other
 // Error types take in one.
@@ -157,8 +183,10 @@ static CallResult<HermesValue> constructErrorObject(
   struct : public Locals {
     PinnedValue<JSObject> selfParent;
     PinnedValue<JSError> self;
+    PinnedValue<> cause;
   } lv;
   LocalsRAII lraii(runtime, &lv);
+
   // If this is not a construct call, or it is a construct call and new.target
   // is the error constructor, then we know what parent to use to create the new
   // JSArray.
@@ -198,18 +226,24 @@ static CallResult<HermesValue> constructErrorObject(
   // If Type(options) is Object and ? HasProperty(options, "cause") is true
   if (auto options = Handle<JSObject>::dyn_vmcast(opts)) {
     GCScopeMarkerRAII marker{runtime};
-    NamedPropertyDescriptor desc;
-    Handle<JSObject> propObj =
-        runtime.makeHandle(JSObject::getNamedDescriptorPredefined(
-            options, runtime, Predefined::cause, desc));
-    if (propObj) {
+
+    auto causeName = Predefined::getSymbolID(Predefined::cause);
+
+    // Use the below to ensure we trigger the `[[HasProperty]]` proxy trap.
+    auto hasRes = JSObject::hasNamed(options, runtime, causeName);
+    if (LLVM_UNLIKELY(hasRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+
+    if (LLVM_UNLIKELY(*hasRes)) {
       // a. Let cause be ? Get(options, "cause").
-      auto causeRes = JSObject::getNamedPropertyValue_RJS(
-          lv.self, runtime, std::move(propObj), desc);
+      auto causeRes = JSObject::getNamed_RJS(
+          options, runtime, causeName, PropOpFlags().plusThrowOnError());
       if (LLVM_UNLIKELY(causeRes == ExecutionStatus::EXCEPTION)) {
         return ExecutionStatus::EXCEPTION;
       }
-      Handle<> cause = runtime.makeHandle(std::move(*causeRes));
+      lv.cause = std::move(*causeRes);
+
       // b. Perform ! CreateNonEnumerableDataPropertyOrThrow(O, "cause", cause).
       if (LLVM_UNLIKELY(
               JSObject::defineOwnProperty(
@@ -217,7 +251,7 @@ static CallResult<HermesValue> constructErrorObject(
                   runtime,
                   Predefined::getSymbolID(Predefined::cause),
                   DefinePropertyFlags::getNewNonEnumerableFlags(),
-                  cause,
+                  lv.cause,
                   PropOpFlags().plusThrowOnError()) ==
               ExecutionStatus::EXCEPTION)) {
         return ExecutionStatus::EXCEPTION;
@@ -233,6 +267,11 @@ static CallResult<HermesValue> constructAggregateErrorObject(
     Runtime &runtime,
     NativeArgs args,
     Handle<JSObject> prototype) {
+  struct : public Locals {
+    PinnedValue<JSObject> errorObjHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
   // 1-4 handled in constructErrorObject
   CallResult<HermesValue> errorObj = constructErrorObject(
       runtime,
@@ -244,7 +283,7 @@ static CallResult<HermesValue> constructAggregateErrorObject(
   if (LLVM_UNLIKELY(errorObj == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto errorObjHandle = runtime.makeHandle<JSObject>(*errorObj);
+  lv.errorObjHandle.castAndSetHermesValue<JSObject>(*errorObj);
 
   // 5. Let errorsList be ? IterableToList(errors).
   CallResult<Handle<JSArray>> errorsList =
@@ -257,7 +296,7 @@ static CallResult<HermesValue> constructAggregateErrorObject(
   // [[Value]]: CreateArrayFromList(errorsList) }).
 
   CallResult<bool> res = JSObject::defineOwnProperty(
-      errorObjHandle,
+      lv.errorObjHandle,
       runtime,
       Predefined::getSymbolID(Predefined::errors),
       DefinePropertyFlags::getNewNonEnumerableFlags(),
@@ -266,14 +305,14 @@ static CallResult<HermesValue> constructAggregateErrorObject(
     return ExecutionStatus::EXCEPTION;
   }
   // 7. Return O.
-  return errorObjHandle.getHermesValue();
+  return lv.errorObjHandle.getHermesValue();
 }
 
 // Note- the following names for the error and aggregate functions are spelled
 // to exactly match the names in NativeErrorTypes.def. They are used in the
 // ERR_HELPER macro defined above.
-CallResult<HermesValue>
-ErrorConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> ErrorConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   return constructErrorObject(
       runtime,
       args,
@@ -284,8 +323,8 @@ ErrorConstructor(void *, Runtime &runtime, NativeArgs args) {
 }
 
 // AggregateError has a different constructor body than the other errors.
-CallResult<HermesValue>
-AggregateErrorConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> AggregateErrorConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   return constructAggregateErrorObject(
       runtime, args, runtime.AggregateErrorPrototype);
 }
@@ -294,22 +333,22 @@ AggregateErrorConstructor(void *, Runtime &runtime, NativeArgs args) {
 // native calls, and their interface are restricted. No extra parameters
 // can be passed in. We can't use the #ALL_ERROR_TYPE macro since AggregateError
 // requires a different constructor.
-#define NATIVE_ERROR_TYPE(name)                    \
-  CallResult<HermesValue> name##Constructor(       \
-      void *, Runtime &runtime, NativeArgs args) { \
-    return constructErrorObject(                   \
-        runtime,                                   \
-        args,                                      \
-        args.getArgHandle(0),                      \
-        args.getArgHandle(1),                      \
-        &runtime.name##Constructor,                \
-        &runtime.name##Prototype);                 \
+#define NATIVE_ERROR_TYPE(name)                                         \
+  CallResult<HermesValue> name##Constructor(void *, Runtime &runtime) { \
+    NativeArgs args = runtime.getCurrentFrame().getNativeArgs();        \
+    return constructErrorObject(                                        \
+        runtime,                                                        \
+        args,                                                           \
+        args.getArgHandle(0),                                           \
+        args.getArgHandle(1),                                           \
+        &runtime.name##Constructor,                                     \
+        &runtime.name##Prototype);                                      \
   }
 #include "hermes/VM/NativeErrorTypes.def"
 
 /// ES2023 20.5.3.4
-CallResult<HermesValue>
-errorPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> errorPrototypeToString(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope{runtime};
 
   // 1. Let O be the this value.
@@ -342,8 +381,13 @@ errorPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
 /// If the second argument to captureStackTrace is a function, when collecting
 /// the stack trace all frames above the topmost call to the provided function,
 /// including that call, are left out of the stack trace.
-CallResult<HermesValue>
-errorCaptureStackTrace(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> errorCaptureStackTrace(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  struct : public Locals {
+    PinnedValue<JSError> errorHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
   // Get the target object.
   auto targetHandle = args.dyncastArg<JSObject>(0);
   if (!targetHandle || targetHandle->isHostObject() ||
@@ -353,16 +397,15 @@ errorCaptureStackTrace(void *, Runtime &runtime, NativeArgs args) {
 
   // Construct a temporary Error instance.
   auto errorPrototype = Handle<JSObject>::vmcast(&runtime.ErrorPrototype);
-  auto errorHandle =
-      runtime.makeHandle(JSError::create(runtime, errorPrototype));
+  lv.errorHandle = JSError::create(runtime, errorPrototype);
 
   // Record the stack trace, skipping the entry for captureStackTrace itself.
   const bool skipTopFrame = true;
-  JSError::recordStackTrace(errorHandle, runtime, skipTopFrame);
+  JSError::recordStackTrace(lv.errorHandle, runtime, skipTopFrame);
 
   // Skip frames until and including the sentinel function, if any.
   if (auto sentinel = args.dyncastArg<Callable>(1)) {
-    JSError::popFramesUntilInclusive(runtime, errorHandle, sentinel);
+    JSError::popFramesUntilInclusive(runtime, lv.errorHandle, sentinel);
   }
 
   // Initialize the target's [[CapturedError]] slot with the error instance.
@@ -371,7 +414,7 @@ errorCaptureStackTrace(void *, Runtime &runtime, NativeArgs args) {
       runtime,
       Predefined::getSymbolID(Predefined::InternalPropertyCapturedError),
       DefinePropertyFlags::getDefaultNewPropertyFlags(),
-      errorHandle);
+      lv.errorHandle);
 
   // Even though highly unlikely, something could have happened that caused
   // defineOwnProperty to throw an exception.
@@ -405,6 +448,17 @@ errorCaptureStackTrace(void *, Runtime &runtime, NativeArgs args) {
   }
 
   return HermesValue::encodeUndefinedValue();
+}
+
+CallResult<HermesValue> errorIsError(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  // NOTE: Error.isError does NOT appear to check for Proxy in the way that
+  // IsArray does, so we just can use vmisa here.
+
+  // 1. If arg is not an Object, return false.
+  // 2. If arg does not have an [[ErrorData]] internal slot, return false.
+  // 3. Return true.
+  return HermesValue::encodeBoolValue(vmisa<JSError>(args.getArg(0)));
 }
 
 } // namespace vm

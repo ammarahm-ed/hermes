@@ -18,6 +18,7 @@ namespace vm {
 const VTable Domain::vt{
     CellKind::DomainKind,
     cellSize<Domain>(),
+    /* allowLargeAlloc */ false,
     _finalizeImpl,
     _mallocSizeImpl,
     nullptr
@@ -142,6 +143,7 @@ ExecutionStatus Domain::importCJSModuleTable(
     auto requireFn = NativeFunction::create(
         runtime,
         Handle<JSObject>::vmcast(&runtime.functionPrototype),
+        Runtime::makeNullHandle<Environment>(),
         (void *)TypeErrorKind::InvalidDynamicRequire,
         throwTypeError,
         Predefined::getSymbolID(Predefined::emptyString),

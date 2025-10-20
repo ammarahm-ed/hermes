@@ -12,6 +12,7 @@
 #include "hermes/AST/Context.h"
 #include "hermes/AST/ESTreeJSONDumper.h"
 #include "hermes/AST/TS2Flow.h"
+#include "hermes/AST/TransformAST.h"
 #include "hermes/AST2JS/AST2JS.h"
 #include "hermes/BCGen/HBC/BytecodeDisassembler.h"
 #include "hermes/BCGen/HBC/HBC.h"
@@ -40,6 +41,7 @@
 #include "hermes/Support/OutputStream.h"
 #include "hermes/Support/Statistic.h"
 #include "hermes/Support/Warning.h"
+#include "hermes/Utils/CompilerRuntimeFlags.h"
 #include "hermes/Utils/Dumper.h"
 #include "hermes/Utils/Options.h"
 #include "hermes/VM/JIT/Config.h"
@@ -153,6 +155,7 @@ enum class OptLevel {
   O0,
   Og,
   OMax,
+  OFixedPoint,
 };
 
 cl::opt<OptLevel> OptimizationLevel(
@@ -161,7 +164,8 @@ cl::opt<OptLevel> OptimizationLevel(
     cl::values(
         clEnumValN(OptLevel::O0, "O0", "No optimizations"),
         clEnumValN(OptLevel::Og, "Og", "Optimizations suitable for debugging"),
-        clEnumValN(OptLevel::OMax, "O", "Expensive optimizations")),
+        clEnumValN(OptLevel::OMax, "O", "Expensive optimizations"),
+        clEnumValN(OptLevel::OFixedPoint, "O4", "Optimize to fixed point")),
     cl::cat(CompilerCategory));
 
 enum class StaticBuiltinSetting {
@@ -206,6 +210,7 @@ static opt<OutputFormatKind> DumpTarget(
             DumpTransformedAST,
             "dump-transformed-ast",
             "Dump the transformed AST as text after validation"),
+        clEnumValN(DumpSema, "dump-sema", "Sema tables"),
         clEnumValN(DumpJS, "dump-js", "Dump the AST as JS"),
         clEnumValN(
             DumpTransformedJS,
@@ -255,11 +260,22 @@ static opt<bool> Pretty(
     desc("Pretty print JSON, JS or disassembled bytecode"),
     cat(CompilerCategory));
 
+#if HERMES_PARSE_FLOW
 static opt<bool> Typed(
     "typed",
     init(false),
     desc("Enable typed mode"),
     cat(CompilerCategory));
+#else
+static constexpr bool Typed = false;
+#endif
+
+CLFlag StdGlobals(
+    'f',
+    "std-globals",
+    true,
+    "registration of standard globals",
+    CompilerCategory);
 
 cl::opt<bool> Script(
     "script",
@@ -318,20 +334,6 @@ opt<std::string> ProfilingOutFile(
     "profiling-out",
     desc("File to write profiling info to"));
 
-opt<bool> ES6Class(
-    "Xes6-class",
-    init(false),
-    desc("Enable support for ES6 Class"),
-    Hidden,
-    cat(CompilerCategory));
-
-opt<bool> ES6BlockScoping(
-    "Xes6-block-scoping",
-    init(false),
-    desc("Enable support for ES6 block scoping"),
-    Hidden,
-    cat(CompilerCategory));
-
 opt<bool> MetroRequireOpt(
     "Xmetro-require",
     init(true),
@@ -339,32 +341,7 @@ opt<bool> MetroRequireOpt(
     Hidden,
     cat(CompilerCategory));
 
-opt<bool>
-    EnableEval("enable-eval", init(true), desc("Enable support for eval()"));
-
-// This is normally a compiler option, but it also applies to strings given
-// to eval or the Function constructor.
-opt<bool> VerifyIR(
-    "verify-ir",
-#ifdef HERMES_SLOW_DEBUG
-    init(true),
-#else
-    init(false),
-    Hidden,
-#endif
-    desc("Verify the IR after creating it"),
-    cat(CompilerCategory));
-
-opt<bool> EmitAsyncBreakCheck(
-    "emit-async-break-check",
-    desc("Emit instruction to check async break request"),
-    init(false),
-    cat(CompilerCategory));
-
-opt<bool> OptimizedEval(
-    "optimized-eval",
-    desc("Turn on compiler optimizations in eval."),
-    init(false));
+hermes::CompilerRuntimeFlags compilerRuntimeFlags;
 
 opt<bool> PrintCompilerTiming(
     "ftime-report",
@@ -407,15 +384,27 @@ static cl::opt<DebugLevel> DebugInfoLevel(
     cl::desc("Choose debug info level:"),
     cl::init(DebugLevel::g1),
     cl::values(
-        clEnumValN(DebugLevel::g3, "g", "Equivalent to -g3"),
+        clEnumValN(DebugLevel::g2, "g", "Equivalent to -g2"),
         clEnumValN(DebugLevel::g0, "g0", "Do not emit debug info"),
         clEnumValN(DebugLevel::g1, "g1", "Emit location info for backtraces"),
         clEnumValN(
             DebugLevel::g2,
             "g2",
             "Emit location info for all instructions"),
-        clEnumValN(DebugLevel::g3, "g3", "Emit full info for debugging")),
+        clEnumValN(
+            DebugLevel::g2,
+            "g3",
+            "** Deprecated, full debug info cannot be generated via this tool. This behaves the same as -g2 **")),
     cl::cat(CompilerCategory));
+
+opt<bool> Xg3(
+    "Xg3",
+    init(false),
+    desc(
+        "Emit full info for debugging. Since debugging cannot be done through the hermes "
+        "tool directly, this only makes sense to be used in the context of IR/BC tests."),
+    Hidden,
+    cat(CompilerCategory));
 
 static opt<std::string> InputSourceMap(
     "source-map",
@@ -597,7 +586,7 @@ static CLFlag ReorderRegisters(
 
 static opt<unsigned> InlineMaxSize(
     "Xinline-max-size",
-    cl::init(1),
+    cl::init(OptimizationSettings::kDefaultInlineMaxSize),
     cl::desc("Suppress inlining of functions larger than the given size"),
     cl::Hidden,
     cl::cat(CompilerCategory));
@@ -623,11 +612,27 @@ static opt<bool> Test262(
     desc("Increase compliance with test262 by moving more checks to runtime"),
     cat(CompilerCategory));
 
+static opt<bool> EnableFastNoncompliant(
+    "Xenable-fast-noncompliant",
+    init(false),
+    Hidden,
+    desc(
+        "UNSUPPORTED: Enable all options that result in faster, but noncompliant, behavior."),
+    cat(CompilerCategory));
+
 static opt<bool> EnableTDZ(
     "Xenable-tdz",
     init(false),
     Hidden,
     desc("UNSUPPORTED: Enable TDZ checks for let/const"),
+    cat(CompilerCategory));
+
+static opt<bool> EnableFastDestructure(
+    "Xenable-fast-destructure",
+    init(false),
+    Hidden,
+    desc(
+        "UNSUPPORTED: Enable a faster, but non-compliant, array destructuring."),
     cat(CompilerCategory));
 
 #define WARNING_CATEGORY(name, specifier, description) \
@@ -869,6 +874,10 @@ ESTree::NodePtr parseJS(
   }
 #endif
 
+  parsedAST = hermes::transformASTForCompilation(*context, parsedAST);
+  if (!parsedAST)
+    return nullptr;
+
   // If we are executing in typed mode and not script, then wrap the program.
   if (shouldWrapInIIFE) {
     parsedAST = wrapInIIFE(context, llvh::cast<ESTree::ProgramNode>(parsedAST));
@@ -908,6 +917,9 @@ ESTree::NodePtr parseJS(
         cl::DumpSourceLocation,
         cl::IncludeRawASTProp ? ESTreeRawProp::Include
                               : ESTreeRawProp::Exclude);
+  }
+  if (cl::DumpTarget == DumpSema) {
+    sema::semDump(llvh::outs(), *context, semCtx, flowContext, parsedAST);
   }
   if (cl::DumpTarget == DumpTransformedJS) {
     hermes::generateJS(llvh::outs(), parsedAST, cl::Pretty /* pretty */);
@@ -955,6 +967,16 @@ bool validateFlags() {
   // Validate strict vs non strict mode.
   if (cl::NonStrictMode && cl::StrictMode) {
     err("Error! Cannot use both -strict and -non-strict");
+  }
+
+  if (cl::EnableFastNoncompliant) {
+    if (cl::EnableTDZ) {
+      err("Error! Cannot enable both TDZ and fast noncompliance");
+    }
+  }
+
+  if (cl::Xg3 && cl::OptimizationLevel == cl::OptLevel::OMax) {
+    err("Error! Full debug info is not compatible with full optimization");
   }
 
   // Validate bytecode output file.
@@ -1078,13 +1100,15 @@ std::shared_ptr<Context> createContext(
     std::vector<uint32_t> segments) {
   CodeGenerationSettings codeGenOpts;
   codeGenOpts.test262 = cl::Test262;
-  codeGenOpts.enableTDZ = cl::EnableTDZ;
+  codeGenOpts.enableTDZ = !cl::EnableFastNoncompliant && cl::EnableTDZ;
+  codeGenOpts.enableFastDestructure =
+      cl::EnableFastNoncompliant || cl::EnableFastDestructure;
   codeGenOpts.dumpRegisterInterval = cl::DumpRegisterInterval;
   codeGenOpts.dumpUseList = cl::DumpUseList;
   codeGenOpts.dumpSourceLocation =
       cl::DumpSourceLocation != LocationDumpMode::None;
   codeGenOpts.dumpIRBetweenPasses = cl::DumpBetweenPasses;
-  codeGenOpts.verifyIRBetweenPasses = cl::VerifyIR;
+  codeGenOpts.verifyIRBetweenPasses = cl::compilerRuntimeFlags.VerifyIR;
   codeGenOpts.colors = cl::Colors;
   codeGenOpts.dumpFunctions.insert(
       cl::DumpFunctions.begin(), cl::DumpFunctions.end());
@@ -1112,6 +1136,9 @@ std::shared_ptr<Context> createContext(
 
   optimizationOpts.useLegacyMem2Reg = cl::LegacyMem2Reg;
 
+  optimizationOpts.limitRecursiveInlining =
+      (cl::OptimizationLevel == cl::OptLevel::OFixedPoint);
+
   auto context = std::make_shared<Context>(
       std::move(codeGenOpts),
       optimizationOpts,
@@ -1121,9 +1148,10 @@ std::shared_ptr<Context> createContext(
 
   // Default is non-strict mode, unless it is typed..
   context->setStrictMode((!cl::NonStrictMode && cl::StrictMode) || cl::Typed);
-  context->setEnableEval(cl::EnableEval);
-  context->setConvertES6Classes(cl::ES6Class);
-  context->setEnableES6BlockScoping(cl::ES6BlockScoping);
+  context->setEnableEval(cl::compilerRuntimeFlags.EnableEval);
+  context->setEnableES6BlockScoping(cl::compilerRuntimeFlags.ES6BlockScoping);
+  context->setEnableAsyncGenerators(
+      cl::compilerRuntimeFlags.EnableAsyncGenerators);
   context->setMetroRequireOpt(cl::MetroRequireOpt);
   context->getSourceErrorManager().setOutputOptions(guessErrorOutputOptions());
 
@@ -1173,6 +1201,7 @@ std::shared_ptr<Context> createContext(
   }
 #endif
 
+#if HERMES_PARSE_FLOW
   // If no type parser is specified, use flow by default.
   if (cl::Typed && !cl::ParseFlow
 #if HERMES_PARSE_TS
@@ -1181,7 +1210,6 @@ std::shared_ptr<Context> createContext(
   )
     cl::ParseFlow = true;
 
-#if HERMES_PARSE_FLOW
   if (cl::ParseFlow) {
     context->setParseFlow(ParseFlowSetting::ALL);
   }
@@ -1195,7 +1223,7 @@ std::shared_ptr<Context> createContext(
   }
 #endif
 
-  if (cl::DebugInfoLevel >= cl::DebugLevel::g3) {
+  if (cl::Xg3) {
     context->setDebugInfoSetting(DebugInfoSetting::ALL);
   } else if (cl::DebugInfoLevel == cl::DebugLevel::g2) {
     context->setDebugInfoSetting(DebugInfoSetting::SOURCE_MAP);
@@ -1203,7 +1231,7 @@ std::shared_ptr<Context> createContext(
     // -g1 or -g0. If -g0, we'll strip debug info later.
     context->setDebugInfoSetting(DebugInfoSetting::THROWING);
   }
-  context->setEmitAsyncBreakCheck(cl::EmitAsyncBreakCheck);
+  context->setEmitAsyncBreakCheck(cl::compilerRuntimeFlags.EmitAsyncBreakCheck);
   return context;
 }
 
@@ -1821,7 +1849,6 @@ CompileResult generateBytecodeForSerialization(
             M->getTopLevelFunction(),
             genOptions,
             segment,
-            sourceMapGenOrNull,
             std::move(baseBCProvider));
 
     if (bytecodeModule) {
@@ -1910,11 +1937,13 @@ CompileResult processSourceFiles(
   DeclarationFileListTy declFileList;
 
   // Load the runtime library.
-  if (!loadGlobalDefinition(
-          *context,
-          llvh::MemoryBuffer::getMemBuffer(libhermes),
-          declFileList)) {
-    return LoadGlobalsFailed;
+  if (cl::StdGlobals) {
+    if (!loadGlobalDefinition(
+            *context,
+            llvh::MemoryBuffer::getMemBuffer(libhermes),
+            declFileList)) {
+      return LoadGlobalsFailed;
+    }
   }
 
   // Load the global property definitions.
@@ -2002,7 +2031,7 @@ CompileResult processSourceFiles(
   }
 
   // Verify the IR before we run optimizations on it.
-  if (cl::VerifyIR) {
+  if (cl::compilerRuntimeFlags.VerifyIR) {
     if (!verifyModule(*M, &llvh::errs())) {
       llvh::errs() << "IRGen produced invalid IR\n";
       return VerificationFailed;
@@ -2028,6 +2057,9 @@ CompileResult processSourceFiles(
         break;
       case cl::OptLevel::OMax:
         runFullOptimizationPasses(*M);
+        break;
+      case cl::OptLevel::OFixedPoint:
+        runOptimizationPassesToFixedPoint(*M);
         break;
     }
   }
@@ -2057,7 +2089,7 @@ CompileResult processSourceFiles(
   // options parsing and js parsing. Set the bytecode header flag here.
   genOptions.staticBuiltinsEnabled = context->getStaticBuiltinOptimization();
   genOptions.padFunctionBodiesPercent = cl::PadFunctionBodiesPercent;
-  genOptions.verifyIR = cl::VerifyIR;
+  genOptions.verifyIR = cl::compilerRuntimeFlags.VerifyIR;
   genOptions.emitAsserts = cl::EnableAsserts;
 
   // If the user requests to output a source map, then do not also emit debug

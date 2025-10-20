@@ -9,15 +9,18 @@
 #if HERMESVM_JIT
 #include "JitHandlers.h"
 
+#include "../../JSLib/JSLibInternal.h"
 #include "hermes/VM/Callable.h"
 #include "hermes/VM/CodeBlock.h"
 #include "hermes/VM/Interpreter.h"
 #include "hermes/VM/JSError.h"
+#include "hermes/VM/JSObject-inline.h"
 #include "hermes/VM/RuntimeModule-inline.h"
 #include "hermes/VM/RuntimeModule.h"
 #include "hermes/VM/StackFrame-inline.h"
 #include "hermes/VM/StackFrame.h"
 #include "hermes/VM/StaticHUtils.h"
+#include "hermes/VM/StringPrimitiveValueDenseMapInfo-inline.h"
 
 #define DEBUG_TYPE "jit"
 
@@ -100,7 +103,36 @@ SHLegacyValue _interpreter_create_object_from_buffer(
     uint32_t valBufferOffset) {
   Runtime &runtime = getRuntime(shr);
   CallResult<PseudoHandle<>> res = Interpreter::createObjectFromBuffer(
-      runtime, (CodeBlock *)codeBlock, shapeTableIndex, valBufferOffset);
+      runtime,
+      (CodeBlock *)codeBlock,
+      runtime.objectPrototype,
+      shapeTableIndex,
+      valBufferOffset);
+  if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
+    _sh_throw_current(shr);
+  }
+  return res->getHermesValue();
+}
+
+SHLegacyValue _interpreter_create_object_from_buffer_with_parent(
+    SHRuntime *shr,
+    SHCodeBlock *codeBlock,
+    SHLegacyValue *parent,
+    uint32_t shapeTableIndex,
+    uint32_t valBufferOffset) {
+  Runtime &runtime = getRuntime(shr);
+  auto *parentPHV = toPHV(parent);
+  Handle<JSObject> parentHandle = parentPHV->isObject()
+      ? Handle<JSObject>::vmcast(parentPHV)
+      : parentPHV->isNull()
+      ? Runtime::makeNullHandle<JSObject>()
+      : Handle<JSObject>::vmcast(&runtime.objectPrototype);
+  CallResult<PseudoHandle<>> res = Interpreter::createObjectFromBuffer(
+      runtime,
+      (CodeBlock *)codeBlock,
+      parentHandle,
+      shapeTableIndex,
+      valBufferOffset);
   if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
     _sh_throw_current(shr);
   }
@@ -203,6 +235,102 @@ _sh_ljs_string_add(SHRuntime *shr, SHLegacyValue *left, SHLegacyValue *right) {
   return *result;
 }
 
+JSObject *_jit_new_empty_object_for_buffer(
+    Runtime &runtime,
+    CodeBlock *codeBlock,
+    uint32_t shapeTableIndex,
+    PinnedHermesValue *tmp) {
+  // Get or create the HiddenClass.
+  // TODO: Inline the fast path completely into the JIT emitted code once we can
+  // also inline the allocation.
+  CallResult<HiddenClass *> clazzRes = Interpreter::getHiddenClassForBuffer(
+      runtime,
+      codeBlock,
+      Handle<JSObject>::vmcast(&runtime.objectPrototype),
+      shapeTableIndex);
+  if (LLVM_UNLIKELY(clazzRes == ExecutionStatus::EXCEPTION))
+    _sh_throw_current(&runtime);
+  HiddenClass *clazz = *clazzRes;
+
+  // Construct the object.
+  *tmp = HermesValue::encodeObjectValue(clazz);
+  PseudoHandle<JSObject> result = JSObject::create(
+      runtime,
+      Handle<JSObject>::vmcast(&runtime.objectPrototype),
+      Handle<HiddenClass>::vmcast(toPHV(tmp)));
+  assert(
+      runtime.getHeap().inYoungGen(result.get()) &&
+      "New object is not in young gen");
+
+  return result.get();
+}
+
+void _jit_put_by_id(
+    SHRuntime *shr,
+    SHCodeBlock *codeBlock,
+    SHLegacyValue *shBase,
+    SHLegacyValue *shValue,
+    uint8_t cacheIdx,
+    SHSymbolID symID,
+    bool strictMode,
+    bool tryProp) {
+  Runtime &runtime = getRuntime(shr);
+  CodeBlock *curCodeBlock = (CodeBlock *)codeBlock;
+  Handle<> value{toPHV(shValue)};
+  SmallHermesValue shv = SmallHermesValue::encodeHermesValue(*value, runtime);
+
+  if (HermesValue base = *toPHV(shBase); LLVM_LIKELY(base.isObject())) {
+    auto *obj = vmcast<JSObject>(base);
+    auto *cacheEntry = curCodeBlock->getWriteCacheEntry(cacheIdx);
+
+    CompressedPointer clazzPtr{obj->getClassGCPtr()};
+    // If we have a cache hit, reuse the cached offset and immediately
+    // return the property.
+    if (LLVM_LIKELY(cacheEntry->clazz == clazzPtr)) {
+      JSObject::setNamedSlotValueUnsafe(
+          obj, runtime, cacheEntry->getSlot(), shv);
+      return;
+    }
+
+    // Now check against the AddPropertyCacheEntry to ensure we can still
+    // use the cached information.
+    // NOTE: Need to check resultClazz in all cases because it's a
+    // weak reference that may have been freed even if the add cache is
+    // valid.
+    const auto &addCacheEntry =
+        curCodeBlock->getRuntimeModule()->getAddCacheEntry(
+            cacheEntry->getAddCacheIndex());
+    if (LLVM_LIKELY(addCacheEntry.startClazz == clazzPtr) &&
+        LLVM_LIKELY(addCacheEntry.resultClazz) &&
+        LLVM_LIKELY(
+            addCacheEntry.getParentEpoch() == runtime.getParentCacheEpoch()) &&
+        LLVM_LIKELY(addCacheEntry.parent == obj->getParentGCPtr())) {
+      HiddenClass *resultClazz =
+          addCacheEntry.resultClazz.getNonNull(runtime, runtime.getHeap());
+      JSObject::addNewOwnPropertyInSlot(
+          obj, runtime, resultClazz, addCacheEntry.getSlot(), shv);
+      return;
+    }
+  }
+
+  ExecutionStatus status;
+  {
+    GCScopeMarkerRAII marker{runtime};
+    status = Interpreter::putByIdSlowPath_RJS(
+        runtime,
+        curCodeBlock,
+        toPHV(shBase),
+        toPHV(shValue),
+        cacheIdx,
+        SymbolID::unsafeCreate(symID),
+        strictMode,
+        tryProp);
+  }
+  if (LLVM_UNLIKELY(status == ExecutionStatus::EXCEPTION)) {
+    _sh_throw_current(shr);
+  }
+}
+
 #ifdef HERMESVM_PROFILER_BB
 void _interpreter_register_bb_execution(SHRuntime *shr, uint16_t pointIndex) {
   Runtime &runtime = getRuntime(shr);
@@ -210,6 +338,28 @@ void _interpreter_register_bb_execution(SHRuntime *shr, uint16_t pointIndex) {
   runtime.getBasicBlockExecutionInfo().executeBlock(codeBlock, pointIndex);
 }
 #endif
+
+HermesValue
+_jit_direct_eval(Runtime &runtime, PinnedHermesValue *text, bool strictCaller) {
+  if (!text->isString()) {
+    return *text;
+  }
+
+  CallResult<HermesValue> cr{ExecutionStatus::EXCEPTION};
+  {
+    GCScopeMarkerRAII gcMarker{runtime};
+    cr = vm::directEval(
+        runtime,
+        Handle<StringPrimitive>::vmcast(text),
+        strictCaller,
+        nullptr,
+        false);
+  }
+  if (cr == ExecutionStatus::EXCEPTION)
+    _sh_throw_current(&runtime);
+
+  return *cr;
+}
 
 void _sh_throw_invalid_construct(SHRuntime *shr) {
   Runtime &runtime = getRuntime(shr);
@@ -275,52 +425,61 @@ void *_jit_find_catch_target(
   _sh_throw_current(shr);
 }
 
-SHLegacyValue _jit_dispatch_call(
-    SHRuntime *shr,
-    SHLegacyValue *callTargetSHLV) {
-  Runtime &runtime = getRuntime(shr);
-
-  auto *callTarget = toPHV(callTargetSHLV);
-  if (vmisa<JSFunction>(*callTarget)) {
-    JSFunction *jsFunc = vmcast<JSFunction>(*callTarget);
-    assert(
-        !jsFunc->getCodeBlock()->getJITCompiled() &&
-        "Calls to JITted code should go directly.");
-    CallResult<HermesValue> result = jsFunc->_interpret(runtime);
-    if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION))
-      _sh_throw_current(getSHRuntime(runtime));
-
-    return result.getValue();
-  }
-
-  if (vmisa<NativeJSFunction>(*callTarget)) {
-    return NativeJSFunction::_legacyCall(
-        getSHRuntime(runtime), vmcast<NativeJSFunction>(*callTarget));
-  }
-
-  CallResult<PseudoHandle<>> res{ExecutionStatus::EXCEPTION};
+void _jit_throw_non_object_call(SHRuntime *shr) {
   {
+    Runtime &runtime = getRuntime(shr);
+    // The call target is in the register stack's callee slot.
+    auto *callTarget =
+        &StackFramePtr(runtime.getStackPointer()).getCalleeClosureOrCBRef();
+    assert(!callTarget->isObject() && "Must be non-object");
+    (void)runtime.raiseTypeErrorForValue(
+        Handle<>(callTarget), " is not a function");
+  }
+  _sh_throw_current(shr);
+}
+
+SHLegacyValue _jit_call_builtin(
+    SHRuntime *shr,
+    SHLegacyValue *frame,
+    uint32_t argCount,
+    uint32_t builtinMethodID) {
+  auto res = [&]() {
+    Runtime &runtime = getRuntime(shr);
+    StackFramePtr newFrame(runtime.getStackPointer());
+    newFrame.getPreviousFrameRef() = HermesValue::encodeNativePointer(frame);
+    newFrame.getSavedIPRef() =
+        HermesValue::encodeNativePointer(runtime.getCurrentIP());
+    newFrame.getSavedCodeBlockRef() = HermesValue::encodeNativePointer(nullptr);
+    newFrame.getSHLocalsRef() = HermesValue::encodeNativePointer(nullptr);
+    newFrame.getArgCountRef() = HermesValue::encodeNativeUInt32(argCount);
+    newFrame.getNewTargetRef() = HermesValue::encodeUndefinedValue();
+
+    auto callee =
+        vmcast<NativeFunction>(runtime.getBuiltinCallable(builtinMethodID));
+    newFrame.getCalleeClosureOrCBRef() = HermesValue::encodeObjectValue(callee);
+
     GCScopeMarkerRAII marker{runtime};
-    if (vmisa<NativeFunction>(*callTarget)) {
-      auto *native = vmcast<NativeFunction>(*callTarget);
-      res = NativeFunction::_nativeCall(native, runtime);
-    } else if (vmisa<BoundFunction>(*callTarget)) {
-      auto *bound = vmcast<BoundFunction>(*callTarget);
-      res = BoundFunction::_boundCall(bound, runtime.getCurrentIP(), runtime);
-    } else if (vmisa<Callable>(*callTarget)) {
-      auto callable = Handle<Callable>::vmcast(callTarget);
-      res = callable->call(callable, runtime);
-    } else {
-      res = runtime.raiseTypeErrorForValue(
-          Handle<>(callTarget), " is not a function");
-    }
-  }
-
-  if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
-    _sh_throw_current(getSHRuntime(runtime));
-  }
-
+    return NativeFunction::_nativeCall(callee, runtime);
+  }();
+  if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION))
+    _sh_throw_current(shr);
   return res->getHermesValue();
+}
+
+void *_jit_string_switch_imm_table_lookup(
+    StringSwitchDenseMap *table,
+    SHLegacyValue *switchValueLegacy) {
+  PinnedHermesValue *switchValue = toPHV(switchValueLegacy);
+  if (!switchValue->isString()) {
+    // Not a string; should branch to the default case.
+    return nullptr;
+  }
+  auto iter = table->find(switchValue->getString());
+  if (iter == table->end()) {
+    // Not found; branch to the default case.
+    return nullptr;
+  }
+  return iter->second.jitCodeTarget;
 }
 
 } // namespace hermes::vm

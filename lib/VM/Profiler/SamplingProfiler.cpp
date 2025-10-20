@@ -136,7 +136,6 @@ uint32_t SamplingProfiler::walkRuntimeStack(
 SamplingProfiler::SamplingProfiler(Runtime &runtime)
     : threadID_{oscompat::global_thread_id()}, runtime_{runtime} {
   threadNames_[threadID_] = oscompat::thread_name();
-  sampling_profiler::Sampler::get()->registerRuntime(this);
 }
 
 void SamplingProfiler::dumpSampledStackGlobal(llvh::raw_ostream &OS) {
@@ -218,7 +217,7 @@ facebook::hermes::sampling_profiler::Profile SamplingProfiler::dumpAsProfile() {
   std::lock_guard<std::mutex> lk(runtimeDataLock_);
 
   facebook::hermes::sampling_profiler::Profile profile =
-      ProfileGenerator::generate(*this, sampledStacks_);
+      generateProfile(*this, sampledStacks_);
 
   clear();
   return profile;

@@ -14,8 +14,13 @@
 namespace hermes {
 namespace vm {
 
-Handle<NativeConstructor> createWeakMapConstructor(Runtime &runtime) {
+HermesValue createWeakMapConstructor(Runtime &runtime) {
   auto weakMapPrototype = Handle<JSObject>::vmcast(&runtime.weakMapPrototype);
+
+  struct : public Locals {
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
 
   defineMethod(
       runtime,
@@ -59,25 +64,26 @@ Handle<NativeConstructor> createWeakMapConstructor(Runtime &runtime) {
       runtime.getPredefinedStringHandle(Predefined::WeakMap),
       dpf);
 
-  auto cons = defineSystemConstructor(
+  defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::WeakMap),
       weakMapConstructor,
       weakMapPrototype,
-      0);
+      0,
+      lv.cons);
 
   // ES6.0 23.3.3.1
   defineProperty(
       runtime,
       weakMapPrototype,
       Predefined::getSymbolID(Predefined::constructor),
-      cons);
+      lv.cons);
 
-  return cons;
+  return lv.cons.getHermesValue();
 }
 
-CallResult<HermesValue>
-weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> weakMapConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope{runtime};
 
   if (LLVM_UNLIKELY(!args.isConstructorCall())) {
@@ -87,6 +93,10 @@ weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
   struct : public Locals {
     PinnedValue<JSObject> selfParent;
     PinnedValue<JSWeakMap> self;
+    PinnedValue<JSObject> nextItem;
+    PinnedValue<> keyHandle;
+    PinnedValue<> valueHandle;
+    PinnedValue<Callable> adder;
   } lv;
   LocalsRAII lraii(runtime, &lv);
   if (LLVM_LIKELY(
@@ -120,9 +130,9 @@ weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto adder =
-      Handle<Callable>::dyn_vmcast(runtime.makeHandle(std::move(*propRes)));
-  if (LLVM_UNLIKELY(!adder)) {
+  if (auto callable = dyn_vmcast<Callable>(propRes->getHermesValue())) {
+    lv.adder = callable;
+  } else {
     return runtime.raiseTypeError("Property 'set' for WeakMap is not callable");
   }
 
@@ -132,11 +142,6 @@ weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
   }
   auto iteratorRecord = *iterRes;
 
-  MutableHandle<JSObject> nextItem{runtime};
-  MutableHandle<> keyHandle{runtime};
-  MutableHandle<> valueHandle{runtime};
-  Handle<> zero = HandleRootOwner::getZeroValue();
-  Handle<> one = HandleRootOwner::getOneValue();
   auto marker = gcScope.createMarker();
 
   for (;;) {
@@ -158,24 +163,25 @@ weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
           "WeakMap([iterable]) elements must be objects");
       return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
     }
-    nextItem = vmcast<JSObject>(nextItemRes->get());
-    auto keyRes = JSObject::getComputed_RJS(nextItem, runtime, zero);
+    lv.nextItem = vmcast<JSObject>(nextItemRes->get());
+    auto keyRes = getIndexed_RJS(runtime, lv.nextItem, 0);
     if (LLVM_UNLIKELY(keyRes == ExecutionStatus::EXCEPTION)) {
       return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
     }
-    keyHandle = std::move(*keyRes);
-    auto valueRes = JSObject::getComputed_RJS(nextItem, runtime, one);
+    lv.keyHandle = std::move(*keyRes);
+    auto valueRes = getIndexed_RJS(runtime, lv.nextItem, 1);
     if (LLVM_UNLIKELY(valueRes == ExecutionStatus::EXCEPTION)) {
       return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
     }
-    valueHandle = std::move(*valueRes);
+    lv.valueHandle = std::move(*valueRes);
     if (LLVM_UNLIKELY(
             Callable::executeCall2(
-                adder,
+                lv.adder,
                 runtime,
                 lv.self,
-                keyHandle.getHermesValue(),
-                valueHandle.getHermesValue()) == ExecutionStatus::EXCEPTION)) {
+                lv.keyHandle.getHermesValue(),
+                lv.valueHandle.getHermesValue()) ==
+            ExecutionStatus::EXCEPTION)) {
       return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
     }
   }
@@ -183,73 +189,69 @@ weakMapConstructor(void *, Runtime &runtime, NativeArgs args) {
   return lv.self.getHermesValue();
 }
 
-CallResult<HermesValue>
-weakMapPrototypeDelete(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> weakMapPrototypeDelete(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto M = args.dyncastThis<JSWeakMap>();
   if (LLVM_UNLIKELY(!M)) {
     return runtime.raiseTypeError(
         "WeakMap.prototype.delete can only be called on a WeakMap");
   }
 
-  auto key = args.dyncastArg<JSObject>(0);
-  if (LLVM_UNLIKELY(!key)) {
+  auto key = args.getArgHandle(0);
+  if (LLVM_UNLIKELY(!canBeHeldWeakly(runtime, *key))) {
     return HermesValue::encodeBoolValue(false);
   }
 
   return HermesValue::encodeBoolValue(JSWeakMap::deleteValue(M, runtime, key));
 }
 
-CallResult<HermesValue>
-weakMapPrototypeGet(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> weakMapPrototypeGet(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto M = args.dyncastThis<JSWeakMap>();
   if (LLVM_UNLIKELY(!M)) {
     return runtime.raiseTypeError(
         "WeakMap.prototype.get can only be called on a WeakMap");
   }
 
-  auto key = args.dyncastArg<JSObject>(0);
-  if (LLVM_UNLIKELY(!key)) {
+  auto key = args.getArgHandle(0);
+  if (LLVM_UNLIKELY(!canBeHeldWeakly(runtime, *key))) {
     return HermesValue::encodeUndefinedValue();
   }
 
   return JSWeakMap::getValue(M, runtime, key);
 }
 
-CallResult<HermesValue>
-weakMapPrototypeHas(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> weakMapPrototypeHas(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto M = args.dyncastThis<JSWeakMap>();
   if (LLVM_UNLIKELY(!M)) {
     return runtime.raiseTypeError(
         "WeakMap.prototype.has can only be called on a WeakMap");
   }
 
-  auto key = args.dyncastArg<JSObject>(0);
-  if (LLVM_UNLIKELY(!key)) {
+  auto key = args.getArgHandle(0);
+  if (LLVM_UNLIKELY(!canBeHeldWeakly(runtime, *key))) {
     return HermesValue::encodeBoolValue(false);
   }
 
   return HermesValue::encodeBoolValue(JSWeakMap::hasValue(M, runtime, key));
 }
 
-CallResult<HermesValue>
-weakMapPrototypeSet(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> weakMapPrototypeSet(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto M = args.dyncastThis<JSWeakMap>();
   if (LLVM_UNLIKELY(!M)) {
     return runtime.raiseTypeError(
         "WeakMap.prototype.set can only be called on a WeakMap");
   }
 
-  auto key = args.dyncastArg<JSObject>(0);
-  if (LLVM_UNLIKELY(!key)) {
-    return runtime.raiseTypeError("WeakMap key must be an Object");
+  auto key = args.getArgHandle(0);
+  if (LLVM_UNLIKELY(!canBeHeldWeakly(runtime, *key))) {
+    return runtime.raiseTypeError(
+        "WeakMap key must be an Object or non-registered Symbol");
   }
 
-  if (LLVM_UNLIKELY(
-          JSWeakMap::setValue(M, runtime, key, args.getArgHandle(1)) ==
-          ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
-
+  JSWeakMap::setValue(M, runtime, key, args.getArgHandle(1));
   return M.getHermesValue();
 }
 

@@ -193,6 +193,11 @@ class Token {
 
   UniqueString *getBigIntLiteral() const {
     assert(getKind() == TokenKind::bigint_literal);
+    return stringLiteral_;
+  }
+
+  UniqueString *getBigIntLiteralRawValue() const {
+    assert(getKind() == TokenKind::bigint_literal);
     return rawString_;
   }
 
@@ -251,8 +256,9 @@ class Token {
     kind_ = TokenKind::eof;
   }
 
-  void setBigIntLiteral(UniqueString *raw) {
+  void setBigIntLiteral(UniqueString *bigint, UniqueString *raw) {
     kind_ = TokenKind::bigint_literal;
+    stringLiteral_ = bigint;
     rawString_ = raw;
   }
   void setNumericLiteral(double literal) {
@@ -564,6 +570,11 @@ class JSLexer {
   /// \return the end location of the previous token.
   SMLoc getPrevTokenEndLoc() const {
     return prevTokenEndLoc_;
+  }
+
+  /// Set the end location of the previous token.
+  void setPrevTokenEndLoc(SMLoc loc) {
+    prevTokenEndLoc_ = loc;
   }
 
   /// Check whether the current 'let' is a declaration.

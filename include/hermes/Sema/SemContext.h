@@ -76,6 +76,18 @@ class Decl {
     /// but not outside it.
     ClassExprName,
 
+    // ==== Private name declarations ===
+    /// This name defines a field.
+    PrivateField,
+    /// This name defines a method.
+    PrivateMethod,
+    /// This name defines only a getter.
+    PrivateGetter,
+    /// This name defines only a setter.
+    PrivateSetter,
+    /// This name defines both a getter and setter.
+    PrivateGetterSetter,
+
     // ==== Var-like declarations ===
 
     /// "var" in function scope.
@@ -88,13 +100,26 @@ class Decl {
     UndeclaredGlobalProperty,
   };
 
-  /// Certain identifiers must be treated differently by later parts
-  /// of the program.
-  /// Indicate if this identifier is specially treated "arguments" or "eval".
+  /// Certain identifiers must be treated differently by later parts of the
+  /// program, e.g. this identifier is specially treated "arguments" or "eval".
+  /// Can also store information on a private name decl static level.
   enum class Special : uint8_t {
     NotSpecial,
     Arguments,
     Eval,
+    /// Can only be set for a private method or accessor.
+    PrivateStatic,
+  };
+
+  /// This type describes what kind of constness the decl is.
+  enum class Constness {
+    /// The decl is never treated as const.
+    Never,
+    /// The decl is treated as const only when the assignment occurs in strict
+    /// mode code.
+    StrictModeOnly,
+    /// The decl is always treated as const.
+    Always
   };
 
   /// \return true if this declaration kind obeys the TDZ.
@@ -120,10 +145,43 @@ class Decl {
     return kind >= Kind::GlobalProperty;
   }
 
-  /// \return true if this declaration kind cannot be reassigned.
-  static bool isKindNotReassignable(Kind kind) {
-    return kind == Kind::Const || kind == Kind::ClassExprName ||
-        kind == Kind::Import;
+  /// \return the const level of the given \p kind.
+  static Constness getKindConstness(Kind kind) {
+    // ES 2025 defines 9.1.1.1.3 CreateImmutableBinding ( N, S ) where N is the
+    // name of a binding and S is a 'strict' parameter. A strict binding means
+    // that attempting to rebind that name will always result in a TypeError
+    // being thrown, whereas a non-strict immutable binding means that a
+    // TypeError is only thrown when executing in strict mode. From this
+    // defintion, we can split `Decl::Kind`s into three categories: mutable
+    // bindings (never 'const'), immutable bindings made with S=true(always
+    // 'const'), immutable bindings made with S=false ('const' only in strict
+    // mode.)
+    switch (kind) {
+      // ES 2025 14.2.3
+      // 3.a.i. If IsConstantDeclaration of d is true, then
+      //   1. Perform ! lexEnv.CreateImmutableBinding(dn, true).
+      case Kind::Const:
+      // ES 2025 15.7.14
+      // 1.a. Perform ! classEnv.CreateImmutableBinding(classBinding, true).
+      case Kind::ClassExprName:
+      // ES2025 16.2.1.7.3.1
+      // 7.b.ii. Perform ! env.CreateImmutableBinding(in.[[LocalName]], true).
+      case Kind::Import:
+        return Constness::Always;
+
+      // ES2025 15.2.5
+      // 5. Perform ! funcEnv.CreateImmutableBinding(name, false).
+      case Kind::FunctionExprName:
+        return Constness::StrictModeOnly;
+
+      default:
+        return Constness::Never;
+    }
+  }
+
+  /// \return true if this declaration kind is a private name.
+  static bool isKindPrivateName(Kind kind) {
+    return kind >= Kind::PrivateField && kind <= Kind::PrivateGetterSetter;
   }
 
   /// Identifier that is declared.
@@ -175,6 +233,10 @@ class LexicalScope {
   /// The enclosing lexical scope (it could be in another function).
   /// Null if this is the root scope.
   LexicalScope *const parentScope{};
+  /// The index in the owning parentFunction's scopes list where this scope
+  /// lives. This is set when this scope is inserted into a FunctionInfo. It's
+  /// not copied into a cloned LexicalScope in ESTreeClone.
+  uint32_t idxInParentFunction;
 
   /// All declarations made in this scope.
   llvh::SmallVector<Decl *, 2> decls{};
@@ -187,6 +249,14 @@ class LexicalScope {
   /// If any descendent uses local eval,
   /// it's impossible to know whether local variables are modified.
   bool localEval = false;
+
+  /// The scope in the binding table that this lexical scope is associated with.
+  /// This is used to restore the binding table to this point when performing
+  /// compilation for an eval.
+  BindingTableScopePtrTy bindingTableScope{};
+
+  /// Field to be used by any downstream users of LexicalScope.
+  void *customData{nullptr};
 
   /// \param parentFunction must not be null.
   /// \param parentScope may be null.
@@ -215,6 +285,10 @@ enum class FuncIsArrow { Yes, No };
 
 /// Semantic information about functions.
 class FunctionInfo {
+  /// All lexical scopes in this function.
+  /// The first one is the function scope.
+  llvh::SmallVector<LexicalScope *, 4> scopes_{};
+
  public:
   /// The function surrounding this function.
   /// Null if this is the root function.
@@ -222,9 +296,6 @@ class FunctionInfo {
   /// The enclosing lexical scope.
   /// Null if this is the root function.
   LexicalScope *const parentScope;
-  /// All lexical scopes in this function.
-  /// The first one is the function scope.
-  llvh::SmallVector<LexicalScope *, 4> scopes{};
   /// A list of imports that need to be hoisted and materialized before we
   /// can generate the rest of the function.
   /// Any line of the file may use the imported values.
@@ -281,12 +352,12 @@ class FunctionInfo {
   /// True if this function came from a program node.
   bool isProgramNode = false;
 
-  /// Lazy compilation: the parent binding table scope of this function.
-  /// Eager/eval compilation: the binding table scope of this function.
-  /// In both cases, we're storing the parent of the code we want to eventually
-  /// compile - in the case of lazy compilation we're trying to compile this
-  /// function itself, while in eval we're going to compile (potentially many)
-  /// lexical children, so it's convenient to use the same field.
+  /// True if this function came from a static block node.
+  bool isStaticBlock = false;
+
+  /// The parent binding table scope of this function. Storing the parent of the
+  /// code we want to eventually compile for lazy compilation - we're trying to
+  /// compile this function itself,
   BindingTableScopePtrTy bindingTableScope;
 
   /// How many labels have been allocated in this function so far.
@@ -327,8 +398,8 @@ class FunctionInfo {
   /// \pre the functionScopeIdx field has been set.
   /// \return the top-level lexical scope of the function body.
   LexicalScope *getFunctionBodyScope() const {
-    assert(functionBodyScopeIdx < scopes.size() && "functionScopeIdx not set");
-    return scopes[functionBodyScopeIdx];
+    assert(functionBodyScopeIdx < scopes_.size() && "functionScopeIdx not set");
+    return scopes_[functionBodyScopeIdx];
   }
 
   /// \return the lexical scope which contains the parameter declarations,
@@ -336,8 +407,18 @@ class FunctionInfo {
   /// The scope is guaranteed to contain all Parameter Decls, though it may
   /// contain other Decls as well.
   LexicalScope *getParameterScope() const {
-    assert(!scopes.empty() && "no parameter scope added yet");
-    return scopes[0];
+    assert(!scopes_.empty() && "no parameter scope added yet");
+    return scopes_[0];
+  }
+
+  /// \return the list of scopes declared in this FunctionInfo.
+  const llvh::SmallVectorImpl<LexicalScope *> &getScopes() const {
+    return scopes_;
+  }
+  /// Add \p scope to the list of scopes in this FunctionInfo.
+  void addScope(LexicalScope *scope) {
+    scope->idxInParentFunction = scopes_.size();
+    scopes_.push_back(scope);
   }
 };
 
@@ -364,9 +445,11 @@ class SemContext {
 
   /// Construct a SemContext with an optional parent.
   /// If a parent is provided, the binding table will be shared with the parent.
+  /// If \parent is non-null, then \p lexScope must also be non-null.
   explicit SemContext(
       Context &astContext,
-      const std::shared_ptr<SemContext> &parent = nullptr);
+      const std::shared_ptr<SemContext> &parent = nullptr,
+      LexicalScope *lexScope = nullptr);
 
   ~SemContext();
 
@@ -482,6 +565,26 @@ class SemContext {
   /// Set the "declaration decl" of the specified identifier node.
   void setDeclarationDecl(ESTree::IdentifierNode *node, Decl *decl);
 
+  /// Set a promoted "declaration decl" for the specified identifier node.
+  void setPromotedDecl(ESTree::IdentifierNode *node, Decl *decl) {
+    promotedFunctionDecls_[node] = decl;
+  }
+
+  /// \return a global "declaration decl" associated with a promoted function
+  /// identifier if one exists, else nullptr.
+  Decl *getPromotedDecl(ESTree::IdentifierNode *node) {
+    if (auto it = promotedFunctionDecls_.find(node);
+        it != promotedFunctionDecls_.end()) {
+      return it->second;
+    }
+    return nullptr;
+  }
+
+  /// Clears all promoted declarations.
+  void clearPromotedDecls() {
+    promotedFunctionDecls_.clear();
+  }
+
   /// Set the "declaration decl" and the "expression decl" of the identifier
   /// node to the same value.
   void setBothDecl(ESTree::IdentifierNode *node, Decl *decl) {
@@ -499,12 +602,34 @@ class SemContext {
     return root_->bindingTable_;
   }
 
+  LexicalScope *getParentLexicalScope() {
+    return parentLexScope_;
+  }
+
+  /// This is an opaque data blob that SemContext will own, but never use. This
+  /// is useful for IRGen to put information that it needs across lazy
+  /// compilation invocations. Conceptually this could be modeled as a
+  /// unique_ptr since SemContext owns this. But, given that we don't want to
+  /// know the type of the underlying data, it's better to use a shared_ptr.
+  /// Then we remain ignorant of the type but still call the correct deleter
+  /// function.
+  std::shared_ptr<void> customData1;
+
+  /// This is an opaque data blob that SemContext will own, but never use. This
+  /// is used to implement caching for fetching information from
+  /// `LexicalScope`s.
+  std::shared_ptr<void> customData2;
+
  private:
   /// The parent SemContext of this SemContext.
   /// If null, this SemContext has no parent.
   /// Use shared_ptr because these will form a tree, and the parent can be freed
   /// when it has no users and no children.
   std::shared_ptr<SemContext> parent_;
+
+  /// The parent LexicalScope of this SemContext.
+  /// If null, this SemContext has no parent.
+  LexicalScope *parentLexScope_;
 
   /// Non-owning pointer to the root SemContext,
   /// used for efficiently finding the global scope/global function.
@@ -537,6 +662,13 @@ class SemContext {
   /// "expression decl" are both set and are not the same value.
   llvh::DenseMap<ESTree::IdentifierNode *, Decl *>
       sideIdentifierDeclarationDecl_{};
+
+  /// This side table is used to associate a "declaration decl" with an
+  /// ESTree::IdentifierNode in scenarios where a scoped function
+  /// is promoted to the global scope.
+  /// In promotedFunctionDecls_ we store the scoped declaration, while in
+  /// sideIdentifierDeclarationDecl_ the global-like declaration
+  llvh::DenseMap<ESTree::IdentifierNode *, Decl *> promotedFunctionDecls_{};
 };
 
 class SemContextDumper {

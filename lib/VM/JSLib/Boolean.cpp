@@ -18,15 +18,21 @@
 namespace hermes {
 namespace vm {
 
-Handle<NativeConstructor> createBooleanConstructor(Runtime &runtime) {
+HermesValue createBooleanConstructor(Runtime &runtime) {
   auto booleanPrototype = Handle<JSBoolean>::vmcast(&runtime.booleanPrototype);
 
-  auto cons = defineSystemConstructor(
+  struct : public Locals {
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::Boolean),
       booleanConstructor,
       booleanPrototype,
-      1);
+      1,
+      lv.cons);
 
   // Boolean.prototype.xxx methods.
   defineMethod(
@@ -44,11 +50,11 @@ Handle<NativeConstructor> createBooleanConstructor(Runtime &runtime) {
       booleanPrototypeValueOf,
       0);
 
-  return cons;
+  return lv.cons.getHermesValue();
 }
 
-CallResult<HermesValue>
-booleanConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> booleanConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   bool value = toBoolean(args.getArg(0));
 
   if (!args.isConstructorCall()) {
@@ -77,8 +83,8 @@ booleanConstructor(void *, Runtime &runtime, NativeArgs args) {
   return JSBoolean::create(runtime, value, lv.selfParent).getHermesValue();
 }
 
-CallResult<HermesValue>
-booleanPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> booleanPrototypeToString(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   bool value;
   if (args.getThisArg().isBool()) {
     value = args.getThisArg().getBool();
@@ -95,8 +101,8 @@ booleanPrototypeToString(void *, Runtime &runtime, NativeArgs args) {
             : runtime.getPredefinedString(Predefined::falseStr));
 }
 
-CallResult<HermesValue>
-booleanPrototypeValueOf(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> booleanPrototypeValueOf(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   if (args.getThisArg().isBool()) {
     return args.getThisArg();
   }

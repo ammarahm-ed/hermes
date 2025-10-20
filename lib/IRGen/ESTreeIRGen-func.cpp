@@ -27,6 +27,11 @@ FunctionContext::FunctionContext(
       oldContext_(irGen->functionContext_),
       builderSaveState_(irGen->Builder),
       function(function) {
+  if (semInfo) {
+    assert(
+        semInfo->getFunctionBodyScope() &&
+        "all `FunctionInfo`s should have a set body scope.");
+  }
   irGen->functionContext_ = this;
 
   // Initialize it to LiteralUndefined by default to avoid corner cases.
@@ -55,14 +60,31 @@ Identifier FunctionContext::genAnonymousLabelName(llvh::StringRef hint) {
 //===----------------------------------------------------------------------===//
 // ESTreeIRGen
 
+CreateScopeInst *ESTreeIRGen::makeNewScope(
+    VariableScope *varScope,
+    Value *parentScope) {
+  auto *newScope = Builder.createCreateScopeInst(varScope, parentScope);
+  curFunction()->setCurScope(newScope);
+  if (Mod->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL) {
+    auto &envs = curFunction()->function->environments();
+    auto idxOfNewScope = envs.size();
+    envs.push_back(newScope);
+    auto newEnvID = idxOfNewScope + Instruction::kFirstScopeCreationIdIndex;
+    newScope->setEnvironmentID(newEnvID);
+    curFunction()->function->setEnvironmentID(newEnvID);
+  }
+  return newScope;
+}
+
+/// Set the curScope of the function context, and update the Builder's current
+/// scope creation ID to match the ID from \p scope.
+void ESTreeIRGen::restoreScope(CreateScopeInst *scope) {
+  curFunction()->setCurScope(scope);
+  curFunction()->function->setEnvironmentID(scope->getEnvironmentID());
+}
+
 void ESTreeIRGen::genFunctionDeclaration(
     ESTree::FunctionDeclarationNode *func) {
-  if (func->_async && func->_generator) {
-    Builder.getModule()->getContext().getSourceErrorManager().error(
-        func->getSourceRange(), Twine("async generators are unsupported"));
-    return;
-  }
-
   // Find the name of the function.
   auto *id = llvh::cast<ESTree::IdentifierNode>(func->_id);
   Identifier functionName = Identifier::getFromPointer(id->_name);
@@ -75,9 +97,10 @@ void ESTreeIRGen::genFunctionDeclaration(
   }
 
   Value *funcStorage = resolveIdentifier(id);
+  Value *funcStoragePromoted = resolveIdentifierPromoted(id);
   assert(funcStorage && "Function declaration storage must have been resolved");
 
-  auto *newFuncParentScope = curFunction()->curScope->getVariableScope();
+  auto *newFuncParentScope = curFunction()->curScope()->getVariableScope();
   Function *newFunc = func->_async ? genAsyncFunction(
                                          functionName,
                                          func,
@@ -89,9 +112,11 @@ void ESTreeIRGen::genFunctionDeclaration(
 
   // Store the newly created closure into a frame variable with the same name.
   auto *newClosure =
-      Builder.createCreateFunctionInst(curFunction()->curScope, newFunc);
+      Builder.createCreateFunctionInst(curFunction()->curScope(), newFunc);
 
   emitStore(newClosure, funcStorage, true);
+  if (funcStoragePromoted)
+    emitStore(newClosure, funcStoragePromoted, true);
 }
 
 Value *ESTreeIRGen::genFunctionExpression(
@@ -101,20 +126,16 @@ Value *ESTreeIRGen::genFunctionExpression(
     Function::DefinitionKind functionKind,
     Variable *homeObject,
     ESTree::Node *parentNode) {
-  if (FE->_async && FE->_generator) {
-    Builder.getModule()->getContext().getSourceErrorManager().error(
-        FE->getSourceRange(), Twine("async generators are unsupported"));
-    return Builder.getLiteralUndefined();
-  }
-
   // This is the possibly empty scope containing the function expression name.
+  Function::ScopedLexicalScopeChange lexScopeChange(
+      curFunction()->function, FE->getScope());
   emitScopeDeclarations(FE->getScope());
 
   auto *id = llvh::cast_or_null<ESTree::IdentifierNode>(FE->_id);
   Identifier originalNameIden =
       id ? Identifier::getFromPointer(id->_name) : nameHint;
 
-  auto *parentScope = curFunction()->curScope->getVariableScope();
+  auto *parentScope = curFunction()->curScope()->getVariableScope();
   auto capturedStateForAsync = curFunction()->capturedState;
   // Update the captured state of the async function to use the homeObject we
   // were given.
@@ -138,7 +159,7 @@ Value *ESTreeIRGen::genFunctionExpression(
             parentNode);
 
   Value *closure =
-      Builder.createCreateFunctionInst(curFunction()->curScope, newFunc);
+      Builder.createCreateFunctionInst(curFunction()->curScope(), newFunc);
 
   if (id)
     emitStore(closure, resolveIdentifier(id), true);
@@ -153,7 +174,7 @@ Value *ESTreeIRGen::genArrowFunctionExpression(
   // Check if already compiled.
   if (Value *compiled = findCompiledEntity(AF)) {
     return Builder.createCreateFunctionInst(
-        curFunction()->curScope, llvh::cast<Function>(compiled));
+        curFunction()->curScope(), llvh::cast<Function>(compiled));
   }
 
   LLVM_DEBUG(
@@ -163,35 +184,37 @@ Value *ESTreeIRGen::genArrowFunctionExpression(
 
   if (AF->_async) {
     return Builder.createCreateFunctionInst(
-        curFunction()->curScope,
+        curFunction()->curScope(),
         genAsyncFunction(
             nameHint,
             AF,
-            curFunction()->curScope->getVariableScope(),
+            curFunction()->curScope()->getVariableScope(),
             curFunction()->capturedState));
   }
 
   auto *newFunc = genCapturingFunction(
       nameHint,
       AF,
-      curFunction()->curScope->getVariableScope(),
+      curFunction()->curScope()->getVariableScope(),
       curFunction()->capturedState,
       Function::DefinitionKind::ES6Arrow);
 
   // Emit CreateFunctionInst after we have restored the builder state.
-  return Builder.createCreateFunctionInst(curFunction()->curScope, newFunc);
+  return Builder.createCreateFunctionInst(curFunction()->curScope(), newFunc);
 }
 
 /// Get the function range for \p functionNode, with its parent \p parentNode.
 /// This is done to support lazy compilation. When restarting the compilation,
 /// we need to start parsing at the identifier for the function of the class
-/// method. By default, the source location for the function expression node
-/// starts at the first, left parenthesis.
+/// method or object property method.
+/// The source location for the function expression node for methods
+/// starts at the first left parenthesis.
 /// \param parentNode may be null.
 static SMRange getFunctionRange(
     ESTree::FunctionLikeNode *functionNode,
     ESTree::Node *parentNode) {
-  if (llvh::dyn_cast_or_null<ESTree::MethodDefinitionNode>(parentNode)) {
+  if (llvh::dyn_cast_or_null<ESTree::MethodDefinitionNode>(parentNode) ||
+      llvh::dyn_cast_or_null<ESTree::PropertyNode>(parentNode)) {
     return parentNode->getSourceRange();
   }
   return functionNode->getSourceRange();
@@ -228,26 +251,63 @@ NormalFunction *ESTreeIRGen::genCapturingFunction(
         capturedState);
     return newFunc;
   }
-
+  const bool isGeneratorInnerFunction =
+      functionKind == Function::DefinitionKind::GeneratorInnerArrow;
   auto compileFunc = [this,
                       newFunc,
                       functionNode,
                       legacyClsCtx = curFunction()->legacyClassContext,
                       capturedState,
-                      parentScope] {
+                      parentScope,
+                      isGeneratorInnerFunction] {
     FunctionContext newFunctionContext{
         this, newFunc, functionNode->getSemInfo()};
     newFunctionContext.legacyClassContext = legacyClsCtx;
+    Function::ScopedLexicalScopeChange lexScopeChange(
+        curFunction()->function,
+        curFunction()->getSemInfo()->getFunctionBodyScope());
 
     // Propagate captured "this", "new.target" and "arguments" from parents.
     curFunction()->capturedState = capturedState;
 
-    emitFunctionPrologue(
-        functionNode,
-        Builder.createBasicBlock(newFunc),
-        InitES5CaptureState::No,
-        DoEmitDeclarations::Yes,
-        parentScope);
+    if (isGeneratorInnerFunction && !hasSimpleParams(functionNode)) {
+      // This inner generator with non simple params will be stepped once by the
+      // outer generator to initialize params, before being then available to
+      // user code. Note that since we are in a more locked down use case (an
+      // async arrow function, compared to a regular generator function), we
+      // know that the generator can only be invoked with .next(), not
+      // .return(). Generator arrow functions are not in the language.
+      auto *prologueBB = Builder.createBasicBlock(newFunc);
+      auto *entryPointBB = Builder.createBasicBlock(newFunc);
+      // Initialize parameters.
+      Builder.setInsertionBlock(prologueBB);
+      emitFunctionPrologue(
+          functionNode,
+          prologueBB,
+          InitES5CaptureState::No,
+          DoEmitDeclarations::Yes,
+          parentScope);
+      // Then on the next stepping of the generator, branch to the actual
+      // function body code.
+      Builder.createSaveAndYieldInst(
+          Builder.getLiteralUndefined(),
+          Builder.getLiteralBool(false),
+          entryPointBB);
+      // Actual entry point of function from the caller's perspective.
+      Builder.setInsertionBlock(entryPointBB);
+      genResumeGenerator(
+          GenFinally::No,
+          Builder.createAllocStackInst(
+              genAnonymousLabelName("isReturn_entry"), Type::createBoolean()),
+          Builder.createBasicBlock(newFunc));
+    } else {
+      emitFunctionPrologue(
+          functionNode,
+          Builder.createBasicBlock(newFunc),
+          InitES5CaptureState::No,
+          DoEmitDeclarations::Yes,
+          parentScope);
+    }
 
     auto *body = ESTree::getBlockStatement(functionNode);
     assert(body && "empty function body");
@@ -340,15 +400,15 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
     newFunctionContext.typedClassContext = typedClassContext;
     newFunctionContext.capturedState.homeObject = homeObject;
     newFunctionContext.legacyClassContext = legacyClassContext;
+    Function::ScopedLexicalScopeChange lexScopeChange(
+        curFunction()->function,
+        curFunction()->getSemInfo()->getFunctionBodyScope());
 
     if (isGeneratorInnerFunction) {
-      // StartGeneratorInst
-      // ResumeGeneratorInst
-      // at the beginning of the function, to allow for the first .next()
-      // call.
+      // ResumeGeneratorInst at the beginning of the function, to allow for the
+      // first .next() call.
       auto *initGenBB = Builder.createBasicBlock(newFunction);
       Builder.setInsertionBlock(initGenBB);
-      Builder.createStartGeneratorInst();
       auto *prologueBB = Builder.createBasicBlock(newFunction);
       auto *prologueResumeIsReturn = Builder.createAllocStackInst(
           genAnonymousLabelName("isReturn_prologue"), Type::createBoolean());
@@ -405,6 +465,8 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
 
     if (curFunction()->hasLegacyClassContext()) {
       if (functionKind == Function::DefinitionKind::ES6BaseConstructor) {
+        // Initialize `this` for the function.
+        emitLegacyBaseClassThisInit();
         // We only need to generate this here for base classes. It's not
         // required for derived because they generate this call after calling
         // super().
@@ -413,12 +475,12 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
           functionKind == Function::DefinitionKind::ES6DerivedConstructor) {
         // Initialize the 'checked this' in derived class constructors.
         newFunctionContext.capturedState.thisVal = Builder.createVariable(
-            curFunction()->curScope->getVariableScope(),
+            curFunction()->curScope()->getVariableScope(),
             Builder.createIdentifier("?CHECKED_this"),
             Type::unionTy(Type::createObject(), Type::createEmpty()),
             true);
         Builder.createStoreFrameInst(
-            curFunction()->curScope,
+            curFunction()->curScope(),
             Builder.getLiteralEmpty(),
             newFunctionContext.capturedState.thisVal);
       }
@@ -499,6 +561,9 @@ Function *ESTreeIRGen::genGeneratorFunction(
                       parentScope,
                       homeObject]() {
     FunctionContext outerFnContext{this, outerFn, functionNode->getSemInfo()};
+    Function::ScopedLexicalScopeChange lexScopeChange(
+        curFunction()->function,
+        curFunction()->getSemInfo()->getFunctionBodyScope());
 
     // We pass InitES5CaptureState::No to emitFunctionPrologue because generator
     // functions do not create a scope and so we shouldn't be trying to capture
@@ -524,10 +589,8 @@ Function *ESTreeIRGen::genGeneratorFunction(
 
     // Build the inner function. This must be done in the parentScope since
     // generator functions don't create a scope.
-    Identifier innerName = originalName.isValid()
-        ? Mod->getContext().getIdentifier(
-              originalName.getUnderlyingPointer()->str() + "?inner")
-        : genAnonymousLabelName("");
+    Identifier innerName =
+        originalName.isValid() ? originalName : genAnonymousLabelName("");
     NormalFunction *innerFn;
     if (isAsyncArrow) {
       // If we are compliing this function as part of an async arrow function,
@@ -606,25 +669,14 @@ Function *ESTreeIRGen::genAsyncFunction(
       llvh::isa<ESTree::ArrowFunctionExpressionNode>(functionNode);
   auto *body = ESTree::getBlockStatement(functionNode);
   if (body->isLazyFunctionBody) {
-    if (isAsyncArrow) {
-      setupLazyFunction(
-          asyncFn,
-          functionNode,
-          parentNode,
-          body,
-          parentScope,
-          ExtraKey::AsyncOuter,
-          capturedState);
-    } else {
-      setupLazyFunction(
-          asyncFn,
-          functionNode,
-          parentNode,
-          body,
-          parentScope,
-          ExtraKey::AsyncOuter,
-          capturedState);
-    }
+    setupLazyFunction(
+        asyncFn,
+        functionNode,
+        parentNode,
+        body,
+        parentScope,
+        ExtraKey::AsyncOuter,
+        capturedState);
     return asyncFn;
   }
 
@@ -636,6 +688,9 @@ Function *ESTreeIRGen::genAsyncFunction(
                       capturedState,
                       isAsyncArrow]() {
     FunctionContext asyncFnContext{this, asyncFn, functionNode->getSemInfo()};
+    Function::ScopedLexicalScopeChange lexScopeChange(
+        curFunction()->function,
+        curFunction()->getSemInfo()->getFunctionBodyScope());
 
     InitES5CaptureState shouldCapture = InitES5CaptureState::Yes;
     if (isAsyncArrow) {
@@ -661,11 +716,11 @@ Function *ESTreeIRGen::genAsyncFunction(
     auto *gen = genGeneratorFunction(
         genAnonymousLabelName(originalName.isValid() ? originalName.str() : ""),
         functionNode,
-        curFunction()->curScope->getVariableScope(),
+        curFunction()->curScope()->getVariableScope(),
         capturedState.homeObject);
 
     auto *genClosure =
-        Builder.createCreateFunctionInst(curFunction()->curScope, gen);
+        Builder.createCreateFunctionInst(curFunction()->curScope(), gen);
     auto *thisArg = curFunction()->jsParams[0];
     auto *argumentsList = curFunction()->createArgumentsInst;
 
@@ -687,22 +742,24 @@ Function *ESTreeIRGen::genAsyncFunction(
 }
 
 void ESTreeIRGen::initCaptureStateInES5FunctionHelper() {
+  auto defKind = curFunction()->function->getDefinitionKind();
+  bool isLegacyClassConstructor = curFunction()->hasLegacyClassContext() &&
+      (defKind == Function::DefinitionKind::ES6DerivedConstructor ||
+       defKind == Function::DefinitionKind::ES6BaseConstructor);
   // Capture "this", "new.target" and "arguments" if there are inner arrows.
-  // Also capture state in derived class constructors, so we can handle `this`
-  // correctly in debugger evals.
+  // Also capture state in class constructors if debugging is enabled. We do
+  // this because we have to generate the eval function as an arrow function in
+  // order to correctly look up `this`, and that arrow function will require the
+  // full captured state.
   if (!(curFunction()->getSemInfo()->containsArrowFunctions ||
         ((Mod->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL) &&
-         curFunction()->getSemInfo()->constructorKind ==
-             sema::FunctionInfo::ConstructorKind::Derived)))
+         isLegacyClassConstructor)))
     return;
 
-  auto *scope = curFunction()->curScope->getVariableScope();
+  auto *scope = curFunction()->curScope()->getVariableScope();
 
-  // `this` is managed separately in the case of a legacy derived class
-  // constructor.
-  if (!(curFunction()->function->getDefinitionKind() ==
-            Function::DefinitionKind::ES6DerivedConstructor &&
-        curFunction()->hasLegacyClassContext())) {
+  // `this` is managed separately in the case of a legacy class constructor.
+  if (!isLegacyClassConstructor) {
     auto *th = Builder.createVariable(
         scope,
         genAnonymousLabelName("this"),
@@ -794,8 +851,7 @@ void ESTreeIRGen::emitFunctionPrologue(
   // GeneratorFunctions should not have a scope created. It will be created
   // later during a lowering pass.
   if (!llvh::isa<GeneratorFunction>(curFunction()->function)) {
-    curFunction()->curScope = Builder.createCreateScopeInst(
-        Builder.createVariableScope(parentScope), baseScope);
+    makeNewScope(Builder.createVariableScope(parentScope), baseScope);
   }
 
   if (doInitES5CaptureState != InitES5CaptureState::No)
@@ -809,7 +865,8 @@ void ESTreeIRGen::emitFunctionPrologue(
   if (doEmitDeclarations == DoEmitDeclarations::No)
     return;
 
-  emitParameters(funcNode);
+  if (funcNode)
+    emitParameters(funcNode);
   emitScopeDeclarations(semInfo->getFunctionBodyScope());
 
   // Generate the code for import declarations before generating the rest of the
@@ -822,6 +879,7 @@ void ESTreeIRGen::emitFunctionPrologue(
 void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
   if (!scope)
     return;
+  setLexicalScopeData(scope, curFunction()->curScope()->getVariableScope());
 
   bool tdz = Mod->getContext().getCodeGenerationSettings().enableTDZ;
   for (sema::Decl *decl : scope->decls) {
@@ -839,13 +897,13 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
 
         if (!decl->customData) {
           var = Builder.createVariable(
-              curFunction()->curScope->getVariableScope(),
+              curFunction()->curScope()->getVariableScope(),
               decl->name,
               tdz ? Type::unionTy(Type::createAnyType(), Type::createEmpty())
                   : Type::createAnyType(),
               false);
           var->setObeysTDZ(tdz);
-          var->setIsConst(decl->kind == sema::Decl::Kind::Const);
+          var->setConstness(sema::Decl::getKindConstness(decl->kind));
           setDeclData(decl, var);
         } else {
           var = llvh::cast<Variable>(getDeclData(decl));
@@ -878,7 +936,7 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
         auto isClsExpr = decl->kind == sema::Decl::Kind::ClassExprName;
         if (!decl->customData) {
           var = Builder.createVariable(
-              curFunction()->curScope->getVariableScope(),
+              curFunction()->curScope()->getVariableScope(),
               decl->name,
               (isClsExpr && tdz)
                   ? Type::unionTy(Type::createAnyType(), Type::createEmpty())
@@ -886,7 +944,7 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
               // FunctionExprName isn't supposed to show up in the list when
               // debugging.
               /* hidden */ decl->kind == sema::Decl::Kind::FunctionExprName);
-          var->setIsConst(sema::Decl::isKindNotReassignable(decl->kind));
+          var->setConstness(sema::Decl::getKindConstness(decl->kind));
           if (isClsExpr) {
             var->setObeysTDZ(tdz);
           }
@@ -900,6 +958,12 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
         break;
       }
 
+      case sema::Decl::Kind::PrivateField:
+      case sema::Decl::Kind::PrivateMethod:
+      case sema::Decl::Kind::PrivateGetter:
+      case sema::Decl::Kind::PrivateSetter:
+      case sema::Decl::Kind::PrivateGetterSetter:
+        // Private names are handled separately.
       case sema::Decl::Kind::Parameter:
         // Skip parameters, they are handled separately.
         continue;
@@ -924,7 +988,7 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
     if (init) {
       assert(var);
       Builder.createStoreFrameInst(
-          curFunction()->curScope,
+          curFunction()->curScope(),
           var->getObeysTDZ() ? (Literal *)Builder.getLiteralEmpty()
                              : (Literal *)Builder.getLiteralUndefined(),
           var);
@@ -1001,6 +1065,8 @@ void ESTreeIRGen::emitHoistedFunctionDeclaration(
 void ESTreeIRGen::emitParameters(ESTree::FunctionLikeNode *funcNode) {
   auto *newFunc = curFunction()->function;
   sema::FunctionInfo *semInfo = funcNode->getSemInfo();
+  Function::ScopedLexicalScopeChange lexScopeChange(
+      curFunction()->function, semInfo->getParameterScope());
 
   LLVM_DEBUG(llvh::dbgs() << "IRGen function parameters.\n");
 
@@ -1015,7 +1081,7 @@ void ESTreeIRGen::emitParameters(ESTree::FunctionLikeNode *funcNode) {
     bool tdz = !semInfo->simpleParameterList &&
         Mod->getContext().getCodeGenerationSettings().enableTDZ;
     Variable *var = Builder.createVariable(
-        curFunction()->curScope->getVariableScope(),
+        curFunction()->curScope()->getVariableScope(),
         decl->name,
         tdz ? Type::unionTy(Type::createAnyType(), Type::createEmpty())
             : Type::createAnyType(),
@@ -1026,7 +1092,7 @@ void ESTreeIRGen::emitParameters(ESTree::FunctionLikeNode *funcNode) {
     if (!semInfo->simpleParameterList) {
       var->setObeysTDZ(tdz);
       Builder.createStoreFrameInst(
-          curFunction()->curScope,
+          curFunction()->curScope(),
           tdz ? (Literal *)Builder.getLiteralEmpty()
               : (Literal *)Builder.getLiteralUndefined(),
           var);
@@ -1101,10 +1167,15 @@ void ESTreeIRGen::emitFunctionEpilogue(Value *returnValue) {
   Builder.setLocation(SourceErrorManager::convertEndToLocation(
       Builder.getFunction()->getSourceRange()));
   if (returnValue) {
-    if (curFunction()->hasLegacyClassContext() &&
-        curFunction()->getSemInfo()->constructorKind ==
-            sema::FunctionInfo::ConstructorKind::Derived) {
-      returnValue = genLegacyDerivedConstructorRet(nullptr, returnValue);
+    if (curFunction()->hasLegacyClassContext()) {
+      if (curFunction()->getSemInfo()->constructorKind ==
+          sema::FunctionInfo::ConstructorKind::Derived) {
+        returnValue = genLegacyDerivedConstructorRet(nullptr, returnValue);
+      } else if (
+          curFunction()->getSemInfo()->constructorKind ==
+          sema::FunctionInfo::ConstructorKind::Base) {
+        returnValue = genLegacyBaseConstructorRet(nullptr, returnValue);
+      }
     }
     Builder.createReturnInst(returnValue);
   } else {
@@ -1131,8 +1202,6 @@ void ESTreeIRGen::emitFunctionEpilogue(Value *returnValue) {
     }
   }
 
-  curFunction()->function->clearStatementCount();
-
   onCompiledFunction(curFunction()->function);
 }
 
@@ -1158,9 +1227,12 @@ Function *ESTreeIRGen::genFieldInitFunction() {
                       initFuncInfo,
                       typedClassContext,
                       parentScope =
-                          curFunction()->curScope->getVariableScope()] {
+                          curFunction()->curScope()->getVariableScope()] {
     FunctionContext newFunctionContext{this, initFunc, initFuncInfo};
     newFunctionContext.typedClassContext = typedClassContext;
+    Function::ScopedLexicalScopeChange lexScopeChange(
+        curFunction()->function,
+        curFunction()->getSemInfo()->getFunctionBodyScope());
 
     auto *prologueBB = Builder.createBasicBlock(initFunc);
     Builder.setInsertionBlock(prologueBB);
@@ -1204,15 +1276,15 @@ void ESTreeIRGen::emitCreateTypedFieldInitFunction() {
   classInfo.fieldInitFunction = initFunc;
 
   CreateFunctionInst *createFieldInitFunc =
-      Builder.createCreateFunctionInst(curFunction()->curScope, initFunc);
+      Builder.createCreateFunctionInst(curFunction()->curScope(), initFunc);
   Variable *fieldInitFuncVar = Builder.createVariable(
-      curFunction()->curScope->getVariableScope(),
+      curFunction()->curScope()->getVariableScope(),
       (llvh::Twine("<fieldInitFuncVar:") + classType->getClassName().str() +
        ">"),
       Type::createObject(),
       /* hidden */ true);
   Builder.createStoreFrameInst(
-      curFunction()->curScope, createFieldInitFunc, fieldInitFuncVar);
+      curFunction()->curScope(), createFieldInitFunc, fieldInitFuncVar);
   classInfo.fieldInitFunctionVar = fieldInitFuncVar;
 }
 
@@ -1353,6 +1425,10 @@ Function *ESTreeIRGen::genSyntaxErrorFunction(
 }
 
 void ESTreeIRGen::onCompiledFunction(hermes::Function *F) {
+  curFunction()->function->clearStatementCount();
+  curFunction()->function->clearLexicalScope();
+  curFunction()->function->clearEnvironmentID();
+
   // Delete any unreachable blocks produced while emitting this function.
   deleteUnreachableBasicBlocks(curFunction()->function);
 
@@ -1361,10 +1437,10 @@ void ESTreeIRGen::onCompiledFunction(hermes::Function *F) {
   // Postprocessing for debugging: make the EvalCompilationData
   // and add the function's VariableScope to the data so we can compile REPL
   // commands from the debugger.
-  // Skip generators here, debugging generators is not supported yet.
+  // Skip outer generator functions. It's impossible to be stopped inside of
+  // one, so we don't need to support `eval`ing inside of them.
   if ((Mod->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL) &&
-      !llvh::isa<GeneratorFunction>(F) &&
-      F->getDefinitionKind() != Function::DefinitionKind::GeneratorInner) {
+      !llvh::isa<GeneratorFunction>(F)) {
     BasicBlock &entry = *F->begin();
 
     IRBuilder::ScopedLocationChange slc(Builder, F->getSourceRange().Start);
@@ -1386,6 +1462,11 @@ void ESTreeIRGen::onCompiledFunction(hermes::Function *F) {
       clsConstructor = curFunction()->legacyClassContext->constructor;
       clsInitFunc = curFunction()->legacyClassContext->instElemInitFuncVar;
     }
+    llvh::SmallVector<VariableScope *, 4> allVarScopes;
+    allVarScopes.push_back(curFunction()->curScope()->getVariableScope());
+    for (auto [_, varScope] : curFunction()->getInnerScopes()) {
+      allVarScopes.push_back(varScope);
+    }
     auto *evalData = Builder.createEvalCompilationDataInst(
         std::move(data),
         shouldCaptureState ? curFunction()->capturedState.thisVal : nullptr,
@@ -1394,7 +1475,7 @@ void ESTreeIRGen::onCompiledFunction(hermes::Function *F) {
         curFunction()->capturedState.homeObject,
         clsConstructor,
         clsInitFunc,
-        curFunction()->curScope->getVariableScope());
+        allVarScopes);
     // This is never emitted, it has no location.
     evalData->setLocation({});
 

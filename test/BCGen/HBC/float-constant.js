@@ -22,6 +22,10 @@ var z = 0.0;
 // CHECK-NEXT:  BigInt count: 0
 // CHECK-NEXT:  String Kind Entry count: 2
 // CHECK-NEXT:  RegExp count: 0
+// CHECK-NEXT:  StringSwitchImm count: 0
+// CHECK-NEXT:  Key buffer size (bytes): 0
+// CHECK-NEXT:  Value buffer size (bytes): 0
+// CHECK-NEXT:  Shape table count: 0
 // CHECK-NEXT:  Segment ID: 0
 // CHECK-NEXT:  CommonJS module count: 0
 // CHECK-NEXT:  CommonJS module count (static): 0
@@ -38,20 +42,20 @@ var z = 0.0;
 // CHECK-NEXT:i4[ASCII, 9..9] #0001EFDB: z
 
 // CHECK:Function<global>(1 params, 3 registers, 1 numbers, 1 non-pointers):
-// CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHECK-NEXT:Offset in debug table: source 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "w"
 // CHECK-NEXT:    DeclareGlobalVar  "x"
 // CHECK-NEXT:    DeclareGlobalVar  "y"
 // CHECK-NEXT:    DeclareGlobalVar  "z"
 // CHECK-NEXT:    GetGlobalObject   r2
 // CHECK-NEXT:    LoadConstDouble   r0, 3.14
-// CHECK-NEXT:    PutByIdLoose      r2, r0, 1, "w"
+// CHECK-NEXT:    PutByIdLoose      r2, r0, 0, "w"
 // CHECK-NEXT:    LoadConstDouble   r0, -0.00056
-// CHECK-NEXT:    PutByIdLoose      r2, r0, 2, "x"
+// CHECK-NEXT:    PutByIdLoose      r2, r0, 1, "x"
 // CHECK-NEXT:    LoadConstDouble   r0, 12345670.89
-// CHECK-NEXT:    PutByIdLoose      r2, r0, 3, "y"
+// CHECK-NEXT:    PutByIdLoose      r2, r0, 2, "y"
 // CHECK-NEXT:    LoadConstZero     r0
-// CHECK-NEXT:    PutByIdLoose      r2, r0, 4, "z"
+// CHECK-NEXT:    PutByIdLoose      r2, r0, 3, "z"
 // CHECK-NEXT:    LoadConstUndefined r1
 // CHECK-NEXT:    Ret               r1
 
@@ -71,4 +75,4 @@ var z = 0.0;
 // CHECK-NEXT:    bc 48: line 11 col 7
 // CHECK-NEXT:    bc 64: line 12 col 7
 // CHECK-NEXT:    bc 72: line 13 col 7
-// CHECK-NEXT:  0x001c  end of debug source table
+// CHECK-NEXT:  0x001d  end of debug source table

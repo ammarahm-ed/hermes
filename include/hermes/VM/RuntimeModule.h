@@ -14,6 +14,7 @@
 #include "hermes/VM/CodeBlock.h"
 #include "hermes/VM/IdentifierTable.h"
 
+#include "hermes/VM/StringPrimitiveValueDenseMapInfo.h"
 #include "hermes/VM/StringRefUtils.h"
 #include "hermes/VM/WeakRoot.h"
 
@@ -57,6 +58,24 @@ union RuntimeModuleFlags {
   uint8_t flags;
   RuntimeModuleFlags() : flags(0) {}
 };
+
+struct SwitchTargets {
+  // The offset of the basic block target corresponding to this switch case.
+  // The offset is relative to the address of the StringSwitchImm instruction.
+  int32_t bytecodeOffset = 0;
+  // The (absolute) address of the JIT code for the basic block target
+  // corresponding to this switch case.
+  void *jitCodeTarget = 0;
+};
+
+/// This DenseMap specialization is used at runtime to map string values
+/// used in switch statements to the proper branch target.  Note that
+/// it cannot use pointer equality -- the StringPrimitiveValueDenseMapInfo
+/// trait compares StringPrimitives by their values.
+using StringSwitchDenseMap = llvh::DenseMap<
+    StringPrimitive *,
+    SwitchTargets,
+    StringPrimitiveValueDenseMapInfo>;
 
 /// This class is used to store the non-instruction information needed to
 /// execute code. The RuntimeModule owns a BytecodeModule, from which it copies
@@ -110,6 +129,13 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
   /// The table maps from a function index to a CodeBlock.
   std::vector<std::unique_ptr<CodeBlock>> functionMap_{};
 
+  /// Each StringSwitchImm instructions is assigned a small, dense
+  /// integer index at compile time.  This table has an entry for each
+  /// such index.  The corresponding table will be populated on first
+  /// use, and will map the case labels of the switch to the
+  /// corresponding branch offset.
+  std::vector<StringSwitchDenseMap> stringSwitchImmTables_;
+
   /// The byte-code provider for this RuntimeModule. The RuntimeModule is
   /// designed to own the provider exclusively, especially because in some
   /// cases the bytecode can be modified (e.g. for breakpoints). This however
@@ -130,7 +156,13 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
   facebook::hermes::debugger::ScriptID scriptID_;
 
   /// A vector of cached hidden classes.
-  std::vector<WeakRoot<HiddenClass>> objectLiteralHiddenClasses_;
+  TransparentConservativeVector<WeakRoot<HiddenClass>>
+      objectLiteralHiddenClasses_;
+
+  /// Vector of AddPropertyCacheEntry, where each element is lazily allocated
+  /// whenever a CodeBlock needs a new entry.
+  /// Stored in a central location here for easier marking of roots.
+  TransparentConservativeVector<AddPropertyCacheEntry> addCacheEntries_;
 
   /// A map from template object ids to template objects.
   llvh::DenseMap<uint32_t, JSObject *> templateMap_;
@@ -297,6 +329,15 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
     return functionMap_;
   }
 
+  StringSwitchDenseMap *getStringSwitchImmTables() {
+    return stringSwitchImmTables_.data();
+  }
+#ifndef NDEBUG
+  unsigned numStringSwitchImmTables() const {
+    return stringSwitchImmTables_.size();
+  }
+#endif
+
   /// \return the sourceURL, or an empty string if none.
   llvh::StringRef getSourceURL() const {
     return sourceURL_;
@@ -317,11 +358,30 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
     return scriptID_;
   }
 
+  /// Allocate a new AddPropertyCacheEntry.
+  /// \return the index of the new entry, but if there's already too many to
+  /// allocate a new entry, return llvh::None.
+  /// Never returns 0.
+  /// The entry index will be at most
+  /// WritePropertyCacheEntry::kMaxAddCacheIndex.
+  OptValue<uint32_t> allocateAddCacheEntry();
+
+  /// \return the number of add cache entries.
+  size_t numAddCacheEntries() const {
+    return addCacheEntries_.size();
+  }
+
+  /// \return the add cache entry at \p index. Reference is invalidated upon
+  /// calling allocateAddCacheEntry.
+  AddPropertyCacheEntry &getAddCacheEntry(uint32_t index) {
+    return addCacheEntries_[index];
+  }
+
   /// Mark the non-weak roots owned by this RuntimeModule.
   void markRoots(RootAcceptor &acceptor, bool markLongLived);
 
-  /// Mark the long lived weak roots owned by this RuntimeModule.
-  void markLongLivedWeakRoots(WeakRootAcceptor &acceptor);
+  /// Mark the weak roots owned by this RuntimeModule.
+  void markWeakRoots(WeakRootAcceptor &acceptor, bool markLongLived);
 
   /// Mark the weak reference to the Domain which owns this RuntimeModule.
   void markDomainRef(WeakRootAcceptor &acceptor) {
@@ -350,11 +410,10 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
       Runtime &runtime,
       uint32_t shapeTableIndex) const;
 
-  /// Try to cache the shareable hidden class for a given shape. Caching will be
-  /// skipped if shapeTableIndex exceeds the bounds of the cache.
+  /// Set the cached hidden class for a given shape.
   /// \param shapeTableIndex is the ID of an object literal shape.
   /// \param clazz the hidden class to cache.
-  void tryCacheLiteralHiddenClass(
+  void setCachedLiteralHiddenClass(
       Runtime &runtime,
       unsigned shapeTableIndex,
       HiddenClass *clazz);
@@ -381,13 +440,7 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
 
   /// After a new lazy function has been compiled, update internal RuntimeModule
   /// state with new data from the BCProvider.
-  void initAfterLazyCompilation() {
-    importStringIDMapMayAllocate();
-    initializeFunctionMap();
-    // Initialize the object literal hidden class cache.
-    auto numObjShapes = bcProvider_->getObjectShapeTable().size();
-    objectLiteralHiddenClasses_.resize(numObjShapes);
-  }
+  void initAfterLazyCompilation();
 
   /// Returns the module export for module \p modIndex.  This will be
   /// empty if that module has not yet been initialized.
@@ -398,6 +451,16 @@ class RuntimeModule final : public llvh::ilist_node<RuntimeModule> {
   /// of the cache, and attempts to reallocate it fail.  If that occurs,
   /// the array size will remain unchanged.
   void setModuleExport(Runtime &runtime, uint32_t modIndex, Handle<> modExport);
+
+  /// The \p cases pointer points the the start of the string switch
+  /// table for a StringSwitchImm instruction; \p size is the size of that
+  /// table. Initializes \p table, which must be the runtime table dedicated to
+  /// this instruction, to map the case labels to the right (bytecode) branch
+  /// offsets.  (JIT branch targets are left as 0.)
+  void initializeStringSwitchImmTable(
+      StringSwitchDenseMap &table,
+      const hbc::StringSwitchTableCase *cases,
+      uint32_t size);
 
  private:
   /// Import the string table from the supplied module.

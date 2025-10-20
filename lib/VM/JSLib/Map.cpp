@@ -17,8 +17,13 @@
 namespace hermes {
 namespace vm {
 
-Handle<NativeConstructor> createMapConstructor(Runtime &runtime) {
+HermesValue createMapConstructor(Runtime &runtime) {
   auto mapPrototype = Handle<JSObject>::vmcast(&runtime.mapPrototype);
+
+  struct : public Locals {
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
 
   // Map.prototype.xxx methods.
   defineMethod(
@@ -121,14 +126,23 @@ Handle<NativeConstructor> createMapConstructor(Runtime &runtime) {
       runtime.getPredefinedStringHandle(Predefined::Map),
       dpf);
 
-  auto cons = defineSystemConstructor(
+  defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::Map),
       mapConstructor,
       mapPrototype,
-      0);
+      0,
+      lv.cons);
 
-  return cons;
+  defineMethod(
+      runtime,
+      lv.cons,
+      Predefined::getSymbolID(Predefined::groupBy),
+      nullptr,
+      mapGroupBy,
+      2);
+
+  return lv.cons.getHermesValue();
 }
 
 /// Populate the Map with the contents of the source Map.
@@ -141,22 +155,29 @@ mapFromMapFastPath(Runtime &runtime, Handle<JSMap> target, Handle<JSMap> src) {
   // SmallHermesValue unbox/boxing. We should be able to make an
   // OrderedHashMap::clone that initializes based on an existing Map
   // and clones all entries directly somehow.
-  MutableHandle<> keyHandle{runtime};
-  MutableHandle<> valueHandle{runtime};
+  struct : public Locals {
+    PinnedValue<> keyHandle;
+    PinnedValue<> valueHandle;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
   return JSMap::forEachNative(
       src,
       runtime,
-      [&target, &keyHandle, &valueHandle](
-          Runtime &runtime, Handle<HashMapEntry> entry) -> ExecutionStatus {
-        keyHandle = entry->key.unboxToHV(runtime);
-        valueHandle = entry->value.unboxToHV(runtime);
-        JSMap::insert(target, runtime, keyHandle, valueHandle);
+      [&target, &lv](Runtime &runtime, HermesValue keyHV, HermesValue valueHV)
+          -> ExecutionStatus {
+        lv.keyHandle = keyHV;
+        lv.valueHandle = valueHV;
+        if (LLVM_UNLIKELY(
+                JSMap::insert(target, runtime, lv.keyHandle, lv.valueHandle) ==
+                ExecutionStatus::EXCEPTION)) {
+          return ExecutionStatus::EXCEPTION;
+        }
         return ExecutionStatus::RETURNED;
       });
 }
 
-CallResult<HermesValue>
-mapConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope{runtime};
   if (LLVM_UNLIKELY(!args.isConstructorCall())) {
     return runtime.raiseTypeError("Constructor Map requires 'new'");
@@ -165,6 +186,9 @@ mapConstructor(void *, Runtime &runtime, NativeArgs args) {
   struct : public Locals {
     PinnedValue<JSObject> selfParent;
     PinnedValue<JSMap> self;
+    PinnedValue<> adderProp;
+    PinnedValue<SymbolID> iteratorSymbol;
+    PinnedValue<Callable> iterMethod;
   } lv;
   LocalsRAII lraii(runtime, &lv);
   if (LLVM_LIKELY(
@@ -203,23 +227,23 @@ mapConstructor(void *, Runtime &runtime, NativeArgs args) {
   }
 
   // ES6.0 23.1.1.1.7: Cache adder across all iterations of the loop.
-  auto adder =
-      Handle<Callable>::dyn_vmcast(runtime.makeHandle(std::move(*propRes)));
+  lv.adderProp = std::move(*propRes);
+  auto adder = Handle<Callable>::dyn_vmcast(Handle<>{lv.adderProp});
   if (!adder) {
     return runtime.raiseTypeError("Property 'set' for Map is not callable");
   }
 
-  auto iterMethodRes = getMethod(
-      runtime,
-      args.getArgHandle(0),
-      runtime.makeHandle(Predefined::getSymbolID(Predefined::SymbolIterator)));
+  lv.iteratorSymbol = Predefined::getSymbolID(Predefined::SymbolIterator);
+  auto iterMethodRes =
+      getMethod(runtime, args.getArgHandle(0), lv.iteratorSymbol);
   if (LLVM_UNLIKELY(iterMethodRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   if (!vmisa<Callable>(iterMethodRes->getHermesValue())) {
     return runtime.raiseTypeError("iterator method is not callable");
   }
-  auto iterMethod = runtime.makeHandle<Callable>(std::move(*iterMethodRes));
+  lv.iterMethod.castAndSetHermesValue<Callable>(
+      iterMethodRes->getHermesValue());
 
   // Check and run fast path.
   if (LLVM_LIKELY(
@@ -228,7 +252,7 @@ mapConstructor(void *, Runtime &runtime, NativeArgs args) {
     // If the iterable is a Map with the original iterator,
     // then we can do for-loop.
     if (Handle<JSMap> inputMap = args.dyncastArg<JSMap>(0); inputMap &&
-        LLVM_LIKELY(iterMethod.getHermesValue().getRaw() ==
+        LLVM_LIKELY(lv.iterMethod.getHermesValue().getRaw() ==
                     runtime.mapPrototypeEntries.getHermesValue().getRaw())) {
       if (LLVM_UNLIKELY(
               mapFromMapFastPath(runtime, lv.self, inputMap) ==
@@ -245,7 +269,7 @@ mapConstructor(void *, Runtime &runtime, NativeArgs args) {
       runtime,
       lv.self,
       args.getArgHandle(0),
-      iterMethod,
+      Handle<Callable>{lv.iterMethod},
       [&runtime, &self = lv.self, adder](
           Runtime &, Handle<> key, Handle<> value) {
         return Callable::executeCall2(
@@ -258,19 +282,22 @@ mapConstructor(void *, Runtime &runtime, NativeArgs args) {
       });
 }
 
-CallResult<HermesValue>
-mapPrototypeClear(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeClear(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
         "Non-Map object called on Map.prototype.clear");
   }
-  selfHandle->clear(runtime);
+  if (LLVM_UNLIKELY(
+          JSMap::clear(selfHandle, runtime) == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-mapPrototypeDelete(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeDelete(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
@@ -280,21 +307,27 @@ mapPrototypeDelete(void *, Runtime &runtime, NativeArgs args) {
       JSMap::erase(selfHandle, runtime, args.getArgHandle(0)));
 }
 
-CallResult<HermesValue>
-mapPrototypeEntries(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeEntries(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
         "Non-Map object called on Map.prototype.entries");
   }
-  auto iterator = runtime.makeHandle(JSMapIterator::create(
-      runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype)));
-  iterator->initializeIterator(runtime, selfHandle, IterationKind::Entry);
-  return iterator.getHermesValue();
+  struct : public Locals {
+    PinnedValue<JSMapIterator> iterator;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.iterator.castAndSetHermesValue<JSMapIterator>(
+      JSMapIterator::create(
+          runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype))
+          .getHermesValue());
+  lv.iterator->initializeIterator(runtime, selfHandle, IterationKind::Entry);
+  return lv.iterator.getHermesValue();
 }
 
-CallResult<HermesValue>
-mapPrototypeForEach(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeForEach(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
@@ -312,43 +345,47 @@ mapPrototypeForEach(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeUndefinedValue();
 }
 
-CallResult<HermesValue>
-mapPrototypeGet(void *, Runtime &runtime, NativeArgs args) {
-  auto selfHandle = args.dyncastThis<JSMap>();
-  if (LLVM_UNLIKELY(!selfHandle)) {
+CallResult<HermesValue> mapPrototypeGet(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  auto *self = dyn_vmcast<JSMap>(args.getThisArg());
+  if (LLVM_UNLIKELY(!self)) {
     return runtime.raiseTypeError("Non-Map object called on Map.prototype.get");
   }
-  return JSMap::get(selfHandle, runtime, args.getArgHandle(0))
-      .unboxToHV(runtime);
+  return self->get(runtime, args.getArg(0)).unboxToHV(runtime);
 }
 
-CallResult<HermesValue>
-mapPrototypeHas(void *, Runtime &runtime, NativeArgs args) {
-  auto selfHandle = args.dyncastThis<JSMap>();
-  if (LLVM_UNLIKELY(!selfHandle)) {
+CallResult<HermesValue> mapPrototypeHas(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  auto *self = dyn_vmcast<JSMap>(args.getThisArg());
+  if (LLVM_UNLIKELY(!self)) {
     return runtime.raiseTypeError("Non-Map object called on Map.prototype.has");
   }
-  return HermesValue::encodeBoolValue(
-      JSMap::has(selfHandle, runtime, args.getArgHandle(0)));
+  return HermesValue::encodeBoolValue(self->has(runtime, args.getArg(0)));
 }
 
-CallResult<HermesValue>
-mapPrototypeKeys(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeKeys(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
         "Non-Map object called on Map.prototype.keys");
   }
 
-  auto iterator = runtime.makeHandle(JSMapIterator::create(
-      runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype)));
-  iterator->initializeIterator(runtime, selfHandle, IterationKind::Key);
-  return iterator.getHermesValue();
+  struct : public Locals {
+    PinnedValue<JSMapIterator> iterator;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.iterator.castAndSetHermesValue<JSMapIterator>(
+      JSMapIterator::create(
+          runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype))
+          .getHermesValue());
+  lv.iterator->initializeIterator(runtime, selfHandle, IterationKind::Key);
+  return lv.iterator.getHermesValue();
 }
 
 // ES12 23.1.3.9 Map.prototype.set ( key, value )
-CallResult<HermesValue>
-mapPrototypeSet(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeSet(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError("Non-Map object called on Map.prototype.set");
@@ -359,12 +396,16 @@ mapPrototypeSet(void *, Runtime &runtime, NativeArgs args) {
   auto key = keyHandle->isNumber() && keyHandle->getNumber() == 0
       ? HandleRootOwner::getZeroValue()
       : keyHandle;
-  JSMap::insert(selfHandle, runtime, key, args.getArgHandle(1));
+  if (LLVM_UNLIKELY(
+          JSMap::insert(selfHandle, runtime, key, args.getArgHandle(1)) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
   return selfHandle.getHermesValue();
 }
 
-CallResult<HermesValue>
-mapPrototypeSizeGetter(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeSizeGetter(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto self = dyn_vmcast<JSMap>(args.getThisArg());
   if (LLVM_UNLIKELY(!self)) {
     return runtime.raiseTypeError(
@@ -373,25 +414,37 @@ mapPrototypeSizeGetter(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeTrustedNumberValue(self->size());
 }
 
-CallResult<HermesValue>
-mapPrototypeValues(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapPrototypeValues(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMap>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
         "Non-Map object called on Map.prototype.values");
   }
-  auto iterator = runtime.makeHandle(JSMapIterator::create(
-      runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype)));
-  iterator->initializeIterator(runtime, selfHandle, IterationKind::Value);
-  return iterator.getHermesValue();
+  struct : public Locals {
+    PinnedValue<JSMapIterator> iterator;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.iterator.castAndSetHermesValue<JSMapIterator>(
+      JSMapIterator::create(
+          runtime, Handle<JSObject>::vmcast(&runtime.mapIteratorPrototype))
+          .getHermesValue());
+  lv.iterator->initializeIterator(runtime, selfHandle, IterationKind::Value);
+  return lv.iterator.getHermesValue();
 }
 
-Handle<JSObject> createMapIteratorPrototype(Runtime &runtime) {
-  auto parentHandle = runtime.makeHandle(JSObject::create(
-      runtime, Handle<JSObject>::vmcast(&runtime.iteratorPrototype)));
+HermesValue createMapIteratorPrototype(Runtime &runtime) {
+  struct : public Locals {
+    PinnedValue<JSObject> parentHandle;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.parentHandle.castAndSetHermesValue<JSObject>(
+      JSObject::create(
+          runtime, Handle<JSObject>::vmcast(&runtime.iteratorPrototype))
+          .getHermesValue());
   defineMethod(
       runtime,
-      parentHandle,
+      lv.parentHandle,
       Predefined::getSymbolID(Predefined::next),
       nullptr,
       mapIteratorPrototypeNext,
@@ -402,16 +455,16 @@ Handle<JSObject> createMapIteratorPrototype(Runtime &runtime) {
   dpf.enumerable = 0;
   defineProperty(
       runtime,
-      parentHandle,
+      lv.parentHandle,
       Predefined::getSymbolID(Predefined::SymbolToStringTag),
       runtime.getPredefinedStringHandle(Predefined::MapIterator),
       dpf);
 
-  return parentHandle;
+  return lv.parentHandle.getHermesValue();
 }
 
-CallResult<HermesValue>
-mapIteratorPrototypeNext(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> mapIteratorPrototypeNext(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto selfHandle = args.dyncastThis<JSMapIterator>();
   if (LLVM_UNLIKELY(!selfHandle)) {
     return runtime.raiseTypeError(
@@ -424,5 +477,45 @@ mapIteratorPrototypeNext(void *, Runtime &runtime, NativeArgs args) {
   }
   return *cr;
 }
+
+/// ES15.0 24.1.2.1 Map.groupBy ( items, callback )
+/// https://tc39.es/ecma262/#sec-map.groupby
+CallResult<HermesValue> mapGroupBy(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+
+  struct : public Locals {
+    PinnedValue<JSMap> map;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  // 2. Let map be ! Construct(%Map%).
+  lv.map = JSMap::create(runtime, runtime.mapPrototype);
+
+  if (LLVM_UNLIKELY(
+          JSMap::initializeStorage(lv.map, runtime) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  // 1. Let groups be ? GroupBy(items, callbackfn, COLLECTION).
+  if (LLVM_UNLIKELY(
+          groupByCollection(
+              runtime, lv.map, args.getArgHandle(0), args.getArgHandle(1)) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  // NOTE: The below are handled by `groupByCollection` which directly acts on
+  // the above JSMap.
+  // 2. Let map be ! Construct(%Map%).
+  // 3. For each Record { [[Key]], [[Elements]] } g of groups, do
+  // a. Let elements be CreateArrayFromList(g.[[Elements]]).
+  // b. Let entry be the Record { [[Key]]: g.[[Key]], [[Value]]: elements }.
+  // c. Append entry to map.[[MapData]].
+
+  // 4. Return map.
+  return lv.map.getHermesValue();
+}
+
 } // namespace vm
 } // namespace hermes

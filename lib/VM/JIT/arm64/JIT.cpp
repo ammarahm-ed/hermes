@@ -10,21 +10,18 @@
 #include "hermes/VM/JIT/arm64/JIT.h"
 
 #include "JitEmitter.h"
+#include "JitImpl.h"
 
 #include "hermes/Inst/InstDecode.h"
 #include "hermes/VM/JIT/DiscoverBB.h"
 #include "hermes/VM/RuntimeModule.h"
+#include "hermes/VM/StringPrimitiveValueDenseMapInfo-inline.h"
 
 #define DEBUG_TYPE "jit"
 
 namespace hermes {
 namespace vm {
 namespace arm64 {
-
-class JITContext::Impl {
- public:
-  asmjit::JitRuntime jr{};
-};
 
 JITContext::JITContext(bool enable) : enabled_(enable) {
   if (!enable)
@@ -33,6 +30,24 @@ JITContext::JITContext(bool enable) : enabled_(enable) {
 }
 
 JITContext::~JITContext() = default;
+
+void JITContext::dumpCounters(llvh::raw_ostream &os) {
+  static constexpr const char *kCounterNames[] = {
+#define COUNTER_NAME(name) #name,
+      JIT_COUNTERS(COUNTER_NAME)
+#undef COUNTER_NAME
+  };
+  for (unsigned i = 0; i < (unsigned)JitCounter::_Last; ++i)
+    os << kCounterNames[i] << ": " << counters_[i] << "\n";
+}
+
+void JITContext::markRoots(
+    RootAcceptorWithNames &acceptor,
+    bool markLongLived) {
+  if (!impl_)
+    return;
+  acceptor.accept(impl_->usedHCs);
+}
 
 // Calculate the address of the next instruction given the name of the
 // current one.
@@ -56,6 +71,7 @@ JITContext::~JITContext() = default;
 #endif
 
 class JITContext::Compiler {
+  /// JITContext that owns this compiler.
   JITContext &jc_;
   /// The implementation of the assembly emitter.
   Emitter em_;
@@ -86,17 +102,23 @@ class JITContext::Compiler {
   /// In case of "other" error, the error message is recorded here.
   std::string otherErrorMessage_{};
 
+  /// For string switch imm instructions, the labels to be resolved, and fixed
+  /// up in the switch's runtime table, when compilation is complete.
+  llvh::DenseMap<
+      const inst::StringSwitchImmInst *,
+      std::vector<Emitter::StringSwitchCase>>
+      stringSwitchImmTargetLabels_;
+
  public:
-  Compiler(JITContext &jc, CodeBlock *codeBlock)
+  Compiler(Runtime &runtime, JITContext &jc, CodeBlock *codeBlock)
       : jc_(jc),
-        em_(jc.impl_->jr,
+        em_(runtime,
+            *jc.impl_,
             jc.getDumpJITCode(),
             jc.getEmitAsserts(),
+            jc.counters_.get() != nullptr,
+            jc.perfJitDump_.get(),
             codeBlock,
-            codeBlock->readPropertyCache(),
-            codeBlock->writePropertyCache(),
-            // TODO: is getFrameSize() the right thing to call?
-            codeBlock->getFrameSize(),
             [this](std::string &&message) {
               otherErrorMessage_ = std::move(message);
               error_ = Error::Other;
@@ -181,14 +203,35 @@ class JITContext::Compiler {
 
 JITCompiledFunctionPtr JITContext::compileImpl(
     Runtime &runtime,
-    CodeBlock *codeBlock_) {
-  Compiler compiler(*this, codeBlock_);
+    CodeBlock *codeBlock) {
+  Compiler compiler(runtime, *this, codeBlock);
   return compiler.compileCodeBlock();
 }
 
 JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlock() {
   if (_sh_setjmp(errorJmpBuf_) == 0) {
-    return compileCodeBlockImpl();
+    auto res = compileCodeBlockImpl();
+
+    // Translate now-bound labels to targets.
+    uint64_t funcStart = reinterpret_cast<uint64_t>(res);
+    RuntimeModule *runtimeModule = codeBlock_->getRuntimeModule();
+    for (const auto &[inst, cases] : stringSwitchImmTargetLabels_) {
+      assert(
+          inst->op2 < runtimeModule->numStringSwitchImmTables() &&
+          "String Switch index out of range.");
+      StringSwitchDenseMap &table =
+          runtimeModule->getStringSwitchImmTables()[inst->op2];
+      for (const auto &switchCase : cases) {
+        StringPrimitive *strPrim =
+            runtimeModule->getStringPrimFromStringIDMayAllocate(
+                switchCase.caseLabelStringId);
+        table.at(strPrim).jitCodeTarget =
+            reinterpret_cast<uint8_t *>(funcStart) +
+            em_.code.labelOffset(*switchCase.target);
+      }
+    }
+
+    return res;
   } else {
     // We arrive here on error.
 
@@ -280,6 +323,14 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
 
   codeBlock_->setJITCompiled(em_.addToRuntime(jc_.impl_->jr));
 
+  if (jc_.perfJitDump_) {
+    // Write the JIT dump for this function.
+    jc_.perfJitDump_->writeCodeLoadRecord(
+        reinterpret_cast<const char *>(codeBlock_->getJITCompiled()),
+        em_.code.codeSize(),
+        codeBlock_->getNameString());
+  }
+
   if (LLVM_UNLIKELY(usedSize == memoryLimit)) {
     // Disable compilation for the future because we've hit the limit,
     // but this function is fine.
@@ -317,8 +368,6 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     _sh_longjmp(errorJmpBuf_, 1);                                              \
   }
 
-EMIT_UNIMPLEMENTED(GetEnvironment)
-EMIT_UNIMPLEMENTED(DirectEval)
 EMIT_UNIMPLEMENTED(AsyncBreakCheck)
 
 #undef EMIT_UNIMPLEMENTED
@@ -326,6 +375,11 @@ EMIT_UNIMPLEMENTED(AsyncBreakCheck)
 inline void JITContext::Compiler::emitUnreachable(
     const inst::UnreachableInst *inst) {
   em_.unreachable();
+}
+
+inline void JITContext::Compiler::emitDirectEval(
+    const inst::DirectEvalInst *inst) {
+  em_.directEval(FR(inst->op1), FR(inst->op2), (bool)inst->op3);
 }
 
 inline void JITContext::Compiler::emitProfilePoint(
@@ -368,9 +422,9 @@ inline void JITContext::Compiler::emitLoadConstDouble(
     em_.loadConstBits64(FR(inst->op1), val, type, #NAME); \
   }
 
-EMIT_LOAD_CONST(Empty, _sh_ljs_empty().raw, FRType::UnknownNonPtr);
-EMIT_LOAD_CONST(Undefined, _sh_ljs_undefined().raw, FRType::UnknownNonPtr);
-EMIT_LOAD_CONST(Null, _sh_ljs_null().raw, FRType::UnknownNonPtr);
+EMIT_LOAD_CONST(Empty, _sh_ljs_empty().raw, FRType::OtherNonPtr);
+EMIT_LOAD_CONST(Undefined, _sh_ljs_undefined().raw, FRType::OtherNonPtr);
+EMIT_LOAD_CONST(Null, _sh_ljs_null().raw, FRType::OtherNonPtr);
 EMIT_LOAD_CONST(True, _sh_ljs_bool(true).raw, FRType::Bool);
 EMIT_LOAD_CONST(False, _sh_ljs_bool(false).raw, FRType::Bool);
 
@@ -574,8 +628,8 @@ EMIT_JMP_BUILTIN_IS(JmpBuiltinIsNotLong, true)
 
 #undef EMIT_JMP_BUILTIN_IS
 
-inline void JITContext::Compiler::emitSwitchImm(
-    const inst::SwitchImmInst *inst) {
+inline void JITContext::Compiler::emitUIntSwitchImm(
+    const inst::UIntSwitchImmInst *inst) {
   uint32_t min = inst->op4;
   uint32_t max = inst->op5;
   // Max is inclusive, so add 1 to get the number of entries.
@@ -595,13 +649,57 @@ inline void JITContext::Compiler::emitSwitchImm(
     int32_t offset = *loc;
     jumpTableLabels.push_back(&bbLabelFromInst(inst, offset));
   }
-
-  em_.switchImm(
+  em_.uintSwitchImm(
       FR(inst->op1),
       bbLabelFromInst(inst, inst->op3),
       jumpTableLabels,
       min,
       max);
+}
+
+inline void JITContext::Compiler::emitStringSwitchImm(
+    const inst::StringSwitchImmInst *inst) {
+  uint32_t entries = inst->op5;
+
+  // Calculate the offset into the bytecode where the jump table for
+  // this SwitchImm starts.
+  const hbc::StringSwitchTableCase *tablestart =
+      (const hbc::StringSwitchTableCase *)llvh::alignAddr(
+          (const uint8_t *)inst + inst->op3, sizeof(uint32_t));
+
+  // Initialize the string switch table, if necessary.
+  assert(
+      inst->op2 < codeBlock_->getRuntimeModule()->numStringSwitchImmTables() &&
+      "String Switch index out of range.");
+  StringSwitchDenseMap &table =
+      codeBlock_->getRuntimeModule()->getStringSwitchImmTables()[inst->op2];
+  if (table.size() == 0) {
+    codeBlock_->getRuntimeModule()->initializeStringSwitchImmTable(
+        table, tablestart, inst->op5);
+  }
+
+  std::vector<Emitter::StringSwitchCase> switchTableLabels{};
+  switchTableLabels.reserve(entries);
+
+  // Add a label for each offset in the table.
+  for (uint32_t i = 0; i < entries; ++i) {
+    const hbc::StringSwitchTableCase &stringSwitchCase = tablestart[i];
+    switchTableLabels.emplace_back(
+        stringSwitchCase.caseLabelStringID,
+        &bbLabelFromInst(inst, stringSwitchCase.target));
+  }
+
+  em_.stringSwitchImm(
+      FR(inst->op1),
+      table,
+      bbLabelFromInst(inst, inst->op4),
+      switchTableLabels);
+
+  // Save the labels, so we can record them in the runtime table when the
+  // compilation is complete.
+  [[maybe_unused]] auto [_, res] = stringSwitchImmTargetLabels_.try_emplace(
+      inst, std::move(switchTableLabels));
+  assert(res);
 }
 
 inline void JITContext::Compiler::emitTryGetByIdLong(
@@ -733,10 +831,45 @@ inline void JITContext::Compiler::emitDelByVal(const inst::DelByValInst *inst) {
   em_.delByVal(FR(inst->op1), FR(inst->op2), FR(inst->op3), inst->op4);
 }
 
+inline void JITContext::Compiler::emitAddOwnPrivateBySym(
+    const inst::AddOwnPrivateBySymInst *inst) {
+  em_.addOwnPrivateBySym(FR(inst->op1), FR(inst->op3), FR(inst->op2));
+}
+
+inline void JITContext::Compiler::emitGetOwnPrivateBySym(
+    const inst::GetOwnPrivateBySymInst *inst) {
+  em_.getOwnPrivateBySym(
+      FR(inst->op1), FR(inst->op2), FR(inst->op4), inst->op3);
+}
+
+inline void JITContext::Compiler::emitPutOwnPrivateBySym(
+    const inst::PutOwnPrivateBySymInst *inst) {
+  em_.putOwnPrivateBySym(
+      FR(inst->op1), FR(inst->op4), FR(inst->op2), inst->op3);
+}
+
 inline void JITContext::Compiler::emitGetByIndex(
     const inst::GetByIndexInst *inst) {
   em_.getByIndex(FR(inst->op1), FR(inst->op2), inst->op3);
 }
+
+#define EMIT_DEFINE_BY_ID(op)                                              \
+  inline void JITContext::Compiler::emit##op(const inst::op##Inst *inst) { \
+    auto idVal = ID(inst->op4);                                            \
+    auto cacheIdx = inst->op3;                                             \
+    em_.defineOwnById(FR(inst->op1), idVal, FR(inst->op2), cacheIdx);      \
+  }
+EMIT_DEFINE_BY_ID(DefineOwnById)
+EMIT_DEFINE_BY_ID(DefineOwnByIdLong)
+#undef EMIT_DEFINE_BY_ID
+
+#define EMIT_DEFINE_OWN_IN_DENSE_ARRAY(op)                                 \
+  inline void JITContext::Compiler::emit##op(const inst::op##Inst *inst) { \
+    em_.defineOwnInDenseArray(FR(inst->op1), FR(inst->op2), inst->op3);    \
+  }
+EMIT_DEFINE_OWN_IN_DENSE_ARRAY(DefineOwnInDenseArray)
+EMIT_DEFINE_OWN_IN_DENSE_ARRAY(DefineOwnInDenseArrayL)
+#undef EMIT_DEFINE_OWN_IN_DENSE_ARRAY
 
 inline void JITContext::Compiler::emitDefineOwnByIndex(
     const inst::DefineOwnByIndexInst *inst) {
@@ -764,20 +897,6 @@ inline void JITContext::Compiler::emitDefineOwnGetterSetterByVal(
       (bool)inst->op5);
 }
 
-#define EMIT_PUT_NEW_OWN_BY_ID(name, enumerable)                               \
-  inline void JITContext::Compiler::emit##name(const inst::name##Inst *inst) { \
-    em_.putNewOwnById(                                                         \
-        FR(inst->op1), FR(inst->op2), ID(inst->op3), enumerable);              \
-  }
-
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnById, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnByIdLong, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnByIdShort, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnNEById, false)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnNEByIdLong, false)
-
-#undef EMIT_PUT_NEW_OWN_BY_ID
-
 #define EMIT_OWN_BY_SLOT_IDX(name, op)                                         \
   inline void JITContext::Compiler::emit##name(const inst::name##Inst *inst) { \
     em_.op(FR(inst->op1), FR(inst->op2), inst->op3);                           \
@@ -799,11 +918,6 @@ inline void JITContext::Compiler::emitLoadParentNoTraps(
 inline void JITContext::Compiler::emitTypedLoadParent(
     const inst::TypedLoadParentInst *inst) {
   em_.typedLoadParent(FR(inst->op1), FR(inst->op2));
-}
-
-inline void JITContext::Compiler::emitTypedStoreParent(
-    const inst::TypedStoreParentInst *inst) {
-  em_.typedStoreParent(FR(inst->op1), FR(inst->op2));
 }
 
 inline void JITContext::Compiler::emitRet(const inst::RetInst *inst) {
@@ -947,6 +1061,11 @@ inline void JITContext::Compiler::emitGetParentEnvironment(
   em_.getParentEnvironment(FR(inst->op1), inst->op2);
 }
 
+inline void JITContext::Compiler::emitGetEnvironment(
+    const inst::GetEnvironmentInst *inst) {
+  em_.getEnvironment(FR(inst->op1), FR(inst->op2), inst->op3);
+}
+
 inline void JITContext::Compiler::emitGetClosureEnvironment(
     const inst::GetClosureEnvironmentInst *inst) {
   em_.getClosureEnvironment(FR(inst->op1), FR(inst->op2));
@@ -1039,6 +1158,12 @@ EMIT_NEW_OBJECT_WITH_BUFFER(NewObjectWithBufferLong)
 
 #undef EMIT_NEW_OBJECT_WITH_BUFFER
 
+void JITContext::Compiler::emitNewObjectWithBufferAndParent(
+    const inst::NewObjectWithBufferAndParentInst *inst) {
+  em_.newObjectWithBufferAndParent(
+      FR(inst->op1), FR(inst->op2), inst->op3, inst->op4);
+}
+
 inline void JITContext::Compiler::emitNewArray(const inst::NewArrayInst *inst) {
   em_.newArray(FR(inst->op1), inst->op2);
 }
@@ -1096,6 +1221,16 @@ inline void JITContext::Compiler::emitGetNextPName(
 inline void JITContext::Compiler::emitToPropertyKey(
     const inst::ToPropertyKeyInst *inst) {
   em_.toPropertyKey(FR(inst->op1), FR(inst->op2));
+}
+
+inline void JITContext::Compiler::emitCreatePrivateName(
+    const inst::CreatePrivateNameInst *inst) {
+  em_.createPrivateName(FR(inst->op1), ID(inst->op2));
+}
+
+inline void JITContext::Compiler::emitPrivateIsIn(
+    const inst::PrivateIsInInst *inst) {
+  em_.privateIsIn(FR(inst->op1), FR(inst->op2), FR(inst->op3), inst->op4);
 }
 
 inline void JITContext::Compiler::emitIteratorBegin(
@@ -1182,6 +1317,10 @@ inline void JITContext::Compiler::emitThrow(const inst::ThrowInst *inst) {
 inline void JITContext::Compiler::emitThrowIfEmpty(
     const inst::ThrowIfEmptyInst *inst) {
   em_.throwIfEmpty(FR(inst->op1), FR(inst->op2));
+}
+inline void JITContext::Compiler::emitThrowIfUndefined(
+    const inst::ThrowIfUndefinedInst *inst) {
+  em_.throwIfUndefined(FR(inst->op1), FR(inst->op2));
 }
 
 inline void JITContext::Compiler::emitThrowIfThisInitialized(

@@ -98,8 +98,11 @@ class SemanticResolver
   /// True if we are forbidding await expressions.
   bool forbidAwaitExpression_{false};
 
-  /// True if we are forbidding 'arguments' identifier.
-  bool forbidArguments_{false};
+  /// True if we are forbidding the reference to the special 'arguments' object.
+  bool forbidSpecialArgumentsReference_{false};
+
+  /// True if 'arguments' cannot be used as any identifier.
+  bool forbidArgumentsAsIdentifier_{false};
 
  public:
   /// This constant enables the more expensive path in RecursiveVisitorDispatch,
@@ -190,6 +193,11 @@ class SemanticResolver
     visitESTreeChildren(*this, node);
   }
 
+  /// A private identifier is declared via a field, method, or accessor
+  /// definition. This will report errors in any illegally duplicated private
+  /// identifiers. Also add the private names to the binding table and associate
+  /// `Decl`s with the corresponding private name IdentifierNodes.
+  void collectDeclaredPrivateIdentifiers(ESTree::ClassLikeNode *node);
   void visit(ESTree::ProgramNode *node);
 
   void visit(ESTree::FunctionDeclarationNode *funcDecl, ESTree::Node *parent);
@@ -217,9 +225,9 @@ class SemanticResolver
   void visitForInOf(
       ESTree::LoopStatementNode *node,
       ESTree::ScopeDecorationBase *scopeDeco,
-      ESTree::Node *left,
-      ESTree::Node *right,
-      ESTree::Node *body);
+      ESTree::Node *&left,
+      ESTree::Node *&right,
+      ESTree::Node *&body);
 
   void visit(ESTree::ForStatementNode *node);
 
@@ -254,6 +262,9 @@ class SemanticResolver
   void visit(ESTree::SuperNode *node, ESTree::Node *parent);
 
   void visit(ESTree::CallExpressionNode *node);
+
+  void visit(ESTree::MemberExpressionNode *node, ESTree::Node *parent);
+  void visit(ESTree::OptionalMemberExpressionNode *node, ESTree::Node *parent);
 
   void visit(ESTree::SpreadElementNode *node, ESTree::Node *parent);
 
@@ -339,7 +350,7 @@ class SemanticResolver
   void visitFunctionLike(
       ESTree::FunctionLikeNode *node,
       ESTree::IdentifierNode *id,
-      ESTree::Node *body,
+      ESTree::Node *&body,
       ESTree::NodeList &params,
       ESTree::Node *parent);
   /// Visit a function-like node with the FunctionContext already created.
@@ -347,7 +358,7 @@ class SemanticResolver
   void visitFunctionLikeInFunctionContext(
       ESTree::FunctionLikeNode *node,
       ESTree::IdentifierNode *id,
-      ESTree::Node *body,
+      ESTree::Node *&body,
       ESTree::NodeList &params);
 
   /// Visit the rest of the function body having visited the params already.
@@ -356,13 +367,13 @@ class SemanticResolver
   void visitFunctionBodyAfterParamsVisited(
       ESTree::FunctionLikeNode *node,
       ESTree::IdentifierNode *id,
-      ESTree::Node *body,
+      ESTree::Node *&body,
       ESTree::BlockStatementNode *blockBody,
       bool hasParameterNamedArguments);
 
   void visitFunctionExpression(
       ESTree::FunctionExpressionNode *node,
-      ESTree::Node *body,
+      ESTree::Node *&body,
       ESTree::NodeList &params,
       ESTree::Node *parent);
 
@@ -382,6 +393,24 @@ class SemanticResolver
   /// Assigns the associated declaration if it exists.
   /// \return the declaration, `nullptr` if unresolvable or failed to resolve.
   Decl *checkIdentifierResolved(ESTree::IdentifierNode *identifier);
+
+  /// Create a new declaration of a private name in the current scope.
+  /// \pre An IdentifierNode which has the same _name field has not been
+  /// declared in this same LexicalScope.
+  /// \param identifier the AST node containing the name
+  /// \param kind the kind of decl to be created.
+  /// \param isStatic is only valid for methods / accessors.
+  /// \return the newly created decl.
+  Decl *declarePrivateName(
+      ESTree::IdentifierNode *identifier,
+      Decl::Kind kind,
+      bool isStatic = false);
+
+  /// Resolve an identifier for a private name to a declaration and record the
+  /// resolution. Emit an error for undeclared private names.
+  /// \return null when no private name declaration could be found for \p
+  /// identifier; at which point an error has been raised.
+  Decl *resolvePrivateName(ESTree::IdentifierNode *identifier);
 
   /// Declare all declarations optionally associated with \p scopeNode
   /// by the DeclCollector in the current scope.
@@ -542,7 +571,17 @@ class FunctionContext {
 
   explicit FunctionContext(
       SemanticResolver &resolver,
-      FunctionInfo *newFunctionFin);
+      FunctionInfo *newFunctionInfo);
+
+  /// Although a static block is not technically a function, we should be able
+  /// to construct a function context starting from a static block node. This is
+  /// because static blocks introduce a new "var"-scope in the same way that
+  /// function nodes do. So we must be able to collect and initialize \p decls
+  /// starting from the static block node.
+  explicit FunctionContext(
+      SemanticResolver &resolver,
+      ESTree::StaticBlockNode *node,
+      FunctionInfo *newFunctionInfo);
 
   /// Tag for readability to show lazy compilation constructor.
   struct LazyTag {};
@@ -597,6 +636,9 @@ class ClassContext {
   /// Get or create a synthetic function information for the static elements
   /// initializer of a class.
   FunctionInfo *getOrCreateStaticElementsInitFunctionInfo();
+
+  /// Create a synthetic function information for a static initialization block.
+  FunctionInfo *createStaticBlockFunctionInfo(ESTree::StaticBlockNode *node);
 
   /// \return true if the current class of this context is a derived class.
   bool isDerivedClass() const {

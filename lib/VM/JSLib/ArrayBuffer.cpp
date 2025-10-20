@@ -26,15 +26,22 @@ using std::min;
 /// @name Implementation
 /// @{
 
-Handle<NativeConstructor> createArrayBufferConstructor(Runtime &runtime) {
+HermesValue createArrayBufferConstructor(Runtime &runtime) {
   auto arrayBufferPrototype =
       Handle<JSObject>::vmcast(&runtime.arrayBufferPrototype);
-  auto cons = defineSystemConstructor(
+
+  struct : public Locals {
+    PinnedValue<NativeConstructor> cons;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::ArrayBuffer),
       arrayBufferConstructor,
       arrayBufferPrototype,
-      1);
+      1,
+      lv.cons);
 
   // ArrayBuffer.prototype.xxx() methods.
   defineAccessor(
@@ -67,17 +74,17 @@ Handle<NativeConstructor> createArrayBufferConstructor(Runtime &runtime) {
   // ArrayBuffer.xxx() methods.
   defineMethod(
       runtime,
-      cons,
+      lv.cons,
       Predefined::getSymbolID(Predefined::isView),
       nullptr,
       arrayBufferIsView,
       1);
 
-  return cons;
+  return lv.cons.getHermesValue();
 }
 
-CallResult<HermesValue>
-arrayBufferConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> arrayBufferConstructor(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // 1. If NewTarget is undefined, throw a TypeError exception.
   if (!args.isConstructorCall()) {
     return runtime.raiseTypeError(
@@ -131,8 +138,8 @@ arrayBufferConstructor(void *, Runtime &runtime, NativeArgs args) {
   return lv.self.getHermesValue();
 }
 
-CallResult<HermesValue>
-arrayBufferIsView(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> arrayBufferIsView(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   // 1. If Type(arg) is not Object, return false.
   // 2. If arg has a [[ViewedArrayBuffer]] internal slot, return true.
   // 3. Return false.
@@ -141,8 +148,10 @@ arrayBufferIsView(void *, Runtime &runtime, NativeArgs args) {
       vmisa<JSDataView>(args.getArg(0)));
 }
 
-CallResult<HermesValue>
-arrayBufferPrototypeByteLength(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> arrayBufferPrototypeByteLength(
+    void *,
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto self = args.dyncastThis<JSArrayBuffer>();
   if (!self) {
     return runtime.raiseTypeError(
@@ -151,8 +160,8 @@ arrayBufferPrototypeByteLength(void *, Runtime &runtime, NativeArgs args) {
   return HermesValue::encodeTrustedNumberValue(self->size());
 }
 
-CallResult<HermesValue>
-arrayBufferPrototypeSlice(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> arrayBufferPrototypeSlice(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto start = args.getArgHandle(0);
   auto end = args.getArgHandle(1);
   // 1. Let O be the this value.
@@ -165,6 +174,11 @@ arrayBufferPrototypeSlice(void *, Runtime &runtime, NativeArgs args) {
     return runtime.raiseTypeError(
         "Called ArrayBuffer.prototype.slice on a non-ArrayBuffer");
   }
+
+  struct : public Locals {
+    PinnedValue<JSArrayBuffer> newBuf;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
 
   // 5. Let len be the value of O’s [[ArrayBufferByteLength]] internal slot.
   double len = self->size();
@@ -207,10 +221,12 @@ arrayBufferPrototypeSlice(void *, Runtime &runtime, NativeArgs args) {
   // 15. Let new be Construct(ctor, «newLen»).
   // 16. ReturnIfAbrupt(new).
 
-  auto newBuf = runtime.makeHandle(JSArrayBuffer::create(
-      runtime, Handle<JSObject>::vmcast(&runtime.arrayBufferPrototype)));
+  lv.newBuf.castAndSetHermesValue<JSArrayBuffer>(
+      JSArrayBuffer::create(
+          runtime, Handle<JSObject>::vmcast(&runtime.arrayBufferPrototype))
+          .getHermesValue());
 
-  if (JSArrayBuffer::createDataBlock(runtime, newBuf, newLen_int) ==
+  if (JSArrayBuffer::createDataBlock(runtime, lv.newBuf, newLen_int) ==
       ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -222,7 +238,7 @@ arrayBufferPrototypeSlice(void *, Runtime &runtime, NativeArgs args) {
   // slot < newLen, throw a TypeError exception.
   // 21. NOTE: Side-effects of the above steps may have detached O.
   // 22. If IsDetachedBuffer(O) is true, throw a TypeError exception.
-  if (!self->attached() || !newBuf->attached()) {
+  if (!self->attached() || !lv.newBuf->attached()) {
     return runtime.raiseTypeError("Cannot split with detached ArrayBuffers");
   }
 
@@ -230,9 +246,9 @@ arrayBufferPrototypeSlice(void *, Runtime &runtime, NativeArgs args) {
   // 24. Let toBuf be the value of new’s [[ArrayBufferData]] internal slot.
   // 25. Perform CopyDataBlockBytes(toBuf, 0, fromBuf, first, newLen).
   JSArrayBuffer::copyDataBlockBytes(
-      runtime, *newBuf, 0, *self, first_int, newLen_int);
+      runtime, *lv.newBuf, 0, *self, first_int, newLen_int);
   // 26. Return new.
-  return newBuf.getHermesValue();
+  return lv.newBuf.getHermesValue();
 }
 /// @}
 } // namespace vm

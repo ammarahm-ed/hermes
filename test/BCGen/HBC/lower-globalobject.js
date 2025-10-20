@@ -20,8 +20,8 @@ function foo() {
 // CHKRA-NEXT:%BB0:
 // CHKRA-NEXT:                 DeclareGlobalVarInst "x": string
 // CHKRA-NEXT:                 DeclareGlobalVarInst "foo": string
-// CHKRA-NEXT:  {r1}      %2 = HBCGetGlobalObjectInst (:object)
-// CHKRA-NEXT:  {np0}     %3 = HBCLoadConstInst (:undefined) undefined: undefined
+// CHKRA-NEXT:  {r1}      %2 = LIRGetGlobalObjectInst (:object)
+// CHKRA-NEXT:  {np0}     %3 = LIRLoadConstInst (:undefined) undefined: undefined
 // CHKRA-NEXT:  {r0}      %4 = CreateFunctionInst (:object) {np0} %3: undefined, empty: any, %foo(): functionCode
 // CHKRA-NEXT:                 StorePropertyLooseInst {r0} %4: object, {r1} %2: object, "foo": string
 // CHKRA-NEXT:                 ReturnInst {np0} %3: undefined
@@ -29,7 +29,7 @@ function foo() {
 
 // CHKRA:function foo(): any
 // CHKRA-NEXT:%BB0:
-// CHKRA-NEXT:  {r0}      %0 = HBCGetGlobalObjectInst (:object)
+// CHKRA-NEXT:  {r0}      %0 = LIRGetGlobalObjectInst (:object)
 // CHKRA-NEXT:  {r0}      %1 = LoadPropertyInst (:any) {r0} %0: object, "x": string
 // CHKRA-NEXT:                 ReturnInst {r0} %1: any
 // CHKRA-NEXT:function_end
@@ -42,6 +42,10 @@ function foo() {
 // CHKBC-NEXT:  BigInt count: 0
 // CHKBC-NEXT:  String Kind Entry count: 2
 // CHKBC-NEXT:  RegExp count: 0
+// CHKBC-NEXT:  StringSwitchImm count: 0
+// CHKBC-NEXT:  Key buffer size (bytes): 0
+// CHKBC-NEXT:  Value buffer size (bytes): 0
+// CHKBC-NEXT:  Shape table count: 0
 // CHKBC-NEXT:  Segment ID: 0
 // CHKBC-NEXT:  CommonJS module count: 0
 // CHKBC-NEXT:  CommonJS module count (static): 0
@@ -56,19 +60,19 @@ function foo() {
 // CHKBC-NEXT:i2[ASCII, 9..9] #0001E7F9: x
 
 // CHKBC:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x0000
 // CHKBC-NEXT:    DeclareGlobalVar  "x"
 // CHKBC-NEXT:    DeclareGlobalVar  "foo"
-// CHKBC-NEXT:    GetGlobalObject   r1
+// CHKBC-NEXT:    GetGlobalObject   r2
 // CHKBC-NEXT:    LoadConstUndefined r0
-// CHKBC-NEXT:    CreateClosure     r2, r0, Function<foo>
-// CHKBC-NEXT:    PutByIdLoose      r1, r2, 1, "foo"
+// CHKBC-NEXT:    CreateClosure     r1, r0, Function<foo>
+// CHKBC-NEXT:    PutByIdLoose      r2, r1, 0, "foo"
 // CHKBC-NEXT:    Ret               r0
 
 // CHKBC:Function<foo>(1 params, 1 registers, 0 numbers, 0 non-pointers):
-// CHKBC-NEXT:Offset in debug table: source 0x000d, lexical 0x0000
+// CHKBC-NEXT:Offset in debug table: source 0x000e
 // CHKBC-NEXT:    GetGlobalObject   r0
-// CHKBC-NEXT:    GetByIdShort      r0, r0, 1, "x"
+// CHKBC-NEXT:    GetByIdShort      r0, r0, 0, "x"
 // CHKBC-NEXT:    Ret               r0
 
 // CHKBC:Debug filename table:
@@ -82,6 +86,6 @@ function foo() {
 // CHKBC-NEXT:    bc 0: line 11 col 1
 // CHKBC-NEXT:    bc 5: line 11 col 1
 // CHKBC-NEXT:    bc 19: line 11 col 1
-// CHKBC-NEXT:  0x000d  function idx 1, starts at line 13 col 1
+// CHKBC-NEXT:  0x000e  function idx 1, starts at line 13 col 1
 // CHKBC-NEXT:    bc 2: line 14 col 10
-// CHKBC-NEXT:  0x0014  end of debug source table
+// CHKBC-NEXT:  0x0016  end of debug source table

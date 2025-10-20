@@ -58,9 +58,16 @@ class JITContext {
   JITContext(const JITContext &) = delete;
   void operator=(const JITContext &) = delete;
 
-  /// Compile a function to native code and return the native pointer. If the
-  /// function was previously compiled, return the existing body. If it cannot
-  /// be compiled, return nullptr.
+  /// \return whether \p codeBlock should be JIT compiled.
+  /// \pre codeBlock does not already have a JITCompiledFunctionPtr.
+  /// Does not allocate.
+  inline bool shouldCompile(CodeBlock *codeBlock) {
+    return false;
+  }
+
+  /// Compile a function to native code and return the native pointer.
+  /// \pre shouldCompile() must be true.
+  /// \return the native pointer, nullptr if compilation failed.
   inline JITCompiledFunctionPtr compile(
       Runtime &runtime,
       CodeBlock *codeBlock) {
@@ -82,6 +89,16 @@ class JITContext {
   unsigned getDumpJITCode() {
     return 0;
   }
+
+  /// Construct data structure used for perf profiling support. This should be
+  /// called only when PerfProf is enabled and perf JITContext.
+  /// \param jitdumpFd The file descriptor of the opened jitdump file.
+  /// \param commentFd The file descriptor of the opended \p commentFile.
+  /// \param commentFile The path of the file to store the comments.
+  void initPerfProfData(
+      int jitdumpFd,
+      int commentFd,
+      const std::string &commentFile) {}
 
   /// Set the flag to fatally crash on JIT compilation errors.
   void setCrashOnError(bool crash) {}
@@ -106,10 +123,23 @@ class JITContext {
   /// Set the flag to emit asserts in the JIT'ed code.
   void setEmitAsserts(bool emitAsserts) {}
 
+  /// Set whether we should emit counters in the JIT'ed code.
+  void setEmitCounters(bool emitCounters) {}
+
+  /// Dump the counters to the given stream. Counters must be enabled.
+  void dumpCounters(llvh::raw_ostream &) {}
+
   /// \return true if we should emit asserts in the JIT'ed code.
   bool getEmitAsserts() {
     return false;
   }
+
+  /// Called by the GC at the beginning of a collection. This method informs the
+  /// GC of all runtime roots.  The \p markLongLived argument
+  /// indicates whether root data structures that contain only
+  /// references to long-lived objects (allocated directly as long lived)
+  /// are required to be scanned.
+  void markRoots(RootAcceptorWithNames &acceptor, bool markLongLived) {}
 };
 
 } // namespace vm

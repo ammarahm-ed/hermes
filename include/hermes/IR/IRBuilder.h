@@ -299,6 +299,8 @@ class IRBuilder {
 
   AddEmptyStringInst *createAddEmptyStringInst(Value *val);
 
+  CreatePrivateNameInst *createCreatePrivateNameInst(LiteralString *descStr);
+
   CreateClassInst *createCreateClassInst(
       BaseScopeInst *scope,
       Function *code,
@@ -311,7 +313,7 @@ class IRBuilder {
 
   GetParentScopeInst *createGetParentScopeInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
   CreateScopeInst *createCreateScopeInst(
       VariableScope *scope,
@@ -416,6 +418,9 @@ class IRBuilder {
       Value *object,
       Value *property,
       Value *receiver);
+  LoadOwnPrivateFieldInst *createLoadOwnPrivateFieldInst(
+      Value *object,
+      Value *property);
   TryLoadGlobalPropertyInst *createTryLoadGlobalPropertyInst(
       LiteralString *property);
   TryLoadGlobalPropertyInst *createTryLoadGlobalPropertyInst(
@@ -457,11 +462,18 @@ class IRBuilder {
       Value *object,
       Value *property,
       PropEnumerable isEnumerable);
-  DefineNewOwnPropertyInst *createDefineNewOwnPropertyInst(
+  DefineOwnInDenseArrayInst *createDefineOwnInDenseArrayInst(
       Value *storedValue,
       Value *object,
-      Literal *property,
-      PropEnumerable isEnumerable);
+      LiteralNumber *arrayIndex);
+  StoreOwnPrivateFieldInst *createStoreOwnPrivateFieldInst(
+      Value *storedValue,
+      Value *object,
+      Value *property);
+  AddOwnPrivateFieldInst *createAddOwnPrivateFieldInst(
+      Value *storedValue,
+      Value *object,
+      Value *property);
 
   DefineOwnGetterSetterInst *createDefineOwnGetterSetterInst(
       Value *storedGetter,
@@ -504,6 +516,10 @@ class IRBuilder {
       const AllocObjectLiteralInst::ObjectPropertyMap &propMap = {},
       Value *parentObject = nullptr);
 
+  AllocTypedObjectInst *createAllocTypedObjectInst(
+      const AllocTypedObjectInst::ObjectPropertyMap &propMap,
+      Value *parentObject);
+
   AllocFastArrayInst *createAllocFastArrayInst(LiteralNumber *sizeHint);
 
   AllocArrayInst *createAllocArrayInst(
@@ -530,7 +546,7 @@ class IRBuilder {
   ThrowIfThisInitializedInst *createThrowIfThisInitializedInst(
       Value *subclassCheckedThis);
 
-  HBCGetGlobalObjectInst *createHBCGetGlobalObjectInst();
+  LIRGetGlobalObjectInst *createLIRGetGlobalObjectInst();
 
   CreateRegExpInst *createRegExpInst(Identifier pattern, Identifier flags);
 
@@ -595,8 +611,6 @@ class IRBuilder {
       BaseScopeInst *scope,
       NormalFunction *innerFn);
 
-  StartGeneratorInst *createStartGeneratorInst();
-
   ResumeGeneratorInst *createResumeGeneratorInst(AllocStackInst *isReturn);
 
   //--------------------------------------------------------------------------//
@@ -606,46 +620,53 @@ class IRBuilder {
   HBCResolveParentEnvironmentInst *createHBCResolveParentEnvironmentInst(
       VariableScope *scope,
       LiteralNumber *numLevels,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
-  SwitchImmInst *createSwitchImmInst(
+  UIntSwitchImmInst *createUIntSwitchImmInst(
       Value *input,
       BasicBlock *defaultBlock,
       LiteralNumber *minValue,
       LiteralNumber *size,
-      const SwitchImmInst::ValueListType &values,
-      const SwitchImmInst::BasicBlockListType &blocks);
+      const UIntSwitchImmInst::ValueListType &values,
+      const BaseSwitchImmInst::BasicBlockListType &blocks);
 
-  HBCLoadConstInst *createHBCLoadConstInst(Literal *value);
+  StringSwitchImmInst *createStringSwitchImmInst(
+      Value *input,
+      BasicBlock *defaultBlock,
+      LiteralNumber *size,
+      const StringSwitchImmInst::ValueListType &values,
+      const BaseSwitchImmInst::BasicBlockListType &blocks);
+
+  LIRLoadConstInst *createLIRLoadConstInst(Literal *value);
 
   LoadParamInst *createLoadParamInst(JSDynamicParam *param);
 
   HBCCreateFunctionEnvironmentInst *createHBCCreateFunctionEnvironmentInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
   LIRGetThisNSInst *createLIRGetThisNSInst();
 
-  HBCGetArgumentsPropByValLooseInst *createHBCGetArgumentsPropByValLooseInst(
+  LIRGetArgumentsPropByValLooseInst *createLIRGetArgumentsPropByValLooseInst(
       Value *index,
       AllocStackInst *lazyReg);
-  HBCGetArgumentsPropByValStrictInst *createHBCGetArgumentsPropByValStrictInst(
+  LIRGetArgumentsPropByValStrictInst *createLIRGetArgumentsPropByValStrictInst(
       Value *index,
       AllocStackInst *lazyReg);
 
-  HBCGetArgumentsLengthInst *createHBCGetArgumentsLengthInst(
+  LIRGetArgumentsLengthInst *createLIRGetArgumentsLengthInst(
       Value *lazyRegValue);
 
-  HBCReifyArgumentsLooseInst *createHBCReifyArgumentsLooseInst(
+  LIRReifyArgumentsLooseInst *createLIRReifyArgumentsLooseInst(
       AllocStackInst *lazyReg);
-  HBCReifyArgumentsStrictInst *createHBCReifyArgumentsStrictInst(
+  LIRReifyArgumentsStrictInst *createLIRReifyArgumentsStrictInst(
       AllocStackInst *lazyReg);
 
   CreateThisInst *createCreateThisInst(Value *closure, Value *newTarget);
 
   GetConstructedObjectInst *createGetConstructedObjectInst(
-      CreateThisInst *thisValue,
-      CallInst *constructorReturnValue);
+      Instruction *thisValue,
+      Value *constructorReturnValue);
 
   HBCProfilePointInst *createHBCProfilePointInst(uint16_t pointIndex);
 
@@ -656,10 +677,11 @@ class IRBuilder {
   GetBuiltinClosureInst *createGetBuiltinClosureInst(
       BuiltinMethod::Enum builtinIndex);
 
-  HBCSpillMovInst *createHBCSpillMovInst(Instruction *value);
+  LIRSpillMovInst *createLIRSpillMovInst(Instruction *value);
 
-  HBCAllocObjectFromBufferInst *createHBCAllocObjectFromBufferInst(
-      HBCAllocObjectFromBufferInst::ObjectPropertyMap prop_map);
+  LIRAllocObjectFromBufferInst *createLIRAllocObjectFromBufferInst(
+      Value *parentObj,
+      LIRAllocObjectFromBufferInst::ObjectPropertyMap prop_map);
 
   HBCCompareBranchInst *createHBCCompareBranchInst(
       Value *left,
@@ -716,9 +738,6 @@ class IRBuilder {
 
   LoadParentNoTrapsInst *createLoadParentNoTrapsInst(Value *object);
   TypedLoadParentInst *createTypedLoadParentInst(Value *object);
-  TypedStoreParentInst *createTypedStoreParentInst(
-      Value *storedValue,
-      Value *object);
 
   FUnaryMathInst *createFUnaryMathInst(ValueKind kind, Value *arg);
   FBinaryMathInst *
@@ -768,7 +787,7 @@ class IRBuilder {
       Variable *homeObject,
       Variable *classCtxConstructor,
       Variable *classCtxInitFuncVar,
-      VariableScope *funcVarScope);
+      ArrayRef<VariableScope *> varScopes);
 
   /// This is an RAII object that saves and restores the source location of the
   /// IRBuilder.

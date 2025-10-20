@@ -17,6 +17,7 @@
 #include "hermes/VM/JSArray.h"
 #include "hermes/VM/JSCallableProxy.h"
 #include "hermes/VM/JSError.h"
+#include "hermes/VM/JSMapImpl.h"
 #include "hermes/VM/JSObject.h"
 #include "hermes/VM/JSRegExp.h"
 #include "hermes/VM/PrimitiveBox.h"
@@ -36,14 +37,6 @@
 
 namespace hermes {
 namespace vm {
-
-CallResult<Handle<SymbolID>> stringToSymbolID(
-    Runtime &runtime,
-    PseudoHandle<StringPrimitive> strPrim) {
-  // Unique the string.
-  return runtime.getIdentifierTable().getSymbolHandleFromPrimitive(
-      runtime, std::move(strPrim));
-}
 
 CallResult<Handle<SymbolID>> valueToSymbolID(
     Runtime &runtime,
@@ -127,23 +120,6 @@ bool matchTypeOfIs(HermesValue arg, TypeOfIsTypes types) {
   }
 }
 
-OptValue<uint32_t> toArrayIndex(
-    Runtime &runtime,
-    Handle<StringPrimitive> strPrim) {
-  auto view = StringPrimitive::createStringView(runtime, strPrim);
-  return toArrayIndex(view);
-}
-
-OptValue<uint32_t> toArrayIndex(StringView str) {
-  auto len = str.length();
-  if (str.isASCII()) {
-    const char *ptr = str.castToCharPtr();
-    return hermes::toArrayIndex(ptr, ptr + len);
-  }
-  const char16_t *ptr = str.castToChar16Ptr();
-  return hermes::toArrayIndex(ptr, ptr + len);
-}
-
 bool isSameValue(HermesValue x, HermesValue y) {
   // Check for NaN before checking the tag. We have to do this because NaNs may
   // differ in the sign bit, which may result in the tag comparison below
@@ -171,19 +147,6 @@ bool isSameValue(HermesValue x, HermesValue y) {
 
   // Otherwise they are identical if the raw bits are the same.
   return x.getRaw() == y.getRaw();
-}
-
-bool isSameValueZero(HermesValue x, HermesValue y) {
-  if (x.isNumber() && y.isNumber() && x.getNumber() == y.getNumber()) {
-    // Takes care of +0 == -0.
-    return true;
-  }
-  return isSameValue(x, y);
-}
-
-bool isPrimitive(HermesValue val) {
-  assert(!val.isEmpty() && "empty value encountered");
-  return !val.isObject();
 }
 
 CallResult<HermesValue> ordinaryToPrimitive(
@@ -417,10 +380,41 @@ CallResult<PseudoHandle<StringPrimitive>> toString_RJS(
   return createPseudoHandle(result);
 }
 
-double parseIntWithRadix(const StringView str, int radix) {
-  auto res =
-      hermes::parseIntWithRadix</* AllowNumericSeparator */ false>(str, radix);
-  return res ? res.getValue() : std::numeric_limits<double>::quiet_NaN();
+bool isStringWellFormedUnicode(StringPrimitive *string) {
+  if (string->isASCII()) {
+    // It's impossible for an ASCII string to contain any surrogates, so it must
+    // be well formed.
+    return true;
+  }
+
+  ArrayRef<char16_t> strRef = string->getStringRef<char16_t>();
+  // Check for lone surrogates by iterating through the string
+  for (size_t i = 0, len = strRef.size(); i < len; ++i) {
+    char16_t ch = strRef[i];
+    // Check if this character is a surrogate
+    if (ch >= UNICODE_SURROGATE_FIRST && ch <= UNICODE_SURROGATE_LAST) {
+      // If it's a high surrogate, check if there's a valid low surrogate
+      // following
+      if (isHighSurrogate(ch)) {
+        if (i + 1 < len) {
+          char16_t next = strRef[i + 1];
+          if (isLowSurrogate(next)) {
+            // Valid surrogate pair, skip the low surrogate
+            ++i;
+            continue;
+          }
+        }
+        // Lone surrogate: high surrogate without low counterpart
+        return false;
+      } else {
+        // Lone surrogate: low surrogate without high counterpart
+        return false;
+      }
+    }
+  }
+
+  // No lone surrogates found
+  return true;
 }
 
 /// ES5.1 9.3.1
@@ -440,6 +434,7 @@ static inline double stringToNumber(
   }
   if (runtime.symbolEqualsToStringPrim(
           Predefined::getSymbolID(Predefined::NegativeInfinity), *strPrim)) {
+    return -std::numeric_limits<double>::infinity();
   }
   if (runtime.symbolEqualsToStringPrim(
           Predefined::getSymbolID(Predefined::NaN), *strPrim)) {
@@ -602,14 +597,6 @@ CallResult<HermesValue> toLength(Runtime &runtime, Handle<> valueHandle) {
     len = highestIntegralDouble;
   }
   return HermesValue::encodeTrustedNumberValue(len);
-}
-
-CallResult<uint64_t> toLengthU64(Runtime &runtime, Handle<> valueHandle) {
-  auto res = toLength(runtime, valueHandle);
-  if (res == ExecutionStatus::EXCEPTION) {
-    return ExecutionStatus::EXCEPTION;
-  }
-  return res->getNumber();
 }
 
 CallResult<HermesValue> toIndex(Runtime &runtime, Handle<> valueHandle) {
@@ -1611,6 +1598,34 @@ CallResult<Handle<JSObject>> iteratorStep(
   return result;
 }
 
+CallResult<bool> iteratorStepValue(
+    Runtime &runtime,
+    const CheckedIteratorRecord &iteratorRecord,
+    PinnedValue<> *value) {
+  // 1. Let result be ?IteratorStep(iteratorRecord)
+  auto stepRes = iteratorStep(runtime, iteratorRecord);
+  if (LLVM_UNLIKELY(stepRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  // 2. If result is DONE, then return DONE
+  // In our implementation, return false when we hit the end of the iterator
+  if (!*stepRes) {
+    return false;
+  }
+
+  // 3. Let value be Completion(IteratorValue(result))
+  // 4. If value is a throw completion, then
+  //   a. Set iteratorRecord.[[Done]] to true
+  auto valueRes = iteratorValue(runtime, *stepRes);
+  if (LLVM_UNLIKELY(valueRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  // 5. Return ?value
+  *value = std::move(*valueRes);
+  return true;
+}
+
 ExecutionStatus iteratorClose(
     Runtime &runtime,
     Handle<JSObject> iterator,
@@ -1677,6 +1692,27 @@ ExecutionStatus iteratorClose(
   return ExecutionStatus::RETURNED;
 }
 
+ExecutionStatus iteratorCloseAndRethrow(
+    Runtime &runtime,
+    Handle<JSObject> iterator) {
+  struct : public Locals {
+    PinnedValue<> completion;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.completion = runtime.getThrownValue();
+  if (isUncatchableError(lv.completion.getHermesValue())) {
+    // If an uncatchable exception was raised, do not swallow it, but instead
+    // propagate it.
+    return ExecutionStatus::EXCEPTION;
+  }
+  runtime.clearThrownValue();
+  auto status = iteratorClose(runtime, iterator, lv.completion);
+  (void)status;
+  assert(
+      status == ExecutionStatus::EXCEPTION && "exception swallowed mistakenly");
+  return ExecutionStatus::EXCEPTION;
+}
+
 CallResult<Handle<JSArray>> iterableToArray(
     Runtime &runtime,
     Handle<HermesValue> items) {
@@ -1714,8 +1750,14 @@ CallResult<Handle<JSArray>> iterableToArray(
     }
     // CreateArrayFromList: 3.a Perform ! CreateDataPropertyOrThrow(array, !
     // ToString(𝔽(n)), e).
-    JSArray::setElementAt(
-        array, runtime, n, runtime.makeHandle(std::move(*nextValueRes)));
+    if (LLVM_UNLIKELY(
+            JSArray::setElementAt(
+                array,
+                runtime,
+                n,
+                runtime.makeHandle(std::move(*nextValueRes))) ==
+            ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
     // CreateArrayFromList: 3.b Set n to n + 1.
     n++;
   }
@@ -2091,7 +2133,7 @@ ExecutionStatus toPropertyDescriptor(
     Handle<> obj,
     Runtime &runtime,
     DefinePropertyFlags &flags,
-    MutableHandle<> &valueOrAccessor) {
+    MutableHandle<> valueOrAccessor) {
   GCScopeMarkerRAII gcMarker{runtime};
 
   // Verify that the attributes argument is also an object.
@@ -2144,7 +2186,7 @@ ExecutionStatus toPropertyDescriptor(
     if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
-    valueOrAccessor = std::move(*propRes);
+    valueOrAccessor.set(std::move(*propRes));
     flags.setValue = true;
   }
 
@@ -2219,8 +2261,8 @@ ExecutionStatus toPropertyDescriptor(
       return runtime.raiseTypeError(
           "Invalid property descriptor. Can't set both accessor and writable.");
     }
-    valueOrAccessor = PropertyAccessor::create(runtime, getterPtr, setterPtr)
-                          .getHermesValue();
+    valueOrAccessor.set(PropertyAccessor::create(runtime, getterPtr, setterPtr)
+                            .getHermesValue());
   }
 
   return ExecutionStatus::RETURNED;
@@ -2340,14 +2382,6 @@ CallResult<HermesValue> objectFromPropertyDescriptor(
     }
   }
   return obj.getHermesValue();
-}
-
-CallResult<HermesValue> numberToBigInt(Runtime &runtime, double number) {
-  if (!isIntegralNumber(number)) {
-    return runtime.raiseRangeError("number is not integral");
-  }
-
-  return BigIntPrimitive::fromDouble(runtime, number);
 }
 
 bool isIntegralNumber(double number) {
@@ -2494,6 +2528,319 @@ ExecutionStatus setTemplateObjectProps(
 
   return ExecutionStatus::RETURNED;
 }
+
+ExecutionStatus getSetRecord(
+    Runtime &runtime,
+    Handle<> obj,
+    double *size,
+    PinnedValue<Callable> *hasMethod,
+    PinnedValue<Callable> *keysMethod) {
+  // 1. If obj is not an Object, throw a TypeError exception
+  if (LLVM_UNLIKELY(!vmisa<JSObject>(*obj))) {
+    return runtime.raiseTypeError("getSetRecord argument is not an Object");
+  }
+  struct : public Locals {
+    PinnedValue<> tmp;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  // 2. Let rawSize be ?Get(obj, "size")
+  auto rawSizeRes = JSObject::getNamed_RJS(
+      Handle<JSObject>::vmcast(obj),
+      runtime,
+      Predefined::getSymbolID(Predefined::size));
+  if (LLVM_UNLIKELY(rawSizeRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.tmp = std::move(*rawSizeRes);
+
+  // 3. Let numSize be ?ToNumber(rawSize)
+  // 4. NOTE: If rawSize is undefined, then numSize will be NaN.
+  auto numSizeRes = toNumber_RJS(runtime, lv.tmp);
+  if (LLVM_UNLIKELY(numSizeRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.tmp = std::move(*numSizeRes);
+  // 5. If numSize is NaN, throw a TypeError exception
+  if (lv.tmp->isNaN()) {
+    return runtime.raiseTypeError("Size of the object cannot be NaN");
+  }
+  // 6. Let intSize be !ToIntegerOrInfinity(numSize)
+  auto intSizeRes = toIntegerOrInfinity(runtime, lv.tmp);
+  if (LLVM_UNLIKELY(intSizeRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  lv.tmp = std::move(*intSizeRes);
+  // 7. If intSize < 0, throw a RangeError
+  if (lv.tmp->getNumber() < 0) {
+    return runtime.raiseRangeError("Size of the object cannot be negative");
+  }
+  *size = lv.tmp->getNumber();
+
+  // 8. Let has be ?Get(obj, "has")
+  auto hasRes = JSObject::getNamed_RJS(
+      Handle<JSObject>::vmcast(obj),
+      runtime,
+      Predefined::getSymbolID(Predefined::has));
+  if (hasRes == ExecutionStatus::EXCEPTION) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.tmp = std::move(*hasRes);
+  // 9. If IsCallable(has) is false, throw a TypeError exception
+  if (LLVM_UNLIKELY(!vmisa<Callable>(*lv.tmp))) {
+    return runtime.raiseTypeError(
+        "has property of the object must be callable");
+  }
+  *hasMethod = vmcast<Callable>(*lv.tmp);
+
+  // 10. Let has be ?Get(obj, "keys")
+  auto keysRes = JSObject::getNamed_RJS(
+      Handle<JSObject>::vmcast(obj),
+      runtime,
+      Predefined::getSymbolID(Predefined::keys));
+  if (keysRes == ExecutionStatus::EXCEPTION) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.tmp = std::move(*keysRes);
+  // 11. If IsCallable(keys) is false, throw a TypeError exception
+  if (LLVM_UNLIKELY(!vmisa<Callable>(*lv.tmp))) {
+    return runtime.raiseTypeError(
+        "keys property of the object must be callable");
+  }
+  *keysMethod = vmcast<Callable>(*lv.tmp);
+
+  return ExecutionStatus::RETURNED;
+}
+
+namespace {
+
+enum class KeyCoercion { Property, Collection };
+
+/// ES15.0 7.3.35 GroupBy ( items, callback, keyCoercion )
+/// https://tc39.es/ecma262/#sec-groupby
+/// Groups a list of items into an Object based on the results of a callback
+/// which operates on each item.
+/// \param[out] target the JSObject to which to add keyed groups if keyCoercion
+/// is `Property` or a JSMap to which to add keyed groups if keyCoercion is
+/// `Collection`. The keyed groups must always be of type JSArray.
+/// \param items JSArray of ECMAValues to be grouped.
+/// \param callback callback which returns the key per given item.
+/// \return a JSObject if keyCoercion is `Property` or a JSMap if keyCoercion
+/// is `Collection`.
+template <KeyCoercion keyCoercion, class T>
+ExecutionStatus
+groupBy(Runtime &runtime, Handle<T> target, Handle<> items, Handle<> callback) {
+  struct : public Locals {
+    PinnedValue<> key;
+    PinnedValue<JSArray> value;
+    PinnedValue<> tmpValueMaybeArray;
+    PinnedValue<> next;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  // 1. Perform ? RequireObjectCoercible(items).
+  if (LLVM_UNLIKELY(
+          checkObjectCoercible(runtime, items) == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  // 2. If IsCallable(callback) is false, throw a TypeError exception.
+  if (LLVM_UNLIKELY(!vmisa<Callable>(*callback))) {
+    return runtime.raiseTypeError("callback must be Callable in groupby");
+  }
+
+  // 3. Let groups be a new empty List.
+  // 4. Let iteratorRecord be ? GetIterator(items, sync).
+  CallResult<CheckedIteratorRecord> iteratorRecordResult =
+      getCheckedIterator(runtime, items);
+
+  if (LLVM_UNLIKELY(iteratorRecordResult == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  const CheckedIteratorRecord &iteratorRecord = *iteratorRecordResult;
+
+  GCScope gcScope(runtime);
+  auto marker = gcScope.createMarker();
+
+  // 5. Let k be 0.
+  uint64_t k = 0;
+
+  // 6. Repeat,
+  while (true) {
+    // a. If k ≥ 2**53 - 1, then
+    if (LLVM_UNLIKELY(k >= ((uint64_t)1 << 53) - 1)) {
+      // i. Let error be ThrowCompletion(a newly created TypeError object).
+      (void)runtime.raiseTypeError("groupBy result out of space");
+
+      // ii. Return ? IteratorClose(iteratorRecord, error).
+      return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
+    }
+
+    // b. Let next be ? IteratorStepValue(iteratorRecord).
+    auto stepValRes = iteratorStepValue(runtime, iteratorRecord, &lv.next);
+
+    if (LLVM_UNLIKELY(stepValRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+
+    // c. If next is done, then
+    if (!*stepValRes) {
+      // i. Return groups.
+      break;
+    }
+
+    // d. Let value be next.
+    // e. Let key be Completion(Call(callback, undefined, « value, 𝔽(k) »)).
+    auto keyRes = Callable::executeCall2(
+        Handle<Callable>::vmcast(callback),
+        runtime,
+        Runtime::getUndefinedValue(),
+        lv.next.getHermesValue(),
+        HermesValue::encodeTrustedNumberValue(k));
+
+    // f. IfAbruptCloseIterator(key, iteratorRecord).
+    if (LLVM_UNLIKELY(keyRes == ExecutionStatus::EXCEPTION)) {
+      return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
+    }
+
+    lv.key = std::move(*keyRes);
+
+    // g. If keyCoercion is PROPERTY, then
+    if constexpr (keyCoercion == KeyCoercion::Property) {
+      // i. Set key to Completion(ToPropertyKey(key)).
+      auto keyRes = toPropertyKey(runtime, lv.key);
+
+      // ii. IfAbruptCloseIterator(key, iteratorRecord).
+      if (LLVM_UNLIKELY(keyRes == ExecutionStatus::EXCEPTION)) {
+        return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
+      }
+
+      lv.key = std::move(*keyRes);
+    }
+    // h. Else,
+    else {
+      // i. Assert: keyCoercion is COLLECTION.
+      static_assert(
+          keyCoercion == KeyCoercion::Collection,
+          "keyCoercion must be of type `Collection`");
+
+      // ii. Set key to CanonicalizeKeyedCollectionKey(key).
+      auto key = canonicalizeKeyedCollectionKey(*lv.key);
+
+      lv.key = std::move(key);
+    }
+
+    // i. Perform AddValueToKeyedGroup(groups, key, value).
+    // We deviate from the spec here for performance reasons by acting on the
+    // resulting Map or Object directly, rather than creating an intermediate
+    // hashmap.
+    //
+    // Get the keyed group from the target if it exists, otherwise return
+    // undefined.
+    if constexpr (keyCoercion == KeyCoercion::Property) {
+      auto propValueRes = JSObject::getComputed_RJS(
+          Handle<JSObject>::vmcast(target), runtime, lv.key);
+
+      if (LLVM_UNLIKELY(propValueRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+
+      lv.tmpValueMaybeArray = std::move(*propValueRes);
+    } else {
+      static_assert(
+          keyCoercion == KeyCoercion::Collection,
+          "keyCoercion must be of type `Collection`");
+
+      lv.tmpValueMaybeArray = Handle<JSMap>::vmcast(target)
+                                  ->get(runtime, *lv.key)
+                                  .unboxToHV(runtime);
+    }
+
+    if (lv.tmpValueMaybeArray->isUndefined()) {
+      // If a keyed group does not exist, add key to the result object and
+      // initialize with an empty array.
+      auto emptyArrRes = JSArray::create(runtime, 0, 0);
+
+      if (LLVM_UNLIKELY(emptyArrRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+
+      lv.value = std::move(*emptyArrRes);
+
+      // Add empty array to keyed group property key.
+      if constexpr (keyCoercion == KeyCoercion::Property) {
+        auto newArrayRes = JSObject::putComputed_RJS(
+            Handle<JSObject>::vmcast(target),
+            runtime,
+            lv.key,
+            lv.value,
+            PropOpFlags().plusThrowOnError());
+
+        if (LLVM_UNLIKELY(newArrayRes == ExecutionStatus::EXCEPTION)) {
+          return ExecutionStatus::EXCEPTION;
+        }
+      } else {
+        static_assert(
+            keyCoercion == KeyCoercion::Collection,
+            "keyCoercion must be of type `Collection`");
+
+        auto newArrayRes = JSMap::insert(
+            Handle<JSMap>::vmcast(target), runtime, lv.key, lv.value);
+
+        if (LLVM_UNLIKELY(newArrayRes == ExecutionStatus::EXCEPTION)) {
+          return ExecutionStatus::EXCEPTION;
+        }
+      }
+    } else {
+      lv.value = Handle<JSArray>::vmcast(&lv.tmpValueMaybeArray);
+    }
+
+    size_t keyedGroupLength = JSArray::getLength(*lv.value, runtime);
+
+    // Append keyed group array with new item that matches the key.
+    auto appendItemRes =
+        JSArray::setElementAt(lv.value, runtime, keyedGroupLength, lv.next);
+
+    if (LLVM_UNLIKELY(appendItemRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+
+    keyedGroupLength++;
+
+    // Increase the length of keyed group array.
+    if (LLVM_UNLIKELY(
+            JSArray::setLengthProperty(lv.value, runtime, keyedGroupLength) ==
+            ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+
+    gcScope.flushToMarker(marker);
+
+    // j. Set k to k + 1.
+    k++;
+  }
+
+  return ExecutionStatus::RETURNED;
+}
+
+} // namespace
+
+ExecutionStatus groupByProperty(
+    Runtime &runtime,
+    Handle<JSObject> target,
+    Handle<> items,
+    Handle<> callback) {
+  return groupBy<KeyCoercion::Property>(runtime, target, items, callback);
+};
+
+ExecutionStatus groupByCollection(
+    Runtime &runtime,
+    Handle<JSMapImpl<CellKind::JSMapKind>> target,
+    Handle<> items,
+    Handle<> callback) {
+  return groupBy<KeyCoercion::Collection>(runtime, target, items, callback);
+};
 
 } // namespace vm
 } // namespace hermes

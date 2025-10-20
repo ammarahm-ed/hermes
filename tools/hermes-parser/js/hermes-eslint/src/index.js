@@ -24,13 +24,13 @@ type ParseForESLintOptions = $ReadOnly<{
 function parse(code: string, options?: ParseForESLintOptions): Program {
   const parserOptions = {
     allowReturnOutsideFunction: true,
-    flow: 'all',
-    sourceType: options?.sourceType ?? 'module',
+    flow: ('all': 'all'),
+    sourceType: options?.sourceType ?? ('module': 'module'),
     tokens: true,
     enableExperimentalComponentSyntax:
       options?.enableExperimentalComponentSyntax ?? true,
     enableExperimentalFlowMatchSyntax:
-      options?.enableExperimentalFlowMatchSyntax ?? false,
+      options?.enableExperimentalFlowMatchSyntax ?? true,
   };
 
   try {

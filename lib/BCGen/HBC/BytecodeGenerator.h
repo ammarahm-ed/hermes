@@ -69,9 +69,6 @@ class BytecodeModuleGenerator {
   /// Options controlling bytecode generation.
   BytecodeGenerationOptions options_;
 
-  /// The source map generator to use (nullptr if none).
-  SourceMapGenerator *sourceMapGen_;
-
   /// Base bytecode used in delta optimizing mode.
   /// When it is not null and optimization is turned on, we optimize for the
   /// delta.
@@ -103,14 +100,12 @@ class BytecodeModuleGenerator {
       Module *M,
       FileAndSourceMapIdCache &debugIdCache,
       BytecodeGenerationOptions options = BytecodeGenerationOptions::defaults(),
-      SourceMapGenerator *sourceMapGen = nullptr,
       std::unique_ptr<BCProviderBase> baseBCProvider = nullptr)
       : bm_(bcModule),
         M_(M),
         debugInfoGenerator_(bm_.getDebugInfo()),
         debugIdCache_(debugIdCache),
         options_(options),
-        sourceMapGen_(sourceMapGen),
         baseBCProvider_(std::move(baseBCProvider)) {
     bm_.getBytecodeOptionsMut().setStaticBuiltins(
         options_.staticBuiltinsEnabled);
@@ -153,6 +148,13 @@ class BytecodeModuleGenerator {
   /// Sets the index of the entry point function (global function).
   void setEntryPointIndex(int index) {
     bm_.setGlobalFunctionIndex(index);
+  }
+
+  /// Notes that a new StringSwitchImm instruction has been created.
+  /// Counts the number created, returning a unique 0-based index for
+  /// each such instruction.
+  uint32_t addStringSwitchImmInstr() {
+    return bm_.addStringSwitchImmInstr();
   }
 
   /// \returns the index of the string in this module's string table if it
@@ -198,6 +200,12 @@ class BytecodeModuleGenerator {
   /// \return the index of the string.
   uint32_t addFilename(llvh::StringRef filename) {
     return debugInfoGenerator_.addFilename(filename);
+  }
+
+  /// Add scoping info to the scoping info table.
+  /// \return the index of the scoping info.
+  uint32_t addScopingInfo(const DebugScopingInfo &scopingInfo) {
+    return debugInfoGenerator_.addScopingInfo(scopingInfo);
   }
 
   /// Set the segment ID for this module.
@@ -297,14 +305,30 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
   /// Set to true by calling bytecodeGenerationComplete.
   bool complete_{false};
 
-  /// Highest accessed property cache indices in this function.
-  uint8_t highestReadCacheIndex_{0};
-  uint8_t highestWriteCacheIndex_{0};
+  /// Sizes of the read and write property caches in this function.
+  /// Note that the size is reported as 255 when it is 255, or when it is 256
+  /// (i.e., when we're using index 255, the "sticky" overflow index).  It's not
+  /// worth expanding the width of these fields to 2 bytes for this case;
+  /// instead, we will just conservatively allocate a 256-element cache when the
+  /// size is 255.  This wastes at most one cache slot in a rare case.
+  uint8_t readCacheSize_{0};
+  uint8_t writeCacheSize_{0};
+  /// The size of the private name cache index in this function.  (Same comment
+  /// as above applies when the size is 255.
+  uint8_t privateNameCacheSize_{0};
+
+  /// Number of cache new object entries for this function.
+  uint8_t numCacheNewObject_{0};
 
   /// The jump table for this function (if any)
-  /// this vector consists of jump table for each SwitchImm instruction,
+  /// this vector consists of jump table for each UIntSwitchImm instruction,
   /// laid out sequentially. Each entry is a relative jump.
   std::vector<uint32_t> jumpTable_{};
+
+  /// The string switch table for this function (if any).
+  /// this vector consists of the string switch tables for each StringSwitchImm
+  /// instruction, laid out sequentially.
+  std::vector<StringSwitchTableCase> stringSwitchTable_{};
 
   explicit BytecodeFunctionGenerator(
       BytecodeModuleGenerator &BMGen,
@@ -336,7 +360,6 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
       HVMRegisterAllocator &RA,
       BytecodeGenerationOptions options,
       FileAndSourceMapIdCache &debugCache,
-      SourceMapGenerator *sourceMapGen,
       DebugInfoGenerator &debugInfoGenerator);
 
   /// \return the generator for the current BytecodeModule.
@@ -403,6 +426,15 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
         !complete_ &&
         "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
     return BMGen_.addFilename(filename);
+  }
+
+  /// Add scoping info to the scoping info table.
+  /// \return the index of the scoping info.
+  uint32_t addScopingInfo(const DebugScopingInfo &scopingInfo) {
+    assert(
+        !complete_ &&
+        "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
+    return BMGen_.addScopingInfo(scopingInfo);
   }
 
   void addExceptionHandler(HBCExceptionHandlerInfo info) {
@@ -472,14 +504,13 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
   /// with \p newVal.
   void updateJumpTarget(offset_t loc, int newVal, int bytes);
 
-  /// Update the jump table offset of a SwitchImm instruction during
+  /// Update the jump/switch table offset of a SwitchImm instruction during
   /// jump relocation.
   /// \param loc location of the instruction
-  /// \param jumpTableOffset the offset into the jump table;
-  /// \param ip offset will be computed relative to this position in bytecode
-  ///   vector.
-  void
-  updateJumpTableOffset(offset_t loc, uint32_t jumpTableOffset, uint32_t cs);
+  /// \param tableOffset offset of the location to be updated in table section.
+  /// \param instLoc offset will be computed relative to this position in
+  ///   bytecode vector.
+  void updateTableOffset(offset_t loc, uint32_t tableOffset, uint32_t instLoc);
 
   /// Change the opcode of a long jump instruction into a short jump.
   inline void longToShortJump(offset_t loc) {
@@ -511,17 +542,30 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
     return frameSize_;
   }
 
-  void setHighestReadCacheIndex(uint8_t sz) {
+  void setReadCacheSize(uint8_t sz) {
     assert(
         !complete_ &&
         "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
-    this->highestReadCacheIndex_ = sz;
+    this->readCacheSize_ = sz;
   }
-  void setHighestWriteCacheIndex(uint8_t sz) {
+  void setWriteCacheSize(uint8_t sz) {
     assert(
         !complete_ &&
         "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
-    this->highestWriteCacheIndex_ = sz;
+    this->writeCacheSize_ = sz;
+  }
+  void setPrivateNameCacheSize(uint8_t sz) {
+    assert(
+        !complete_ &&
+        "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
+    this->privateNameCacheSize_ = sz;
+  }
+
+  void setNumCacheNewObject(uint8_t sz) {
+    assert(
+        !complete_ &&
+        "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
+    this->numCacheNewObject_ = sz;
   }
 
   /// Set the jump table for this function, if any.
@@ -532,6 +576,22 @@ class BytecodeFunctionGenerator : public BytecodeInstructionGenerator {
     assert(!jumpTable.empty() && "invoked with no jump table");
 
     jumpTable_ = std::move(jumpTable);
+  }
+
+  /// The size of the jump table.
+  size_t jumpTableSize() const {
+    return jumpTable_.size();
+  }
+
+  /// Set the string switch table for this function, if any.
+  void setStringSwitchTable(
+      std::vector<StringSwitchTableCase> &&stringSwitchTable) {
+    assert(
+        !complete_ &&
+        "Cannot modify BytecodeFunction after call to bytecodeGenerationComplete.");
+    assert(!stringSwitchTable.empty() && "invoked with no string switch table");
+
+    stringSwitchTable_ = std::move(stringSwitchTable);
   }
 
   /// Signal that bytecode generation is finalized.

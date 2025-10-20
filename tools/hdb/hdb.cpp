@@ -144,6 +144,7 @@ struct Options {
   hermes::vm::CompilationMode compilationMode{
       hermes::vm::ForceEagerCompilation};
   double breakAfterDelay{-1.}; // -1 disables breakAfterDelay
+  bool enableBlockScoping{false};
 };
 
 Options getCommandLineOptions(int argc, char **argv) {
@@ -183,6 +184,8 @@ Options getCommandLineOptions(int argc, char **argv) {
         exit(EXIT_FAILURE);
       }
       result.breakAfterDelay = breakAfterDelay;
+    } else if (strcmp(arg, "--Xes6-block-scoping") == 0) {
+      result.enableBlockScoping = true;
     } else {
       printUsageAndExit();
     }
@@ -775,7 +778,9 @@ int main(int argc, char **argv) {
 
   hermes::vm::RuntimeConfig config =
       hermes::vm::RuntimeConfig::Builder()
+          .withMicrotaskQueue(true)
           .withCompilationMode(options.compilationMode)
+          .withES6BlockScoping(options.enableBlockScoping)
           .build();
 
   std::unique_ptr<HermesRuntime> runtime = makeHermesRuntime(config);

@@ -13,6 +13,7 @@
 #include "hermes/AST/ESTreeJSONDumper.h"
 #include "hermes/AST/NativeContext.h"
 #include "hermes/AST/TS2Flow.h"
+#include "hermes/AST/TransformAST.h"
 #include "hermes/IR/IRVerifier.h"
 #include "hermes/IRGen/IRGen.h"
 #include "hermes/Optimizer/PassManager/PassManager.h"
@@ -22,6 +23,7 @@
 #include "hermes/Sema/SemResolve.h"
 #include "hermes/SourceMap/SourceMapTranslator.h"
 #include "hermes/Support/OSCompat.h"
+#include "hermes/Utils/CompilerRuntimeFlags.h"
 
 #include "llvh/ADT/ScopeExit.h"
 #include "llvh/Support/CommandLine.h"
@@ -118,6 +120,11 @@ cl::opt<OptLevel> OptimizationLevel(
         clEnumValN(OptLevel::OMax, "O", "Expensive optimizations")),
     cl::cat(CompilerCategory));
 
+static cl::opt<bool> SmallC(
+    "Xsmall-c",
+    cl::init(false),
+    cl::desc("Optimize output native code for size instead of performance"));
+
 cl::opt<DebugLevel> DebugInfoLevel(
     cl::desc("Choose debug info level:"),
     cl::init(DebugLevel::g0),
@@ -128,8 +135,11 @@ cl::opt<DebugLevel> DebugInfoLevel(
             DebugLevel::g2,
             "g2",
             "Emit location info for all instructions"),
-        clEnumValN(DebugLevel::g3, "g3", "Emit full info for debugging"),
-        clEnumValN(DebugLevel::g3, "g", "Equivalent to -g3")),
+        clEnumValN(
+            DebugLevel::g2,
+            "g3",
+            "** Deprecated, full debug info cannot be generated via this tool. This behaves the same as -g2 **"),
+        clEnumValN(DebugLevel::g2, "g", "Equivalent to -g2")),
     cl::cat(CompilerCategory));
 
 cl::opt<std::string> InputSourceMap(
@@ -170,6 +180,12 @@ cl::opt<bool> EnableAsserts(
     cl::desc("(default true) Whether assertions in compiled code are enabled"),
     cl::init(true),
 #endif
+    cl::cat(CompilerCategory));
+
+cl::opt<bool> NoHermesLibs(
+    "nohermeslibs",
+    cl::init(false),
+    cl::desc("(default false) Do not use the standard Hermes libraries"),
     cl::cat(CompilerCategory));
 
 cl::opt<bool> Lean(
@@ -318,19 +334,7 @@ cl::opt<bool> ParseTS(
 const bool ParseTS = false;
 #endif
 
-cl::opt<bool> ES6Class{
-    "Xes6-class",
-    llvh::cl::Hidden,
-    llvh::cl::desc("Enable support for ES6 Class"),
-    llvh::cl::init(false),
-    llvh::cl::cat(CompilerCategory)};
-
-cl::opt<bool> ES6BlockScoping{
-    "Xes6-block-scoping",
-    llvh::cl::Hidden,
-    llvh::cl::desc("Enable support for ES6 block scoping"),
-    llvh::cl::init(false),
-    llvh::cl::cat(CompilerCategory)};
+hermes::CompilerRuntimeFlags compilerRuntimeFlags;
 
 cl::opt<bool> MetroRequireOpt(
     "Xmetro-require",
@@ -409,7 +413,7 @@ CLFlag Inline('f', "inline", true, "inlining of functions", CompilerCategory);
 
 cl::opt<unsigned> InlineMaxSize(
     "Xinline-max-size",
-    cl::init(1),
+    cl::init(50),
     cl::desc("Suppress inlining of functions larger than the given size"),
     cl::Hidden,
     cl::cat(CompilerCategory));
@@ -445,24 +449,6 @@ cl::opt<bool> EnableTDZ(
 cl::opt<bool> StrictMode(
     "strict",
     cl::desc("Enable strict mode."),
-    cl::cat(CompilerCategory));
-
-cl::opt<bool> EnableEval(
-    "enable-eval",
-    cl::init(true),
-    cl::desc("Enable support for eval()"));
-
-// This is normally a compiler option, but it also applies to strings given
-// to eval or the Function constructor.
-cl::opt<bool> VerifyIR(
-    "verify-ir",
-#ifdef HERMES_SLOW_DEBUG
-    cl::init(true),
-#else
-    cl::init(false),
-    cl::Hidden,
-#endif
-    cl::desc("Verify the IR after each pass."),
     cl::cat(CompilerCategory));
 
 cl::opt<bool> DumpRegisterInterval(
@@ -606,7 +592,7 @@ std::shared_ptr<Context> createContext() {
   codeGenOpts.dumpSourceLocation =
       cli::DumpSourceLocation != LocationDumpMode::None;
   codeGenOpts.dumpIRBetweenPasses = cli::DumpBetweenPasses;
-  codeGenOpts.verifyIRBetweenPasses = cli::VerifyIR;
+  codeGenOpts.verifyIRBetweenPasses = cli::compilerRuntimeFlags.VerifyIR;
   codeGenOpts.colors = cli::Colors;
   codeGenOpts.dumpFunctions.insert(
       cli::DumpFunctions.begin(), cli::DumpFunctions.end());
@@ -652,9 +638,10 @@ std::shared_ptr<Context> createContext() {
     return nullptr;
   }
   context->setStrictMode(cli::Typed || cli::StrictMode);
-  context->setEnableEval(cli::EnableEval);
-  context->setConvertES6Classes(cli::ES6Class);
-  context->setEnableES6BlockScoping(cli::ES6BlockScoping);
+  context->setEnableEval(cli::compilerRuntimeFlags.EnableEval);
+  context->setEnableES6BlockScoping(cli::compilerRuntimeFlags.ES6BlockScoping);
+  context->setEnableAsyncGenerators(
+      cli::compilerRuntimeFlags.EnableAsyncGenerators);
   context->getSourceErrorManager().setOutputOptions(guessErrorOutputOptions());
 
   setWarningsAreErrorsFromFlags(context->getSourceErrorManager());
@@ -802,6 +789,7 @@ ESTree::NodePtr parseJS(
     return parsedAST;
   }
 
+#if HERMES_PARSE_FLOW && HERMES_PARSE_TS
   // Convert TS AST to Flow AST as an intermediate step until we have a
   // separate TS type checker.
   if (flowContext && context->getParseTS()) {
@@ -810,6 +798,12 @@ ESTree::NodePtr parseJS(
       return nullptr;
     }
   }
+#endif
+
+  parsedAST = llvh::cast<ESTree::ProgramNode>(
+      hermes::transformASTForCompilation(*context, parsedAST));
+  if (!parsedAST)
+    return nullptr;
 
   // If we are executing in typed mode and not script, then wrap the program.
   if (shouldWrapInIIFE) {
@@ -944,7 +938,7 @@ bool compileFromCommandLineOptions() {
   }
 
   // Verify the IR before we run optimizations on it.
-  if (cli::VerifyIR) {
+  if (cli::compilerRuntimeFlags.VerifyIR) {
     if (!verifyModule(M, &llvh::errs())) {
       llvh::errs() << "IRGen produced invalid IR\n";
       return false;
@@ -1001,7 +995,7 @@ bool compileFromCommandLineOptions() {
   genOptions.staticBuiltinsEnabled = context->getStaticBuiltinOptimization();
   // genOptions.padFunctionBodiesPercent = cl::PadFunctionBodiesPercent;
 
-  genOptions.verifyIR = cli::VerifyIR;
+  genOptions.verifyIR = cli::compilerRuntimeFlags.VerifyIR;
 
   // If the user requests to output a source map, then do not also emit debug
   // info into the bytecode.
@@ -1014,6 +1008,8 @@ bool compileFromCommandLineOptions() {
   genOptions.emitMain = cli::ExportedUnit.empty();
   if (!cli::ExportedUnit.empty())
     genOptions.unitName = cli::ExportedUnit;
+
+  genOptions.smallC = cli::SmallC;
 
   genOptions.emitSourceLocations =
       cli::DumpSourceLocation != LocationDumpMode::None;
@@ -1029,6 +1025,7 @@ bool compileFromCommandLineOptions() {
   params.enableAsserts = cli::EnableAsserts
       ? ShermesCompileParams::EnableAsserts::on
       : ShermesCompileParams::EnableAsserts::off;
+  params.noHermesLibs = cli::NoHermesLibs;
   params.lean = cli::Lean ? ShermesCompileParams::Lean::on
                           : ShermesCompileParams::Lean::off;
   params.staticLink = cli::StaticLink ? ShermesCompileParams::StaticLink::on

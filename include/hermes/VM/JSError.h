@@ -110,14 +110,12 @@ class JSError final : public JSObject {
 
   /// When called, construct the stacktrace string based on the value of
   /// stacktrace_, and reset the stack property to the stacktrace string.
-  friend CallResult<HermesValue>
-  errorStackGetter(void *, Runtime &runtime, NativeArgs args);
+  friend CallResult<HermesValue> errorStackGetter(void *, Runtime &runtime);
 
   /// This is called when someone manually set the stack property to
   /// an error object, which should happen rarely. It destroys the
   /// stack access and replace it with a regular property.
-  friend CallResult<HermesValue>
-  errorStackSetter(void *, Runtime &runtime, NativeArgs args);
+  friend CallResult<HermesValue> errorStackSetter(void *, Runtime &runtime);
 
   /// Pop frames from the stack trace until we encounter a frame attributed to
   /// \p callable, and pop that frame too. No frames are skipped if a matching
@@ -209,23 +207,6 @@ class JSError final : public JSObject {
   static void appendNativeFrame(
       Runtime &runtime,
       const NativeStackTraceInfo *frame,
-      SmallU16String<32> &stack);
-
-  /// Construct the stacktrace string, append to \p stack.
-  /// If the construction of the stack throws an uncatchable error, this
-  /// function returns prematurely.
-  ///
-  /// \param selfHandle supplies the call stack for the trace.
-  /// \param targetHandle supplies the error name and message for the trace.
-  ///
-  /// In the `(new Error).stack` case, selfHandle and targetHandle will both
-  /// refer to the same object.
-  /// In the `target = {}; Error.captureErrorStack(target); target.stack` case,
-  /// selfHandle will be the value of `target`'s [[CapturedError]] slot.
-  static ExecutionStatus constructNativeStackTraceString_RJS(
-      Runtime &runtime,
-      Handle<JSError> selfHandle,
-      Handle<JSObject> targetHandle,
       SmallU16String<32> &stack);
 
   /// Construct the callSites array for Error.prepareStackTrace.

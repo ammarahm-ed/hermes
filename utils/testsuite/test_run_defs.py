@@ -39,6 +39,8 @@ class TestRunArgs(object):
     """Helper for skipping certain tests."""
     test_skiplist: bool
     """Whether to run tests in skiplist."""
+    bytecode_compat_check: bool
+    """Whether to run bytecode compatibility check."""
     lazy: bool
     """Whether to force lazy evaluation."""
     shermes: bool
@@ -165,12 +167,7 @@ class Test262Suite(Suite):
             return TestCaseResult(full_test_name, TestResultCode.TEST_SKIPPED, msg)
 
         flags = test_case.flags
-        if "async" in flags:
-            return TestCaseResult(
-                full_test_name,
-                TestResultCode.TEST_SKIPPED,
-                "SKIP: Test has `async` flag",
-            )
+        is_async = "async" in flags
         if "module" in flags:
             return TestCaseResult(
                 full_test_name,
@@ -231,10 +228,12 @@ class Test262Suite(Suite):
             args.binary_directory,
             test_case.expected_failure,
             disable_handle_san,
+            args.bytecode_compat_check,
             args.lazy,
             args.shermes,
             args.opt,
             args.timeout,
+            is_async,
             args.extra_compile_vm_args,
         )
         return await compile_and_run(js_sources, compile_run_args)
@@ -285,17 +284,18 @@ class MjsunitSuite(Suite):
             args.test_file, SkipCategory.HANDLESAN_SKIP_LIST
         )
         extra_compile_vm_args = deepcopy(args.extra_compile_vm_args)
-        extra_compile_vm_args.compile_args += ["-Xes6-class"]
         compile_run_args = CompileRunArgs(
             full_test_name,
             test_case.strict_mode,
             args.binary_directory,
             test_case.expected_failure,
             disable_handle_san,
+            args.bytecode_compat_check,
             args.lazy,
             args.shermes,
             args.opt,
             args.timeout,
+            False,
             extra_compile_vm_args,
         )
         return await compile_and_run([js_source], compile_run_args)

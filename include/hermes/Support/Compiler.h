@@ -15,6 +15,21 @@
 // This file provides portable definitions of compiler specific macros
 // It is modelled after LLVM's Compiler.h
 
+/// Force a symbol to be treated as used, even if unused.
+#if defined(__GNUC__) || defined(__clang__)
+#define HERMES_FORCE_USED [[gnu::used]]
+#else
+#define HERMES_FORCE_USED
+#endif
+
+/// Force a symbol to be treated as used, even if unused, but only in debug
+/// builds.
+#ifndef NDEBUG
+#define HERMES_FORCE_USED_IN_DEBUG HERMES_FORCE_USED
+#else
+#define HERMES_FORCE_USED_IN_DEBUG
+#endif
+
 /// Like LLVM_ATTRIBUTE_NORETURN, but only in release builds.
 #ifndef NDEBUG
 #define HERMES_ALWAYS_INLINE
@@ -63,6 +78,15 @@
 #define HERMES_ATTRIBUTE_FORMAT(archetype, string_index, first_to_check)
 #endif
 
+/// Force the linkage type of a declaration to be internal to a given file. This
+/// is useful when some type needs to be forward-declared in a header, but is
+/// only used in a cpp file, so the compiler should optimize it accordingly.
+#if __has_attribute(internal_linkage)
+#define HERMES_ATTRIBUTE_INTERNAL_LINKAGE __attribute__((internal_linkage))
+#else
+#define HERMES_ATTRIBUTE_INTERNAL_LINKAGE
+#endif
+
 #ifndef LLVM_PTR_SIZE
 #error "LLVM_PTR_SIZE needs to be defined"
 #endif
@@ -82,6 +106,19 @@
 #if !defined(HERMES_FBCODE_BUILD) && !defined(HERMES_LARGE_STACK_DEPTH) && \
     (defined(HERMES_UBSAN) || LLVM_ADDRESS_SANITIZER_BUILD)
 #define HERMES_LIMIT_STACK_DEPTH
+#endif
+
+/// __builtin_constant_p allows us to determine if a value is a compile time
+/// constant. It is not available on all compilers so define a wrapper.
+#ifdef __has_builtin
+#if __has_builtin(__builtin_constant_p)
+#define HERMES_BUILTIN_CONSTANT_P(x) __builtin_constant_p(x)
+#endif
+#endif
+
+/// If the compiler does not support __builtin_constant_p, always produce false.
+#ifndef HERMES_BUILTIN_CONSTANT_P
+#define HERMES_BUILTIN_CONSTANT_P(x) false
 #endif
 
 #if LLVM_THREAD_SANITIZER_BUILD

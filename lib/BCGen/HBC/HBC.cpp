@@ -8,10 +8,12 @@
 #include "hermes/BCGen/HBC/HBC.h"
 
 #include "BytecodeGenerator.h"
+#include "hermes/AST/TransformAST.h"
 #include "hermes/BCGen/HBC/BCProviderFromSrc.h"
 #include "hermes/IRGen/IRGen.h"
 #include "hermes/Optimizer/PassManager/Pipeline.h"
 #include "hermes/Parser/JSParser.h"
+#include "hermes/Sema/SemContext.h"
 #include "hermes/Sema/SemResolve.h"
 #include "hermes/Support/MemoryBuffer.h"
 #include "hermes/Support/PerfSection.h"
@@ -55,7 +57,6 @@ std::unique_ptr<BytecodeModule> generateBytecodeModule(
     Function *entryPoint,
     const BytecodeGenerationOptions &options,
     hermes::OptValue<uint32_t> segment,
-    SourceMapGenerator *sourceMapGen,
     std::unique_ptr<BCProviderBase> baseBCProvider) {
   PerfSection perf("Bytecode Generation");
   auto bm = std::make_unique<BytecodeModule>();
@@ -63,12 +64,7 @@ std::unique_ptr<BytecodeModule> generateBytecodeModule(
 
   bool success =
       BytecodeModuleGenerator{
-          *bm,
-          M,
-          debugIdCache,
-          options,
-          sourceMapGen,
-          std::move(baseBCProvider)}
+          *bm, M, debugIdCache, options, std::move(baseBCProvider)}
           .generate(entryPoint, segment);
 
   return success ? std::move(bm) : nullptr;
@@ -81,7 +77,7 @@ bool generateBytecodeFunctionLazy(
     uint32_t lazyFuncID,
     FileAndSourceMapIdCache &debugIdCache,
     const BytecodeGenerationOptions &options) {
-  return BytecodeModuleGenerator{bm, M, debugIdCache, options, nullptr, nullptr}
+  return BytecodeModuleGenerator{bm, M, debugIdCache, options, nullptr}
       .generateLazyFunctions(lazyFunc, lazyFuncID);
 }
 
@@ -93,9 +89,8 @@ std::unique_ptr<BytecodeModule> generateBytecodeModuleForEval(
   auto bm = std::make_unique<BytecodeModule>();
   FileAndSourceMapIdCache debugIdCache{};
 
-  bool success =
-      BytecodeModuleGenerator{*bm, M, debugIdCache, options, nullptr, nullptr}
-          .generateForEval(entryPoint);
+  bool success = BytecodeModuleGenerator{*bm, M, debugIdCache, options, nullptr}
+                     .generateForEval(entryPoint);
 
   return success ? std::move(bm) : nullptr;
 }
@@ -169,6 +164,14 @@ static void compileLazyFunctionWorker(void *argPtr) {
   sema::SemContext *semCtx = provider->getSemCtx();
   assert(semCtx && "missing semantic data to compile");
 
+  if (!optParsed) {
+    data->success = false;
+    data->error = outputManager.getErrorString();
+    return;
+  }
+
+  optParsed = hermes::transformASTForCompilation(context, *optParsed);
+
   // A non-null home object means the parent function context could reference
   // super.
   bool parentHadSuperBinding = lazyDataInst->getHomeObject();
@@ -223,6 +226,8 @@ class EvalThreadData {
   uint32_t const enclosingFuncID;
   /// Input: The CompileFlags to use.
   const CompileFlags &compileFlags;
+  /// Input: the lexical scope to perform the eval in.
+  uint32_t lexicalScopeIdxInParentFunction;
   /// Output: whether the compilation succeeded.
   bool success = false;
   /// Output: Result if success=true.
@@ -234,11 +239,13 @@ class EvalThreadData {
       std::unique_ptr<Buffer> src,
       hbc::BCProviderFromSrc *provider,
       uint32_t enclosingFuncID,
-      const CompileFlags &compileFlags)
+      const CompileFlags &compileFlags,
+      uint32_t lexicalScopeIdxInParentFunction)
       : src(std::move(src)),
         provider(provider),
         enclosingFuncID(enclosingFuncID),
-        compileFlags(compileFlags) {}
+        compileFlags(compileFlags),
+        lexicalScopeIdxInParentFunction(lexicalScopeIdxInParentFunction) {}
 };
 
 static void compileEvalWorker(void *argPtr) {
@@ -263,8 +270,8 @@ static void compileEvalWorker(void *argPtr) {
   Context &context = F->getParent()->getContext();
 
   context.setEmitAsyncBreakCheck(data->compileFlags.emitAsyncBreakCheck);
-  context.setConvertES6Classes(data->compileFlags.enableES6Classes);
   context.setEnableES6BlockScoping(data->compileFlags.enableES6BlockScoping);
+  context.setEnableAsyncGenerators(data->compileFlags.enableAsyncGenerators);
   context.setDebugInfoSetting(
       data->compileFlags.debug ? DebugInfoSetting::ALL
                                : DebugInfoSetting::THROWING);
@@ -276,6 +283,9 @@ static void compileEvalWorker(void *argPtr) {
     return;
   }
   const EvalCompilationData &evalData = evalDataInst->getData();
+  auto *funcInfo = evalData.semInfo;
+  sema::LexicalScope *lexScope =
+      funcInfo->getScopes()[data->lexicalScopeIdxInParentFunction];
 
   // Free the AST once we're done compiling this function.
   AllocationScope alloc(context.getAllocator());
@@ -307,6 +317,11 @@ static void compileEvalWorker(void *argPtr) {
   parser.setStrictMode(data->compileFlags.strict);
 
   auto optParsed = parser.parse();
+  if (!optParsed) {
+    data->success = false;
+    data->error = outputManager.getErrorString();
+    return;
+  }
 
   if (optParsed && parserMode != parser::LazyParse) {
     parser.registerMagicURLs();
@@ -315,8 +330,11 @@ static void compileEvalWorker(void *argPtr) {
   // Make a new SemContext which is a child of the SemContext we're referring
   // to, allowing it to be freed when the eval is complete and the
   // BCProviderFromSrc is destroyed.
-  std::shared_ptr<sema::SemContext> semCtx =
-      std::make_shared<sema::SemContext>(context, provider->shareSemCtx());
+  std::shared_ptr<sema::SemContext> semCtx = std::make_shared<sema::SemContext>(
+      context, provider->shareSemCtx(), lexScope);
+
+  optParsed = llvh::cast<ESTree::ProgramNode>(
+      hermes::transformASTForCompilation(context, *optParsed));
 
   // A non-null home object means the parent function context could reference
   // super.
@@ -442,7 +460,8 @@ std::pair<std::unique_ptr<BCProvider>, std::string> compileEvalModule(
     std::unique_ptr<Buffer> src,
     hbc::BCProvider *provider,
     uint32_t enclosingFuncID,
-    const CompileFlags &compileFlags) {
+    const CompileFlags &compileFlags,
+    uint32_t lexicalScopeIdxInParentFunction) {
   hbc::BCProviderFromSrc *providerFromSrc =
       llvh::dyn_cast<hbc::BCProviderFromSrc>(provider);
   if (!providerFromSrc) {
@@ -452,7 +471,11 @@ std::pair<std::unique_ptr<BCProvider>, std::string> compileEvalModule(
   }
   // Use this callback-style API to reduce conflicts with stable for now.
   EvalThreadData data{
-      std::move(src), providerFromSrc, enclosingFuncID, compileFlags};
+      std::move(src),
+      providerFromSrc,
+      enclosingFuncID,
+      compileFlags,
+      lexicalScopeIdxInParentFunction};
   compileEvalWorker(&data);
 
   return data.success
@@ -460,62 +483,154 @@ std::pair<std::unique_ptr<BCProvider>, std::string> compileEvalModule(
       : std::make_pair(std::unique_ptr<BCProviderFromSrc>{}, data.error);
 }
 
-std::vector<uint32_t> getVariableCounts(
+/// \return true if \p decl should be shown when collecting variables.
+static bool shouldListDecl(sema::Decl *decl) {
+  if (decl->special == sema::Decl::Special::Arguments)
+    return false;
+  switch (decl->kind) {
+    case sema::Decl::Kind::Let:
+    case sema::Decl::Kind::Const:
+    case sema::Decl::Kind::Catch:
+    case sema::Decl::Kind::ES5Catch:
+    case sema::Decl::Kind::Var:
+    case sema::Decl::Kind::Parameter:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// \return the sema::FunctionInfo for function \p funcID, living in \p
+/// BCProvider, or nullptr if none can be found.
+static const sema::FunctionInfo *getFunctionInfo(
     hbc::BCProvider *provider,
     uint32_t funcID) {
   hbc::BCProviderFromSrc *providerFromSrc =
       llvh::dyn_cast<hbc::BCProviderFromSrc>(provider);
   if (!providerFromSrc) {
-    return std::vector<uint32_t>({0});
+    return nullptr;
   }
-
   hbc::BytecodeModule *bcModule = providerFromSrc->getBytecodeModule();
   hbc::BytecodeFunction &bcFunc = bcModule->getFunction(funcID);
   Function *F = bcFunc.getFunctionIR();
   if (!F) {
-    // Couldn't find an IR function, possibly unsupported function kind or
-    // compiled without -g.
-    return std::vector<uint32_t>({0});
+    return nullptr;
   }
+  auto &evalData = F->getEvalCompilationDataInst()->getData();
+  return evalData.semInfo;
+}
 
-  const EvalCompilationDataInst *evalDataInst = F->getEvalCompilationDataInst();
-  if (!evalDataInst) {
-    // No known way to do this, defensive programming.
-    // functionIR is either lazy or has EvalCompilationDataInst, and we can't be
-    // here if the function was lazy.
+std::vector<uint32_t> getVariableCounts(
+    hbc::BCProvider *provider,
+    uint32_t funcID,
+    uint32_t lexicalScopeIdxInParentFunction) {
+  auto *funcInfo = getFunctionInfo(provider, funcID);
+  if (!funcInfo)
     return std::vector<uint32_t>({0});
-  }
-
+  sema::LexicalScope *lexScope =
+      funcInfo->getScopes()[lexicalScopeIdxInParentFunction];
+  assert(lexScope && "lexical scope cannot be null.");
   std::vector<uint32_t> counts;
-
-  for (auto *cur = evalDataInst->getFuncVarScope(); cur;
-       cur = cur->getParentScope()) {
-    counts.push_back(cur->getNumVisibleVariables());
+  for (auto *cur = lexScope; cur; cur = cur->parentScope) {
+    counts.push_back(llvh::count_if(cur->decls, shouldListDecl));
   }
-
   return counts;
 }
 
-llvh::StringRef getVariableNameAtDepth(
+VariableInfoAtDepth getVariableInfoAtDepth(
     hbc::BCProvider *provider,
     uint32_t funcID,
     uint32_t depth,
-    uint32_t variableIndex) {
+    uint32_t variableIndex,
+    uint32_t lexicalScopeIdxInParentFunction) {
+  auto *funcInfo = getFunctionInfo(provider, funcID);
+  if (!funcInfo)
+    return {};
+  sema::LexicalScope *lexScope =
+      funcInfo->getScopes()[lexicalScopeIdxInParentFunction];
+  assert(lexScope && "lexical scope cannot be null.");
+  auto *beginLexScope = lexScope;
+  for (size_t i = 0; i < depth; i++) {
+    lexScope = lexScope->parentScope;
+    assert(lexScope && "depth out of bounds");
+  }
+
+  /// In order to avoid having to search through the entire `decls` array each
+  /// time, the result of the last call is cached, and used to try to restart
+  /// the search from that point. This struct is the cache information.
+  struct CachedValues {
+    // The lexical scope queried.
+    sema::LexicalScope *lexScope = nullptr;
+    // The variable index queried.
+    uint32_t variableIndex = UINT32_MAX;
+    // The resulting index into the lexical scope's decl that satisfies the
+    // variableIndex search.
+    uint32_t declIdx = UINT32_MAX;
+  };
   hbc::BCProviderFromSrc *providerFromSrc =
       llvh::cast<hbc::BCProviderFromSrc>(provider);
+  sema::SemContext *semCtx = providerFromSrc->getSemCtx();
+  if (!semCtx->customData2) {
+    // The lifetime of this cache has to be tied to the lifetime of the
+    // SemContext. A SemContext could be destoryed and allocated again. there's
+    // then a potential for a new LexicalScope in the same place but with
+    // different data. Use shared_ptr to make sure it isn't accessible after the
+    // SemContext is freed.
+    semCtx->customData2 = std::make_shared<CachedValues>();
+  }
+  auto *cache = static_cast<CachedValues *>(semCtx->customData2.get());
 
-  hbc::BytecodeModule *bcModule = providerFromSrc->getBytecodeModule();
-  hbc::BytecodeFunction &lazyFunc = bcModule->getFunction(funcID);
-  Function *F = lazyFunc.getFunctionIR();
-  assert(F && "no lazy IR for lazy function");
+  const auto &decls = lexScope->decls;
+  // This is how many listable decls we need to find in order to satisfy the
+  // search for \p variableIdx.
+  uint32_t targetListableDeclsSeen = variableIndex + 1;
+  // The index we found the matching decl. Initialized to out of bounds.
+  uint32_t declIdx = 0;
+  // When iterating through the decls, how many user-presentable decls have been
+  // seen.
+  uint32_t listableDeclsSeen;
+  uint32_t beginDeclIdx;
+  // Only reuse the cached values when searching for a subsequent variableIdx on
+  // the same lexical scope as last time.
+  if (lexScope == cache->lexScope && variableIndex > cache->variableIndex) {
+    beginDeclIdx = cache->declIdx;
+    listableDeclsSeen = cache->variableIndex;
+  } else {
+    beginDeclIdx = 0;
+    listableDeclsSeen = 0;
+  }
+  for (size_t i = beginDeclIdx, e = decls.size(); i < e; ++i) {
+    if (shouldListDecl(decls[i])) {
+      if (++listableDeclsSeen == targetListableDeclsSeen) {
+        declIdx = i;
+        break;
+      }
+    }
+  }
+  assert(
+      listableDeclsSeen == targetListableDeclsSeen &&
+      "variable at variableIdx not found");
+  sema::Decl *decl = decls[declIdx];
+  auto *varForDecl = static_cast<Variable *>(getDeclCustomData(decl));
 
-  const EvalCompilationDataInst *evalDataInst = F->getEvalCompilationDataInst();
-  assert(evalDataInst && "function must be eval");
+  // Calculate how many steps is required to get to the target VariableScope.
+  VariableScope *curVS = getLexicalScopeCustomData(beginLexScope);
+  VariableScope *targetVS = getLexicalScopeCustomData(lexScope);
+  assert(curVS && targetVS && "VariableScope must be set for lexical scopes");
+  uint32_t varScopeDepth = 0;
+  for (; curVS; curVS = curVS->getParentScope()) {
+    if (curVS == targetVS) {
+      break;
+    }
+    ++varScopeDepth;
+  }
+  assert(curVS && "target VariableScope could not be reached");
 
-  auto *varScope = llvh::cast<VariableScope>(evalDataInst->getOperand(
-      EvalCompilationDataInst::FuncVarScopeIdx + depth));
-
-  return varScope->getVariables()[variableIndex]->getName().str();
+  cache->lexScope = lexScope;
+  cache->variableIndex = variableIndex;
+  cache->declIdx = declIdx;
+  return {
+      decl->name.str(), varScopeDepth, varForDecl->getIndexInVariableList()};
 }
 
 } // namespace hbc

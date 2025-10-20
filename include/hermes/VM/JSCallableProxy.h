@@ -46,6 +46,7 @@ class JSCallableProxy : public NativeFunction {
             runtime,
             parent,
             clazz,
+            Runtime::makeNullHandle<Environment>(),
             nullptr /* context */,
             &JSCallableProxy::_proxyNativeCall) {}
 
@@ -56,8 +57,7 @@ class JSCallableProxy : public NativeFunction {
   }
 
  private:
-  static CallResult<HermesValue>
-  _proxyNativeCall(void *, Runtime &runtime, NativeArgs);
+  static CallResult<HermesValue> _proxyNativeCall(void *, Runtime &runtime);
 
   detail::ProxySlots slots_;
 };

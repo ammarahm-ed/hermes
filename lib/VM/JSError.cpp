@@ -31,6 +31,7 @@ const ObjectVTable JSError::vt{
     VTable(
         CellKind::JSErrorKind,
         cellSize<JSError>(),
+        /* allowLargeAlloc */ false,
         JSError::_finalizeImpl,
         JSError::_mallocSizeImpl),
     JSError::_getOwnIndexedRangeImpl,
@@ -77,13 +78,17 @@ static llvh::Optional<Handle<JSError>> getErrorFromStackTarget(
       return Handle<JSError>::vmcast(targetHandle);
     }
 
+    if (LLVM_UNLIKELY(targetHandle->isProxyObject())) {
+      return llvh::None;
+    }
+
     mutHnd.set(targetHandle->getParent(runtime));
   }
   return llvh::None;
 }
 
-CallResult<HermesValue>
-errorStackGetter(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> errorStackGetter(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   GCScope gcScope(runtime);
 
   auto targetHandle = args.dyncastThis<JSObject>();
@@ -176,8 +181,8 @@ errorStackGetter(void *, Runtime &runtime, NativeArgs args) {
   return *stackTraceFormatted;
 }
 
-CallResult<HermesValue>
-errorStackSetter(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> errorStackSetter(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   auto res = toObject(runtime, args.getThisHandle());
   if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
@@ -882,7 +887,10 @@ CallResult<HermesValue> JSError::constructCallSitesArray(
     }
     auto callSite = runtime.makeHandle(*callSiteRes);
 
-    JSArray::setElementAt(array, runtime, callSiteIndex++, callSite);
+    if (LLVM_UNLIKELY(
+            JSArray::setElementAt(array, runtime, callSiteIndex++, callSite) ==
+            ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
 
     gcScope.flushToMarker(marker);
   }

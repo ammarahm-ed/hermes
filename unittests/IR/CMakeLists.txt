@@ -8,6 +8,7 @@ set(IRSources
   BasicBlockTest.cpp
   BuilderTest.cpp
   InstrTest.cpp
+  IRHashTest.cpp
   IRUtilsTest.cpp
   IRVerifierTest.cpp
   LoopAnalysisTest.cpp
@@ -19,7 +20,5 @@ add_hermes_unittest(HermesIRTests
   )
 
 target_link_libraries(HermesIRTests
- hermesFrontend
- hermesOptimizer
- hermesParser
+  hermesFrontend
  )

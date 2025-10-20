@@ -15,6 +15,7 @@
 #include "hermes/AST/NativeContext.h"
 #include "hermes/FrontEndDefs/Builtins.h"
 #include "hermes/FrontEndDefs/Typeof.h"
+#include "hermes/Sema/SemContext.h"
 #include "hermes/Support/Conversions.h"
 #include "hermes/Support/ScopeChain.h"
 
@@ -72,6 +73,11 @@ class Type {
     // ES2024 4.4.32 Symbol type (not the symbol object)
     Symbol,
     Environment,
+    // ES2024 6.2.12 Private Names. We currently happen to use symbols at
+    // runtime to represent private names, but conceptually private names are a
+    // different entity, and for example certain private operations can only
+    // operate on this type.
+    PrivateName,
     /// Function code (IR Function value), not a closure.
     FunctionCode,
     Object,
@@ -96,8 +102,12 @@ class Type {
         "bigint",
         "symbol",
         "environment",
+        "privateName",
         "functionCode",
         "object"};
+    static_assert(
+        LAST_TYPE == (sizeof(names) / sizeof(char *)),
+        "Not all types have a defined string representation");
     return names[idx];
   }
 
@@ -111,7 +121,7 @@ class Type {
   // special internal types that are never mixed with other types.
   static constexpr uint16_t TYPE_ANY_EMPTY_UNINIT_MASK =
       ((1u << TypeKind::LAST_TYPE) - 1) & ~BIT_TO_VAL(Environment) &
-      ~BIT_TO_VAL(FunctionCode);
+      ~BIT_TO_VAL(PrivateName) & ~BIT_TO_VAL(FunctionCode);
   // All of the above types except "empty" and "uninit".
   static constexpr uint16_t TYPE_ANY_MASK =
       TYPE_ANY_EMPTY_UNINIT_MASK & ~BIT_TO_VAL(Empty) & ~BIT_TO_VAL(Uninit);
@@ -203,6 +213,9 @@ class Type {
   static constexpr Type createEnvironment() {
     return Type(BIT_TO_VAL(Environment));
   }
+  static constexpr Type createPrivateName() {
+    return Type(BIT_TO_VAL(PrivateName));
+  }
   static constexpr Type createFunctionCode() {
     return Type(BIT_TO_VAL(FunctionCode));
   }
@@ -251,6 +264,9 @@ class Type {
   constexpr bool isEnvironmentType() const {
     return IS_VAL(Environment);
   }
+  constexpr bool isPrivateNameType() const {
+    return IS_VAL(PrivateName);
+  }
   constexpr bool isFunctionCodeType() const {
     return IS_VAL(FunctionCode);
   }
@@ -280,6 +296,11 @@ class Type {
   constexpr bool isPrimitive() const {
     // Check if any bit except the primitive bits is on.
     return bitmask_ && !(bitmask_ & ~PRIMITIVE_BITS);
+  }
+
+  /// \return true if any of the types are primitive.
+  constexpr bool canBePrimitive() const {
+    return (bitmask_ & PRIMITIVE_BITS) != 0;
   }
 
   /// \return true if the type is not referenced by a pointer in javascript.
@@ -480,13 +501,16 @@ class SideEffect {
   /// provided JS. An instruction with \c ExecuteJS set must also have bits set
   /// for throwing and accessing the frame and heap.
   /// \c FirstInBlock implies that an instruction must be at the start of a
-  /// basic block. An instruction with \c FirstInBlock set must precede all
-  /// instructions that do not have it set.
+  /// basic block. An instruction with \c FirstInBlock set may only be preceded
+  /// by other instances of the same instruction.
   /// \c Idempotent implies that repeated execution of an instruction will not
   /// affect the state of the world or the result of the instruction. For
   /// example, two identical instructions that have \p Idempotent set may be
   /// merged if they are only separated by instructions that have no side
   /// effects.
+  /// \c Unhoistable implies that an instruction must not be hoisted out of its
+  /// basic block (e.g. by CodeMotion) because it relies on preconditions which
+  /// aren't fully expressed only by its operands.
 
 #define SIDE_EFFECT_FIELDS \
   FIELD(ReadStack)         \
@@ -498,7 +522,8 @@ class SideEffect {
   FIELD(Throw)             \
   FIELD(ExecuteJS)         \
   FIELD(FirstInBlock)      \
-  FIELD(Idempotent)
+  FIELD(Idempotent)        \
+  FIELD(Unhoistable)
 
 #define FIELD(field)        \
   bool get##field() const { \
@@ -647,6 +672,10 @@ union Attributes {
     flags_ = 0;
   }
 
+  llvh::hash_code hash() {
+    return flags_;
+  }
+
   /// \return a string describing the attributes if there are any.
   /// If there are no attributes, returns "".
   /// If there are attributes returns, e.g. "[allCallsitesKnownInStrictMode]".
@@ -757,7 +786,7 @@ class Value {
   /// The only instructions which set the type in the constructor are
   /// those with inherent types (see \c Instruction::getInherentType),
   /// and those which are simply copying the types from a single operand
-  /// (e.g. MovInst, HBCLoadConstInst).
+  /// (e.g. MovInst, LIRLoadConstInst).
   /// All other Instruction types will be set during inference in TypeInference.
   void setType(Type type) {
 #ifndef NDEBUG
@@ -818,6 +847,14 @@ struct ValueDeleter {
   }
 };
 
+/// \return the customData field of \p lexScope, casted to VariableScope. Can
+/// return null.
+VariableScope *getLexicalScopeCustomData(sema::LexicalScope *lexScope);
+
+/// \return the customData field of \p lexScope, casted to Value. Can return
+/// null.
+Value *getDeclCustomData(sema::Decl *decl);
+
 /// This represents a function parameter.
 class Parameter : public Value {
   friend class Function;
@@ -848,23 +885,23 @@ class Parameter : public Value {
   }
 };
 
-/// This represents a JS function parameter, all of which are optional.
-class JSDynamicParam : public Value {
-  friend class Function;
-  friend class IRBuilder;
-  JSDynamicParam(const JSDynamicParam &) = delete;
-  void operator=(const JSDynamicParam &) = delete;
-
-  /// The function that contains this paramter.
-  Function *parent_;
+/// Supertype of the types below, to factor out common code.
+/// Note that ctor is protected; can't create one of these.
+class JSParam : public Value {
+  JSParam(const JSParam &) = delete;
+  void operator=(const JSParam &) = delete;
 
   /// The formal name of the parameter
   Identifier name_;
 
-  explicit JSDynamicParam(Function *parent, Identifier name)
-      : Value(ValueKind::JSDynamicParamKind), parent_(parent), name_(name) {
+ protected:
+  JSParam(ValueKind kind, Function *parent, Identifier name)
+      : Value(kind), name_(name), parent_(parent) {
     assert(parent_ && "Invalid parent");
   }
+
+  /// The function that contains this paramter.
+  Function *parent_;
 
  public:
   Context &getContext() const;
@@ -877,13 +914,42 @@ class JSDynamicParam : public Value {
   Identifier getName() const {
     return name_;
   }
+};
 
+/// This represents a JS function parameter, all of which are optional.
+class JSDynamicParam : public JSParam {
+  friend class Function;
+  friend class IRBuilder;
+  JSDynamicParam(const JSDynamicParam &) = delete;
+  void operator=(const JSDynamicParam &) = delete;
+
+  JSDynamicParam(Function *parent, Identifier name)
+      : JSParam(ValueKind::JSDynamicParamKind, parent, name) {}
+
+ public:
   /// Return the index of this parameter in the function's parameter list.
   /// "this" parameter is excluded from the list.
   uint32_t getIndexInParamList() const;
 
   static bool classof(const Value *V) {
     return V->getKind() == ValueKind::JSDynamicParamKind;
+  }
+};
+
+/// This represents one of the "special" JS function parameters: newTarget,
+/// or parentScope.
+class JSSpecialParam : public JSParam {
+  friend class Function;
+  friend class IRBuilder;
+  JSSpecialParam(const JSSpecialParam &) = delete;
+  void operator=(const JSSpecialParam &) = delete;
+
+  JSSpecialParam(Function *parent, Identifier name)
+      : JSParam(ValueKind::JSSpecialParamKind, parent, name) {}
+
+ public:
+  static bool classof(const Value *V) {
+    return V->getKind() == ValueKind::JSSpecialParamKind;
   }
 };
 
@@ -1290,8 +1356,8 @@ class Variable : public Value {
   /// If true, this variable obeys the TDZ rules.
   bool obeysTDZ_ = false;
 
-  /// If true, this variable is const.
-  bool isConst_ = false;
+  /// The constness of this variable.
+  sema::Decl::Constness constness_ = sema::Decl::Constness::Never;
 
   /// If true, this variable is hidden from e.g. the debugger.
   /// Used for synthetic variables that don't correspond to user-defined
@@ -1334,11 +1400,11 @@ class Variable : public Value {
     obeysTDZ_ = value;
   }
 
-  bool getIsConst() const {
-    return isConst_;
+  sema::Decl::Constness getConstness() const {
+    return constness_;
   }
-  void setIsConst(bool value) {
-    isConst_ = value;
+  void setConstness(sema::Decl::Constness constness) {
+    constness_ = constness;
   }
 
   bool getHidden() const {
@@ -1404,6 +1470,15 @@ class Instruction
   /// If 0, then there is no corresponding source statement.
   uint32_t statementIndex_{0};
 
+  /// The nearest enclosing environment ID associated with this instruction.
+  /// 0 means no valid ID.
+  /// >= 1 refers to some Value* which can be found in the Function*.
+  uint32_t environmentId_{0};
+
+  /// The enclosing lexical scope that existed when this instruction was
+  /// created. This is set by the IRBuilder.
+  sema::LexicalScope *lexicalScope_{nullptr};
+
  protected:
   explicit Instruction(ValueKind kind) : Value(kind), Parent(nullptr) {}
 
@@ -1432,6 +1507,11 @@ class Instruction
   }
 
  public:
+  /// All scope creation IDs of this value or higher represent an index into a
+  /// list of environments maintained in the Function this instruction belongs
+  /// to.
+  static constexpr uint32_t kFirstScopeCreationIdIndex = 1;
+
   void setOperand(Value *Val, unsigned Index);
   Value *getOperand(unsigned Index) const;
   unsigned getNumOperands() const;
@@ -1491,6 +1571,32 @@ class Instruction
     return statementIndex_;
   }
 
+  void setEnvironmentID(uint32_t enclosingScopeCreationID) {
+    environmentId_ = enclosingScopeCreationID;
+  }
+  /// Set the environment ID of the instruction to a sentinel value indicating
+  /// there's no valid environment ID information.
+  void clearEnvironmentID() {
+    environmentId_ = 0;
+  }
+  uint32_t getEnvironmentID() const {
+    return environmentId_;
+  }
+  /// \return an index into the IR `Function`'s environment list.
+  uint32_t getEnvironmentIDAsIndex() const {
+    assert(environmentId_ >= kFirstScopeCreationIdIndex);
+    return environmentId_ - kFirstScopeCreationIdIndex;
+  }
+  /// \return the implicit environment operand associated with this instruction.
+  Value *getImplicitEnvOperand() const;
+
+  void setLexicalScope(sema::LexicalScope *lexScope) {
+    lexicalScope_ = lexScope;
+  }
+  sema::LexicalScope *getLexicalScope() {
+    return lexicalScope_;
+  }
+
   /// A debug utility that dumps the textual representation of the IR to the
   /// given ostream, defaults to stdout.
   void dump(llvh::raw_ostream &os = llvh::outs()) const;
@@ -1536,7 +1642,8 @@ class Instruction
   }
 
   /// Return the hash code the this instruction.
-  llvh::hash_code getHashCode() const;
+  /// (The instruction cannot be a Phi, since that might have loops.)
+  llvh::hash_code getSimpleHashCode() const;
 
   /// Return true if \p RHS is equal to this instruction.
   bool isIdenticalTo(const Instruction *RHS) const;
@@ -1834,9 +1941,9 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
   /// params.
   bool jsThisAdded_ = false;
   /// Parameter used as an operand in GetNewTarget to easily find all users.
-  JSDynamicParam newTargetParam_;
+  JSSpecialParam newTargetParam_;
   /// Parameter used as an operand in GetParentScope to easily find all users.
-  JSDynamicParam parentScopeParam_;
+  JSSpecialParam parentScopeParam_;
   /// The user-specified original name of the function,
   /// or if not specified (e.g. anonymous), the inferred name.
   /// If there was no inference, an empty string.
@@ -1870,6 +1977,36 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
   /// and have cleared it in preparation for lowering steps.
   OptValue<uint32_t> statementCount_{0};
 
+  /// The current sema::LexicalScope for the IR being generated in this
+  /// function.
+  /// lexicalScope_ can be null, indicating no lexical scope info is
+  /// available.
+  /// If lexicalScope_ is None we've completed IRGen and have cleared
+  /// it in preparation for lowering steps.
+  OptValue<sema::LexicalScope *> lexicalScope_{nullptr};
+
+  /// The current environment ID.
+  /// If environmentID_ == 0, then there's no information being recorded.
+  /// If environmentID_ >= 1, it represents the most recent environment created
+  /// in the function.
+  /// If environmentID_ is None we've completed IRGen and have cleared it in
+  /// preparation for lowering steps.
+  OptValue<uint32_t> environmentID_{0};
+
+  /// The two fields below are used only in "opt-to-fixed-point" compilation
+  /// mode.
+
+  /// The set of functions that have been inlined into this one.
+  llvh::DenseSet<Function *> inlinedInto_;
+  /// The set of functions that this function has been inlined into.
+  llvh::DenseSet<Function *> inlinedBy_;
+
+  /// List of environments made by this function. Out of IRGen, this list is
+  /// filled only with `CreateScopeInst`s. However, after generators have been
+  /// lowered, this may contain `Variable`s for environments that have been
+  /// spilled.
+  llvh::SmallVector<Value *, 2> environments_;
+
  protected:
   explicit Function(
       ValueKind kind,
@@ -1891,7 +2028,7 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
   /// \returns whether this is the top level function (i.e. global scope).
   bool isGlobalScope() const;
 
-  /// \return whether this is a anonymous function.
+  /// \return whether this is an anonymous function.
   bool isAnonymous() const {
     return originalOrInferredName_.str().empty();
   }
@@ -1955,16 +2092,16 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
   }
 
   /// \return the new.target parameter.
-  JSDynamicParam *getNewTargetParam() {
+  JSSpecialParam *getNewTargetParam() {
     return &newTargetParam_;
   }
   /// \return the new.target parameter.
-  const JSDynamicParam *getNewTargetParam() const {
+  const JSSpecialParam *getNewTargetParam() const {
     return &newTargetParam_;
   }
 
   /// \return the parent scope parameter.
-  JSDynamicParam *getParentScopeParam() {
+  JSSpecialParam *getParentScopeParam() {
     return &parentScopeParam_;
   }
 
@@ -2033,6 +2170,29 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
     customDirectives_.noInline = true;
   }
 
+  /// The four inlining-related functions below are used only in
+  /// "opt-to-fixed-point" compilation mode.
+
+  /// The set of functions that have been inlined into this one.
+  llvh::DenseSet<Function *> &inlinedInto() {
+    return inlinedInto_;
+  };
+  const llvh::DenseSet<Function *> &inlinedInto() const {
+    return inlinedInto_;
+  };
+
+  /// The set of functions that this function has been inlined into.
+  llvh::DenseSet<Function *> &inlinedBy() {
+    return inlinedBy_;
+  };
+  const llvh::DenseSet<Function *> &inlinedBy() const {
+    return inlinedBy_;
+  };
+
+  llvh::SmallVectorImpl<Value *> &environments() {
+    return environments_;
+  };
+
   OptValue<uint32_t> getStatementCount() const {
     return statementCount_;
   }
@@ -2052,6 +2212,31 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
 
   void clearStatementCount() {
     statementCount_ = llvh::None;
+  }
+
+  OptValue<sema::LexicalScope *> getLexicalScope() const {
+    return lexicalScope_;
+  }
+  void setLexicalScope(sema::LexicalScope *lexScope) {
+    lexicalScope_ = lexScope;
+  }
+  void clearLexicalScope() {
+    lexicalScope_ = llvh::None;
+  }
+
+  /// \return the current environmentID of the Function.
+  OptValue<uint32_t> getEnvironmentID() const {
+    return environmentID_;
+  }
+
+  /// Set the current environmentID of the Function to \p envID.
+  void setEnvironmentID(uint32_t envID) {
+    environmentID_ = envID;
+  }
+
+  /// Clear the environmentID, signaling the end of IRGen for this Function.
+  void clearEnvironmentID() {
+    environmentID_ = llvh::None;
   }
 
   auto &getJSDynamicParams() {
@@ -2147,6 +2332,34 @@ class Function : public llvh::ilist_node_with_parent<Function, Module>,
   static bool classof(const Value *V) {
     return HERMES_IR_KIND_IN_CLASS(V->getKind(), Function);
   }
+
+  /// This is an RAII object that saves and restores the sema::LexicalScope of
+  /// the Function. This can only be used during IRGen, since this expects that
+  /// the lexical scope of the function is never `None` on construction.
+  class ScopedLexicalScopeChange {
+    ScopedLexicalScopeChange(const ScopedLexicalScopeChange &) = delete;
+    void operator=(const ScopedLexicalScopeChange &) = delete;
+
+    Function *F_;
+    sema::LexicalScope *oldLexicalScope_;
+
+   public:
+    explicit ScopedLexicalScopeChange(Function *F, sema::LexicalScope *newScope)
+        : F_(F), oldLexicalScope_(*F->getLexicalScope()) {
+      if (newScope)
+        F->setLexicalScope(newScope);
+    }
+
+    ~ScopedLexicalScopeChange() {
+      // If since the constructor has run, the lexical scope has been cleared
+      // out, we shouldn't attempt to set anything. The lexical scope being set
+      // to `None` indicates the end of IRGen for the function, so we shouldn't
+      // take it out of that state.
+      if (F_->getLexicalScope().hasValue()) {
+        F_->setLexicalScope(oldLexicalScope_);
+      }
+    }
+  };
 };
 
 class NormalFunction final : public Function {
@@ -2683,6 +2896,11 @@ class Module : public Value {
   static bool classof(const Value *V) {
     return V->getKind() == ValueKind::ModuleKind;
   }
+
+  /// The hash_code of the Module.  This is intended to detect changes made
+  /// by optimization passes; aspects not changed by such passes may
+  /// not be included in the hash value.
+  llvh::hash_code hash() const;
 
  private:
   /// Calculate the CJS module function graph, if it hasn't been calculated yet.

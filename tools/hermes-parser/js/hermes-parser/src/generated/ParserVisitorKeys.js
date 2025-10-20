@@ -36,7 +36,6 @@ export const HERMES_AST_VISITOR_KEYS = {
     elementType: 'Node',
   },
   ArrowFunctionExpression: {
-    id: 'Node',
     params: 'NodeList',
     body: 'Node',
     typeParameters: 'Node',
@@ -208,6 +207,8 @@ export const HERMES_AST_VISITOR_KEYS = {
     id: 'Node',
     typeParameters: 'Node',
     impltype: 'Node',
+    lowerBound: 'Node',
+    upperBound: 'Node',
     supertype: 'Node',
   },
   DeclareTypeAlias: {
@@ -364,7 +365,7 @@ export const HERMES_AST_VISITOR_KEYS = {
   },
   ImportExpression: {
     source: 'Node',
-    attributes: 'Node',
+    options: 'Node',
   },
   ImportNamespaceSpecifier: {
     local: 'Node',
@@ -523,6 +524,7 @@ export const HERMES_AST_VISITOR_KEYS = {
     value: 'Node',
   },
   MixedTypeAnnotation: {},
+  NeverTypeAnnotation: {},
   NewExpression: {
     callee: 'Node',
     typeArguments: 'Node',
@@ -580,6 +582,8 @@ export const HERMES_AST_VISITOR_KEYS = {
     id: 'Node',
     typeParameters: 'Node',
     impltype: 'Node',
+    lowerBound: 'Node',
+    upperBound: 'Node',
     supertype: 'Node',
   },
   OptionalIndexedAccessType: {
@@ -657,7 +661,7 @@ export const HERMES_AST_VISITOR_KEYS = {
     finalizer: 'Node',
   },
   TupleTypeAnnotation: {
-    types: 'NodeList',
+    elementTypes: 'NodeList',
   },
   TupleTypeLabeledElement: {
     label: 'Node',
@@ -705,9 +709,11 @@ export const HERMES_AST_VISITOR_KEYS = {
   UnaryExpression: {
     argument: 'Node',
   },
+  UndefinedTypeAnnotation: {},
   UnionTypeAnnotation: {
     types: 'NodeList',
   },
+  UnknownTypeAnnotation: {},
   UpdateExpression: {
     argument: 'Node',
   },

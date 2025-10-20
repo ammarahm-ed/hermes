@@ -94,7 +94,6 @@ BytecodeFunctionGenerator::generateBytecodeFunction(
     HVMRegisterAllocator &RA,
     BytecodeGenerationOptions options,
     FileAndSourceMapIdCache &debugCache,
-    SourceMapGenerator *sourceMapGen,
     DebugInfoGenerator &debugInfoGenerator) {
   BytecodeFunctionGenerator funcGen{BMGen, RA.getMaxHVMRegisterUsage()};
 
@@ -103,7 +102,7 @@ BytecodeFunctionGenerator::generateBytecodeFunction(
     F->moveToCompiledFunctionList();
     funcGen.bytecodeGenerationComplete();
   } else {
-    runHBCISel(F, &funcGen, RA, options, debugCache, sourceMapGen);
+    runHBCISel(F, &funcGen, RA, options, debugCache);
     if (funcGen.hasEncodingError()) {
       F->getParent()->getContext().getSourceErrorManager().error(
           F->getSourceRange().Start, "Error encoding bytecode");
@@ -130,8 +129,10 @@ BytecodeFunctionGenerator::generateBytecodeFunction(
       RA.getMaxRegisterUsage(RegClass::Number),
       RA.getMaxRegisterUsage(RegClass::NonPtr),
       nameID,
-      funcGen.highestReadCacheIndex_,
-      funcGen.highestWriteCacheIndex_};
+      funcGen.readCacheSize_,
+      funcGen.writeCacheSize_,
+      funcGen.numCacheNewObject_,
+      funcGen.privateNameCacheSize_};
 
   header.flags.setProhibitInvoke(computeProhibitInvoke(F->getProhibitInvoke()));
   header.flags.setKind(computeFuncKind(F->getKind()));
@@ -147,7 +148,7 @@ BytecodeFunctionGenerator::generateBytecodeFunction(
     uint32_t sourceLocOffset = debugInfoGenerator.appendSourceLocations(
         funcGen.getSourceLocation(), functionID, funcGen.getDebugLocations());
     // TODO: Delete lexical offset, there's nothing there.
-    bcFunc->setDebugOffsets({sourceLocOffset, 0});
+    bcFunc->setDebugOffsets({sourceLocOffset});
   }
 
   // For lazy functions, set the function here to be used by the
@@ -184,30 +185,32 @@ void BytecodeFunctionGenerator::updateJumpTarget(
   }
 }
 
-void BytecodeFunctionGenerator::updateJumpTableOffset(
+void BytecodeFunctionGenerator::updateTableOffset(
     offset_t loc,
-    uint32_t jumpTableOffset,
+    uint32_t tableOffset,
     uint32_t instLoc) {
   assert(opcodes_.size() > instLoc && "invalid switchimm offset");
 
   // The offset is not aligned, but will be aligned when read in the
   // interpreter.
   updateJumpTarget(
-      loc,
-      opcodes_.size() + jumpTableOffset * sizeof(uint32_t) - instLoc,
-      sizeof(uint32_t));
+      loc, opcodes_.size() + tableOffset - instLoc, sizeof(uint32_t));
 }
 
 void BytecodeFunctionGenerator::bytecodeGenerationComplete() {
   assert(!complete_ && "Can only call bytecodeGenerationComplete once");
   complete_ = true;
   bytecodeSize_ = opcodes_.size();
-
   // Add the jump tables inline with the opcodes, as a 4-byte aligned section at
   // the end of the opcode array.
+  uint32_t alignedOpcodes = llvh::alignTo<sizeof(uint32_t)>(bytecodeSize_);
+  // The alignment constraints of jump tables and string switch tables are the
+  // same:
+  static_assert(alignof(StringSwitchTableCase) == sizeof(uint32_t));
+  uint32_t stringSwitchTableStart = alignedOpcodes;
   if (!jumpTable_.empty()) {
-    uint32_t alignedOpcodes = llvh::alignTo<sizeof(uint32_t)>(bytecodeSize_);
     uint32_t jumpTableBytes = jumpTable_.size() * sizeof(uint32_t);
+    stringSwitchTableStart += jumpTableBytes;
     opcodes_.reserve(alignedOpcodes + jumpTableBytes);
     opcodes_.resize(alignedOpcodes, 0);
     const opcode_atom_t *jumpTableStart =
@@ -215,15 +218,24 @@ void BytecodeFunctionGenerator::bytecodeGenerationComplete() {
     opcodes_.insert(
         opcodes_.end(), jumpTableStart, jumpTableStart + jumpTableBytes);
   }
+  if (!stringSwitchTable_.empty()) {
+    uint32_t stringSwitchTableBytes =
+        stringSwitchTable_.size() * sizeof(StringSwitchTableCase);
+    opcodes_.reserve(stringSwitchTableStart + stringSwitchTableBytes);
+    opcodes_.resize(stringSwitchTableStart, 0);
+    const opcode_atom_t *stringSwitchTableStart =
+        reinterpret_cast<opcode_atom_t *>(stringSwitchTable_.data());
+    opcodes_.insert(
+        opcodes_.end(),
+        stringSwitchTableStart,
+        stringSwitchTableStart + stringSwitchTableBytes);
+  }
 }
 
 unsigned BytecodeModuleGenerator::addFunction(Function *F) {
   auto [it, inserted] = functionIDMap_.insert({F, bm_.getNumFunctions()});
   if (inserted) {
     bm_.addFunction();
-    auto &optionsMut = bm_.getBytecodeOptionsMut();
-    optionsMut.setHasAsync(
-        (uint8_t)optionsMut.getHasAsync() | llvh::isa<AsyncFunction>(F));
   }
   return it->second;
 }
@@ -286,20 +298,25 @@ static bool isIdOperand(const Instruction *I, unsigned idx) {
     CASE_WITH_PROP_IDX(DeletePropertyStrictInst);
     CASE_WITH_PROP_IDX(LoadPropertyInst);
     CASE_WITH_PROP_IDX(LoadPropertyWithReceiverInst);
-    CASE_WITH_PROP_IDX(DefineNewOwnPropertyInst);
+    CASE_WITH_PROP_IDX(DefineOwnPropertyInst);
     CASE_WITH_PROP_IDX(StorePropertyLooseInst);
     CASE_WITH_PROP_IDX(StorePropertyStrictInst);
     CASE_WITH_PROP_IDX(TryLoadGlobalPropertyInst);
     CASE_WITH_PROP_IDX(TryStoreGlobalPropertyLooseInst);
     CASE_WITH_PROP_IDX(TryStoreGlobalPropertyStrictInst);
+    CASE_WITH_PROP_IDX(CreatePrivateNameInst);
 
     case ValueKind::DeclareGlobalVarInstKind:
       return idx == DeclareGlobalVarInst::NameIdx;
 
-    case ValueKind::HBCAllocObjectFromBufferInstKind:
+    case ValueKind::LIRAllocObjectFromBufferInstKind:
       // AllocObjectFromBuffer stores the keys and values as alternating
       // operands, with keys starting first.
-      return idx % 2 == 0;
+      return (idx - LIRAllocObjectFromBufferInst::FirstKeyIdx) % 2 == 0;
+
+    case ValueKind::CacheNewObjectInstKind:
+      // The keys of CacheNewObject are identifiers.
+      return idx >= CacheNewObjectInst::FirstKeyIdx;
 
     default:
       return false;
@@ -436,6 +453,24 @@ void BytecodeModuleGenerator::collectStrings() {
   }
 }
 
+/// Iterate over all the instructions in \p F and make sure the environment ID
+/// is valid.
+static void fixupEnvironmentIDs(Function *F) {
+  DominanceInfo D(F);
+  IRBuilder builder(F);
+  // Check for dominance and update IDs to 0 if not matching.
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (auto *implicitEnvOperand =
+              llvh::dyn_cast_or_null<Instruction>(I.getImplicitEnvOperand())) {
+        if (!D.properlyDominates(implicitEnvOperand, &I)) {
+          I.clearEnvironmentID();
+        }
+      }
+    }
+  }
+}
+
 bool BytecodeModuleGenerator::generateAddedFunctions() {
   BytecodeOptions &bytecodeOptions = bm_.getBytecodeOptionsMut();
   bytecodeOptions.setCjsModulesStaticallyResolved(M_->getCJSModulesResolved());
@@ -470,6 +505,12 @@ bool BytecodeModuleGenerator::generateAddedFunctions() {
           addFunctionSource(functionID, getStringID(*source));
         }
       }
+    }
+
+    // Under full debug info, ensure the environment IDs are all valid. Without
+    // debug info, there are not environment IDs set at all.
+    if (M_->getContext().getDebugInfoSetting() == DebugInfoSetting::ALL) {
+      fixupEnvironmentIDs(F);
     }
 
     // Run register allocation.
@@ -507,7 +548,6 @@ bool BytecodeModuleGenerator::generateAddedFunctions() {
             RA,
             options_,
             debugIdCache_,
-            sourceMapGen_,
             debugInfoGenerator_);
     if (!func)
       return false;
@@ -574,7 +614,8 @@ bool BytecodeModuleGenerator::generate(
       shouldGenerate,
       [this](llvh::StringRef str) { return getIdentifierID(str); },
       [this](llvh::StringRef str) { return getStringID(str); },
-      options_.optimizationEnabled));
+      options_.optimizationEnabled,
+      baseBCProvider_.get()));
 
   if (!generateAddedFunctions())
     return false;
