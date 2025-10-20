@@ -291,8 +291,6 @@ android {
 
   packaging {
     jniLibs.excludes.add("**/libc++_shared.so")
-    jniLibs.excludes.add("**/libjsi.so")
-    jniLibs.excludes.add("**/libfbjni.so")
   }
 
   publishing {
