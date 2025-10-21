@@ -56,7 +56,6 @@ class HERMES_EXPORT IHermesRootAPI : public jsi::ICast {
 
   void createNapiEnv(napi_env *env);
 
-  static bool isHermesBytecode(const uint8_t *data, size_t len);
   static constexpr jsi::UUID uuid{
       0xb654d898,
       0xdfad,
