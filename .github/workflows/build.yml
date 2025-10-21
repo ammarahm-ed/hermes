@@ -5,9 +5,7 @@ jobs:
   android:
     runs-on: ubuntu-22.04
     env:
-      HERMES_WS_DIR: ${{ github.workspace }}
-      RELEASE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
-      
+      HERMES_WS_DIR: /home/runner/work/hermes/hermes
     steps:
     - name: Set up workspace and install dependencies
       run: |-
@@ -20,29 +18,24 @@ jobs:
       with:
         distribution: 'temurin' # See 'Supported distributions' for available options
         java-version: '17'
-        
-    - name: Build Hermes Compiler
-      run: |-
-        cmake -S hermes -B build ${RELEASE_FLAGS}
-        # Build the Hermes compiler so that the cross compiler build can
-        # access it to build the VM
-        cmake --build ./build --target hermesc -j 4
+
+    - name: Setup node.js
+      uses: ./.github/actions/setup-node
+
+    - name: Install node dependencies
+      uses: ./.github/actions/yarn-install
+
+    - name: Set artifacts version
+      shell: bash
+      run: node ./utils/scripts/hermes/set-artifacts-version.js --build-type release 
+
     - name: Build Hermes for Android
       run: |-
         cd hermes/android
-        ./gradlew githubRelease
-    - name: Copy artifacts
-      run: |-
-        mkdir output
-        cp build_android/distributions/hermes-runtime-android-*.tar.gz output
-    - name: Checksum artifacts
-      run: |-
-        cd output
-        for file in *
-        do
-          sha256sum "$file" > "$file.sha256"
-        done
-    - uses: actions/upload-artifact@v4.3.1
+        ./gradlew publishAndroidOnlyToMavenTempLocal :build -PenableWarningsAsErrors=true
+
+    - name: Upload Maven Artifacts
+      uses: actions/upload-artifact@v4.3.4
       with:
-        name: android-hermes
-        path: output
+        name: maven-local
+        path: /tmp/maven-local  
