@@ -12,8 +12,6 @@ jobs:
         yes | sdkmanager "cmake;3.22.1" &
         sudo apt update && sudo apt install -y libicu-dev
     - uses: actions/checkout@v4.1.0
-      with:
-        path: hermes
     - uses: actions/setup-java@v5
       with:
         distribution: 'temurin' # See 'Supported distributions' for available options
