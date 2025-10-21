@@ -29,7 +29,7 @@ jobs:
 
     - name: Build Hermes for Android
       run: |-
-        cd hermes/android
+        cd android
         ./gradlew publishAndroidOnlyToMavenTempLocal :build -PenableWarningsAsErrors=true
 
     - name: Upload Maven Artifacts
