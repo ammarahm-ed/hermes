@@ -77,8 +77,8 @@ int __llvm_profile_dump(void);
 #endif
 
 
-typedef struct napi_env__ napi_env;
-typedef struct napi_value__ napi_value;
+typedef struct napi_env__* napi_env;
+typedef struct napi_value__* napi_value;
 namespace hermes::node_api {
 class TaskRunner;
 // Forward declaration

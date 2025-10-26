@@ -19,8 +19,8 @@ class GCExecTrace;
 namespace hermes::node_api {
     class TaskRunner;
 }
-typedef struct napi_env__ napi_env;
-typedef struct napi_value__ napi_value;
+typedef struct napi_env__* napi_env;
+typedef struct napi_value__* napi_value;
 
 namespace facebook::hermes {
 
