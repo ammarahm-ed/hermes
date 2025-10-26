@@ -43,6 +43,13 @@ vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
     const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
     int32_t apiVersion) noexcept;
 
+napi_env createNodeApiEnv(
+  void* vmRuntime,
+  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
+  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
+  int32_t NODE_API_VERSION
+) noexcept;
+
 // Initialize new Node API module in a new Node API environment.
 napi_status initializeNodeApiModule(
     vm::Runtime &runtime,

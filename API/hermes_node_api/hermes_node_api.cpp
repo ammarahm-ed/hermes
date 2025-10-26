@@ -2584,6 +2584,31 @@ vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
                          apiVersion));
 }
 
+napi_env createNodeApiEnv(
+  void* vmRuntime,
+  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
+  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
+  int32_t NODE_API_VERSION
+) {
+    vm::Runtime *runtimePtr = reinterpret_cast<vm::Runtime *>(vmRuntime);
+    if (runtimePtr == nullptr) {
+      return nullptr;
+    }
+     vm::CallResult<NodeApiEnvironmentHolder *> holderRes =
+      NodeApiEnvironmentHolder::fromRuntime(runtime);
+    if (holderRes.getStatus() == vm::ExecutionStatus::EXCEPTION) {
+    return nullptr;
+    }
+  
+  return napiEnv((*holderRes)
+                     ->getOrCreateEnvironment(
+                         *runtimePtr,
+                         compileFlags,
+                         std::move(taskRunner),
+                         unhandledErrorCallback,
+                         NODE_API_VERSION));
+}
+
 napi_status initializeNodeApiModule(
     vm::Runtime &runtime,
     napi_addon_register_func registerModule,

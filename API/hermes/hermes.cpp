@@ -77,20 +77,6 @@ int __llvm_profile_dump(void);
 #endif
 
 
-typedef struct napi_env__* napi_env;
-typedef struct napi_value__* napi_value;
-
-namespace hermes::node_api {
-class TaskRunner;
-// Forward declaration
-vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
-    vm::Runtime &runtime,
-    hbc::CompileFlags compileFlags,
-    std::shared_ptr<TaskRunner> taskRunner,
-    const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
-    int32_t apiVersion) noexcept;
-} // namespace hermes
-
 namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
@@ -1226,11 +1212,6 @@ class HermesRuntimeImpl final : public HermesRuntime,
   jsi::Value evaluateSHUnit(SHUnitCreator shUnitCreator) override;
   SHRuntime *getSHRuntime() noexcept override;
   void *getVMRuntimeUnsafe() const override;
-  void* createNodeApiEnv(
-  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
-  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
-  int32_t NODE_API_VERSION
-  ) override;
   size_t rootsListLengthForTests() const override;
 
   ManagedValues<vm::PinnedHermesValue> hermesValues_;
@@ -1631,27 +1612,6 @@ SHUnitCreator HermesRuntimeImpl::getSHUnitCreator() const {
 #else
   return nullptr;
 #endif
-}
-
-void* HermesRuntimeImpl::createNodeApiEnv(
-  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
-  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
-  int32_t NODE_API_VERSION
-) {
-    // Call the Node-API function from hermes_node_api.cpp
-    auto result = ::hermes::node_api::getOrCreateNodeApiEnvironment(
-        runtime_,
-        compileFlags_,
-        taskRunner,
-        unhandledErrorCallback,
-        static_cast<int32_t>(NODE_API_VERSION)
-    );
-    
-    if (result.getStatus() == vm::ExecutionStatus::EXCEPTION) {
-        return nullptr;
-    }
-    
-    return static_cast<void*>(*result);
 }
 
 jsi::Value HermesRuntimeImpl::evaluateSHUnit(SHUnitCreator shUnitCreator) {
