@@ -2599,7 +2599,8 @@ napi_env createNodeApiEnv(
     if (holderRes.getStatus() == vm::ExecutionStatus::EXCEPTION) {
     return nullptr;
     }
-  
+    
+  hbc::CompileFlags compileFlags{}; 
   return napiEnv((*holderRes)
                      ->getOrCreateEnvironment(
                          *runtimePtr,
