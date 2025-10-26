@@ -2595,7 +2595,7 @@ napi_env createNodeApiEnv(
       return nullptr;
     }
      vm::CallResult<NodeApiEnvironmentHolder *> holderRes =
-      NodeApiEnvironmentHolder::fromRuntime(runtime);
+      NodeApiEnvironmentHolder::fromRuntime(*runtimePtr);
     if (holderRes.getStatus() == vm::ExecutionStatus::EXCEPTION) {
     return nullptr;
     }
