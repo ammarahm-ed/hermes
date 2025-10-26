@@ -79,8 +79,7 @@ int __llvm_profile_dump(void);
 
 typedef struct napi_env__ napi_env;
 typedef struct napi_value__ napi_value;
-namespace hermes {
-namespace node_api {
+namespace hermes::node_api {
 class TaskRunner;
 // Forward declaration
 vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
@@ -89,7 +88,6 @@ vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
     std::shared_ptr<TaskRunner> taskRunner,
     const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
     int32_t apiVersion) noexcept;
-} // namespace node_api
 } // namespace hermes
 
 namespace vm = hermes::vm;
@@ -1630,7 +1628,7 @@ SHUnitCreator HermesRuntimeImpl::getSHUnitCreator() const {
 }
 
 void* HermesRuntimeImpl::createNodeApiEnv(
-  std::shared_ptr<hermes::node_api::TaskRunner> taskRunner,
+  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
   const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
   int32_t NODE_API_VERSION
 ) {

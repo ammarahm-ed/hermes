@@ -171,7 +171,7 @@ class JSI_EXPORT IHermes : public jsi::ICast {
   virtual void* getVMRuntimeUnsafe() const = 0;
 
   virtual void* createNodeApiEnv(
-  std::shared_ptr<hermes::node_api::TaskRunner> taskRunner,
+  std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
   const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
   int32_t NODE_API_VERSION
 ) = 0;
