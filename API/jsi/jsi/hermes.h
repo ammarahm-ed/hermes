@@ -16,6 +16,12 @@ namespace hermes::vm {
 class GCExecTrace;
 }
 
+namespace hermes::node_api {
+    class TaskRunner;
+}
+typedef struct napi_env__ napi_env;
+typedef struct napi_value__ napi_value;
+
 namespace facebook::hermes {
 
 namespace sampling_profiler {
@@ -163,6 +169,12 @@ class JSI_EXPORT IHermes : public jsi::ICast {
   /// Direct use of a vm::Runtime should be avoided as the lower level APIs are
   /// unsafe and they can change without notice.
   virtual void* getVMRuntimeUnsafe() const = 0;
+
+  virtual void* createNodeApiEnv(
+  std::shared_ptr<hermes::node_api::TaskRunner> taskRunner,
+  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
+  int32_t NODE_API_VERSION
+) = 0;
 
  protected:
   ~IHermes() = default;

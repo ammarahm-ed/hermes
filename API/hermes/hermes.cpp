@@ -76,9 +76,27 @@ int __llvm_profile_dump(void);
   } while (0)
 #endif
 
+
+typedef struct napi_env__ napi_env;
+typedef struct napi_value__ napi_value;
+namespace hermes {
+namespace node_api {
+class TaskRunner;
+// Forward declaration
+vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
+    vm::Runtime &runtime,
+    hbc::CompileFlags compileFlags,
+    std::shared_ptr<TaskRunner> taskRunner,
+    const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
+    int32_t apiVersion) noexcept;
+} // namespace node_api
+} // namespace hermes
+
 namespace vm = hermes::vm;
 namespace hbc = hermes::hbc;
 using ::hermes::hermesLog;
+
+
 
 namespace facebook {
 namespace hermes {
@@ -1609,6 +1627,27 @@ SHUnitCreator HermesRuntimeImpl::getSHUnitCreator() const {
 #else
   return nullptr;
 #endif
+}
+
+void* HermesRuntimeImpl::createNodeApiEnv(
+  std::shared_ptr<hermes::node_api::TaskRunner> taskRunner,
+  const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
+  int32_t NODE_API_VERSION
+) {
+    // Call the Node-API function from hermes_node_api.cpp
+    auto result = hermes::node_api::getOrCreateNodeApiEnvironment(
+        runtime_,
+        compileFlags_,
+        taskRunner,
+        unhandledErrorCallback,
+        static_cast<int32_t>(NODE_API_VERSION)
+    );
+    
+    if (result.getStatus() == vm::ExecutionStatus::EXCEPTION) {
+        return nullptr;
+    }
+    
+    return static_cast<void*>(*result);
 }
 
 jsi::Value HermesRuntimeImpl::evaluateSHUnit(SHUnitCreator shUnitCreator) {
