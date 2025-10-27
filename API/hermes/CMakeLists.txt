@@ -77,7 +77,7 @@ endif()
 
 add_hermes_library(hermesapi
   ${api_sources}
-  LINK_OBJLIBS hermesPublic LINK_LIBS jsi ${CDP_DEPS}
+  LINK_OBJLIBS hermesPublic hermesNodeApi LINK_LIBS jsi ${CDP_DEPS}
   )
 target_include_directories(hermesapi_obj PUBLIC ..)
 
