@@ -14,5 +14,5 @@ add_library(nodeApi INTERFACE
 
 target_include_directories(nodeApi INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes_node_api/node_api/" DESTINATION include
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes/node_api/" DESTINATION include
   FILES_MATCHING PATTERN "*.h")

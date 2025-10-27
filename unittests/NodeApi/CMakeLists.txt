@@ -115,7 +115,7 @@ if(UNIX AND NOT APPLE)
 endif()
 target_include_directories(node_lite
   PRIVATE
-    ../../API/hermes_node_api/node_api
+    ../../API/hermes/node_api
 )
 
 target_compile_definitions(node_lite
