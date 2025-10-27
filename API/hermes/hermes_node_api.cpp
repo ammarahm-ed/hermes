@@ -2589,7 +2589,7 @@ napi_env createNodeApiEnv(
   std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
   const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
   int32_t NODE_API_VERSION
-) {
+) noexcept {
     vm::Runtime *runtimePtr = reinterpret_cast<vm::Runtime *>(vmRuntime);
     if (runtimePtr == nullptr) {
       return nullptr;
