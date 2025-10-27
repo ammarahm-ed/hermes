@@ -7072,6 +7072,46 @@ napi_run_script(napi_env env, napi_value script, napi_value *result) {
   return scope.escapeResult(*cr, result);
 }
 
+napi_status NAPI_CDECL
+napi_run_script_source(napi_env env, napi_value script, const char* source_url, napi_value *result) {
+  class StringBuffer : public ::hermes::Buffer {
+   public:
+    StringBuffer(std::string buffer) : string_(std::move(buffer)) {
+      data_ = reinterpret_cast<const uint8_t *>(string_.c_str());
+      size_ = string_.size();
+    }
+
+   private:
+    std::string string_;
+  };
+
+  CHECK_STATUS(checkJSPreconditions(env));
+  CHECK_POSTCONDITIONS(env, /*valueStackDelta:*/ 1);
+  CHECK_ARG(script);
+  CHECK_ARG(result);
+
+  NodeApiEscapableValueScope scope{*env};
+  vm::GCScope gcScope{env->runtime_};
+
+  // Convert the code into UTF8.
+  size_t sourceSize{};
+  CHECK_STATUS(
+      napi_get_value_string_utf8(env, script, nullptr, 0, &sourceSize));
+  std::string code(sourceSize, '\0');
+  CHECK_STATUS(napi_get_value_string_utf8(
+      env, script, &code[0], sourceSize + 1, nullptr));
+
+  std::string sourceUrl(source_url);
+
+  // Create a buffer for the code.
+  std::unique_ptr<hermes::Buffer> codeBuffer(new StringBuffer(std::move(code)));
+
+  vm::CallResult<vm::HermesValue> cr = env->runtime_.run(
+      std::move(codeBuffer), llvh::StringRef(sourceUrl), env->compileFlags_);
+  CHECK_STATUS(env->checkExecutionStatus(cr.getStatus()));
+  return scope.escapeResult(*cr, result);
+}
+
 napi_status NAPI_CDECL napi_add_finalizer(
     napi_env env,
     napi_value object,
