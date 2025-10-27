@@ -147,7 +147,6 @@ target_link_libraries(hermesvm_a PUBLIC
   hermesSourceMap_obj
   hermesSupport_obj
   hermesVMRuntime_obj
-  hermesNodeApi_obj
   zip_obj
   )
 
@@ -170,7 +169,6 @@ target_link_libraries(hermesvmlean_a PUBLIC
   hermesRegex_obj
   hermesSupport_obj
   hermesVMRuntime_obj
-  hermesNodeApi_obj
   zip_obj
   )
 

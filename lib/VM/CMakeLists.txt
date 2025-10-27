@@ -184,7 +184,7 @@ endif()
 
 # Take dependencies on hermesPublic and hermesapi so their headers are exposed.
 add_hermes_library(hermesVMRuntime ${source_files}
-        LINK_OBJLIBS hermesPublic hermesNodeApi hermesapi 
+        LINK_OBJLIBS hermesPublic hermesapi 
         LINK_LIBS ${JITLIBS})
 
 add_subdirectory(Instrumentation)
