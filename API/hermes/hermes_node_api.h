@@ -36,14 +36,14 @@ class TaskRunner {
 
 // Get or create a Node API environment associated with the given Hermes
 // runtime. The Node API environment is deleted by the runtime destructor.
-vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
+HERMES_EXPORT vm::CallResult<napi_env> getOrCreateNodeApiEnvironment(
     vm::Runtime &runtime,
     hbc::CompileFlags compileFlags,
     std::shared_ptr<TaskRunner> taskRunner,
     const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
     int32_t apiVersion) noexcept;
 
-napi_env createNodeApiEnv(
+HERMES_EXPORT napi_env createNodeApiEnv(
   void* vmRuntime,
   std::shared_ptr<::hermes::node_api::TaskRunner> taskRunner,
   const std::function<void(napi_env, napi_value)> &unhandledErrorCallback,
