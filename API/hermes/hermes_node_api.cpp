@@ -107,6 +107,14 @@
     }                                                                \
   } while (false)
 
+#define CHECK_STATUS_WITH_EXIT(...)                                 \
+  do {                                                               \
+    if (napi_status status__ = (__VA_ARGS__); status__ != napi_ok) { \
+      env->exit();                                              \
+      return status__;                                               \
+    }                                                                \
+  } while (false)
+
 // Adopted from Node.js code
 #ifdef _WIN32
 #define ABORT() _exit(134)
@@ -1146,6 +1154,11 @@ class NodeApiEnvironment {
     return tlsCurrentEnvironment_ != nullptr;
   }
 
+ public:
+  void enter() noexcept;
+
+  void exit() noexcept;
+
  private:
   // tlsCurrentEnvironment_ RAII helper class
   class CurrentEnvironmentScope {
@@ -1308,6 +1321,9 @@ class NodeApiEnvironment {
   // These are the first four ASCII letters of word "External".
   static constexpr uint32_t kExternalValueTag = 0x45787465;
   static constexpr int32_t kExternalTagSlotIndex = 0;
+
+  // Tracks js enter state to run microtasks
+  int jsEnterState_ = 0;
 };
 
 thread_local NodeApiEnvironment *NodeApiEnvironment::tlsCurrentEnvironment_{};
@@ -2903,6 +2919,22 @@ NodeApiEnvironment::~NodeApiEnvironment() = default;
 napi_status NodeApiEnvironment::incRefCount() noexcept {
   refCount_++;
   return napi_status::napi_ok;
+}
+
+void NodeApiEnvironment::enter() noexcept {
+  jsEnterState_++;
+}
+
+void NodeApiEnvironment::exit() noexcept {
+  if (jsEnterState_ != 0) {
+    jsEnterState_--;
+  }
+  if (jsEnterState_ == 0) {
+    auto status = runtime_.drainJobs();
+    if (status != vm::ExecutionStatus::RETURNED) {
+      exit();
+    }
+  }
 }
 
 napi_status NodeApiEnvironment::decRefCount() noexcept {
@@ -5674,6 +5706,7 @@ napi_status NAPI_CDECL napi_call_function(
   if (argCount > 0) {
     CHECK_ARG(args);
   }
+  env->enter();
   RETURN_STATUS_IF_FALSE(vm::vmisa<vm::Callable>(*phv(func)), napi_invalid_arg);
 
   vm::GCScope gcScope{env->runtime_};
@@ -5692,7 +5725,7 @@ napi_status NAPI_CDECL napi_call_function(
       /*newTarget:*/ env->UndefinedHermesValue,
       *phv(thisArg)};
   if (LLVM_UNLIKELY(newFrame.overflowed())) {
-    CHECK_STATUS(env->checkExecutionStatus(env->runtime_.raiseStackOverflow(
+    CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(env->runtime_.raiseStackOverflow(
         vm::Runtime::StackOverflowKind::NativeStack)));
   }
 
@@ -5701,8 +5734,9 @@ napi_status NAPI_CDECL napi_call_function(
   }
   vm::CallResult<vm::PseudoHandle<>> callRes =
       vm::Callable::call(funcHandle, env->runtime_);
-  CHECK_STATUS(env->checkExecutionStatus(callRes.getStatus()));
+  CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(callRes.getStatus()));
 
+  env->exit();
   if (result) {
     RETURN_STATUS_IF_FALSE(!callRes->get().isEmpty(), napi_generic_failure);
     return env->makeResultValue(callRes->get(), result);
@@ -6479,6 +6513,8 @@ napi_status NAPI_CDECL napi_new_instance(
     return GENERIC_FAILURE("Unable to call constructor: stack overflow");
   }
 
+  env->enter();
+
   // We follow es5 13.2.2 [[Construct]] here. Below F == func.
   // 13.2.2.5:
   //    Let proto be the value of calling the [[Get]] internal property of
@@ -6496,6 +6532,7 @@ napi_status NAPI_CDECL napi_new_instance(
       vm::Callable::createThisForConstruct_RJS(
           ctorHandle, env->runtime_, ctorHandle);
   if (thisRes.getStatus() == vm::ExecutionStatus::EXCEPTION) {
+    env->exit();
     return env->setJSException();
   }
   // We need to capture this in case the ctor doesn't return an object,
@@ -6516,7 +6553,7 @@ napi_status NAPI_CDECL napi_new_instance(
       ctorHandle.getHermesValue(),
       thisHandle.getHermesValue()};
   if (LLVM_UNLIKELY(newFrame.overflowed())) {
-    CHECK_STATUS(env->checkExecutionStatus(env->runtime_.raiseStackOverflow(
+    CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(env->runtime_.raiseStackOverflow(
         vm::Runtime::StackOverflowKind::NativeStack)));
   }
   for (size_t i = 0; i < argCount; ++i) {
@@ -6525,13 +6562,14 @@ napi_status NAPI_CDECL napi_new_instance(
   // The last parameter indicates that this call should construct an object.
   vm::CallResult<vm::PseudoHandle<>> callRes =
       vm::Callable::call(ctorHandle, env->runtime_);
-  CHECK_STATUS(env->checkExecutionStatus(callRes.getStatus()));
+  CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(callRes.getStatus()));
 
   // 13.2.2.9:
   //    If Type(result) is Object then return result
   // 13.2.2.10:
   //    Return obj
   vm::HermesValue resultValue = callRes->get();
+  env->exit();
   return scope.escapeResult(
       resultValue.isObject() ? resultValue : thisHandle.getHermesValue(),
       result);
@@ -7065,10 +7103,11 @@ napi_run_script(napi_env env, napi_value script, napi_value *result) {
 
   // Create a buffer for the code.
   std::unique_ptr<hermes::Buffer> codeBuffer(new StringBuffer(std::move(code)));
-
+  env->enter();
   vm::CallResult<vm::HermesValue> cr = env->runtime_.run(
       std::move(codeBuffer), llvh::StringRef(), env->compileFlags_);
-  CHECK_STATUS(env->checkExecutionStatus(cr.getStatus()));
+  CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(cr.getStatus()));
+  env->exit();
   return scope.escapeResult(*cr, result);
 }
 
@@ -7105,10 +7144,11 @@ napi_run_script_source(napi_env env, napi_value script, const char* source_url, 
 
   // Create a buffer for the code.
   std::unique_ptr<hermes::Buffer> codeBuffer(new StringBuffer(std::move(code)));
-
+  env->enter();
   vm::CallResult<vm::HermesValue> cr = env->runtime_.run(
       std::move(codeBuffer), llvh::StringRef(sourceUrl), env->compileFlags_);
-  CHECK_STATUS(env->checkExecutionStatus(cr.getStatus()));
+  CHECK_STATUS_WITH_EXIT(env->checkExecutionStatus(cr.getStatus()));
+  env->exit();
   return scope.escapeResult(*cr, result);
 }
 
