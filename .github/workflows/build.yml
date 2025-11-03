@@ -29,6 +29,12 @@ jobs:
       run: |
         cd android
         ./gradlew publishAndroidOnlyToMavenTempLocal :build -PenableWarningsAsErrors=true
+   
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4.3.4
+      with:
+        name: hermesc
+        path: ./build
     - name: Upload Maven Artifacts
       uses: actions/upload-artifact@v4.3.4
       with:
