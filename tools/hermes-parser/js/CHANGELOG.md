@@ -1,3 +1,14 @@
+## 0.36.0
+
+### `hermes-estree`
+- Add `writeonly`, `in`, and `out` to variance kind type
+
+### `hermes-parser`
+- Fix malformed AST for `for (using x of y)` and `for await (await using x of y)` — bindings are now correctly wrapped in `VariableDeclarator`
+- Parse `writeonly` as a Flow variance modifier on object type properties, indexers, and class properties
+- Parse `in T` and `out T` as long-form Flow type-parameter variance (contravariance and covariance)
+- Allow `readonly` variance modifier before reserved-word property names (e.g. `{readonly with: T}`)
+
 ## 0.35.0
 
 ### `hermes-estree`
