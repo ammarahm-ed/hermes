@@ -15,6 +15,17 @@ mkdir -p xplat/static_h/tools/hermes-parser/js/hermes-parser/dist
 cp <output_path_from_step_1> xplat/static_h/tools/hermes-parser/js/hermes-parser/dist/HermesParserWASM.js
 ```
 
+## CI / Dev Workflow
+
+CI runs these 4 commands in sequence from this directory. Remember to run them locally:
+
+```bash
+yarn build                  # builds all packages (required before lint)
+yarn test                   # runs all jest tests
+dotslash ./.flow.dotslash   # Flow type checking
+yarn lint                   # eslint
+```
+
 ## Running Tests
 
 From this directory:
