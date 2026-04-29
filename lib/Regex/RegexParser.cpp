@@ -559,7 +559,8 @@ class Parser {
             setError(constants::ErrorType::EscapeIncomplete);
             return;
           } else if (*current_ == 'b' || *current_ == 'B') {
-            re_->pushWordBoundary(*current_ == 'B' /* invert */);
+            re_->pushWordBoundary(
+                *current_ == 'B' /* invert */, curFlags_.ignoreCase);
             consume(*current_);
             quantifierAllowed = false;
           } else {

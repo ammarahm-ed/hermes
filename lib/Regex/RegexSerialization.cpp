@@ -254,6 +254,12 @@ void dumpInstruction(
 }
 
 void dumpInstruction(
+    const regex::WordBoundaryICaseInsn *insn,
+    llvh::raw_ostream &OS) {
+  OS << "WordBoundaryICase: " << (insn->invert ? "\\B" : "\\b");
+}
+
+void dumpInstruction(
     const regex::BeginMarkedSubexpressionInsn *insn,
     llvh::raw_ostream &OS) {
   OS << "BeginMarkedSubexpression: " << insn->mexp;
