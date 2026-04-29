@@ -822,7 +822,6 @@ Type *FlowContext::getSingletonType(TypeKind kind) const {
 #undef _HERMES_SEMA_FLOW_DEFKIND
     default:
       llvm_unreachable("invalid singleton TypeKind");
-      return nullptr;
   }
 }
 

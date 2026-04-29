@@ -630,8 +630,6 @@ CallResult<HermesValue> hermesBuiltinArraySpread(void *, Runtime &runtime) {
     lv.nextIndex =
         HermesValue::encodeTrustedNumberValue(lv.nextIndex->getNumber() + 1);
   }
-
-  return lv.nextIndex.getHermesValue();
 }
 
 /// \code

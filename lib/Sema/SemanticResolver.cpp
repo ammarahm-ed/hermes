@@ -689,7 +689,6 @@ static LabelDecorationBase *getLabelDecorationBase(StatementNode *node) {
   if (auto *LabS = llvh::dyn_cast<LabeledStatementNode>(node))
     return LabS;
   llvm_unreachable("invalid node type");
-  return nullptr;
 }
 
 void SemanticResolver::visit(ESTree::BreakStatementNode *node) {

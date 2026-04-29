@@ -158,7 +158,6 @@ llvh::StringRef ESTreeIRGen::propertyKeyAsString(
   }
 
   llvm_unreachable("Don't know this kind of property key");
-  return llvh::StringRef();
 }
 
 void ESTreeIRGen::doIt(llvh::StringRef topLevelFunctionName) {

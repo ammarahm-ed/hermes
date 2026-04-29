@@ -185,8 +185,6 @@ CallResult<HermesValue> weakMapConstructor(void *, Runtime &runtime) {
       return iteratorCloseAndRethrow(runtime, iteratorRecord.iterator);
     }
   }
-
-  return lv.self.getHermesValue();
 }
 
 CallResult<HermesValue> weakMapPrototypeDelete(void *, Runtime &runtime) {
