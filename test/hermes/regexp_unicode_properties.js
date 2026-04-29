@@ -178,3 +178,7 @@ print(/[\p{Lu}]+/ui.exec("aBc"));
 // just the base Script.
 print(/\p{Script_Extensions=Lao}/u.exec("\u{0E81}") !== null);
 // CHECK-NEXT: true
+
+// U+10FFFF must be included in inverted property ranges inside a bracket.
+print(/[\P{ASCII}]/u.test(String.fromCodePoint(0x10FFFF)));
+// CHECK-NEXT: true
