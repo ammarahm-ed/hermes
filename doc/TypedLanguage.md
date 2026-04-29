@@ -136,6 +136,38 @@ function foo(a: any) {
 }
 ```
 
+### Type Inference
+
+#### Variable Declarations
+
+If the declarator has an annotation, it wins.
+
+Otherwise the initializer is visited and its type becomes the declaration's type. Globals and `catch` variables are always `any`.
+
+Reassignments to a `let`/`var` variable must obey the type inferred/declared at the variable's declaration.
+
+#### Array and Tuple Literals
+
+An array literal becomes a tuple or an array based on the constraint:
+
+* Tuple constraint: each element is checked against the matching slot.
+* Array constraint: each element is checked against `T`, with checked casts inserted as needed.
+* No constraint specified: element types are unioned and the literal becomes `Array<union>`.
+* Empty literal, no constraint: Warns and assumes 'any'. Annotate the declaration for a proper type.
+
+Tuples are never inferred without context — `[1,"x"]` alone is `Array<number|string>`, not a tuple.
+
+#### Generic Calls
+
+When a generic call omits type arguments, each type parameter is attempted to be inferred. Arguments are processed in two passes: first those whose parameter type is a bare type variable, then those with complex types like `(T) => U` from left to right. Inference succeeds only if every placeholder is resolved.
+
+Matching is structural: same-kind containers (`Array`, `Tuple`, `ExactObject`, function types) recurse into their components, a union constraint tries each arm against a non-union concrete, etc.
+
+Limitations:
+
+* First-write wins: `[T, T]` against `[number, string]` fixes `T = number`, and the second slot then fails the regular flow check.
+* Single forward pass: fixpoint iteration.
+
 ### Type Refinement
 
 Typed language doesn't have full proper type refinement support yet but it supports a partial implementation that allows for certain use cases by implicitly checking `null` or `void` at usage time.
