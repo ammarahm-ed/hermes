@@ -9,6 +9,7 @@
 #include "hermes/ConsoleHost/ConsoleHost.h"
 #include "hermes/Support/OSCompat.h"
 #include "hermes/Support/PageAccessTracker.h"
+#include "hermes/TypedLib/TypedLib.h"
 #include "hermes/VM/RuntimeFlags.h"
 
 #include "llvh/ADT/SmallString.h"
@@ -277,6 +278,11 @@ int main(int argc, char **argv) {
     driver::printHermesCompilerVMVersion(s, &vmFeatures);
   });
   llvh::cl::ParseCommandLineOptions(clArgc, argv, "Hermes driver\n");
+
+  if (cl::HelpTyped) {
+    llvh::outs() << getTypedLanguageDoc();
+    return 0;
+  }
 
   if (cl::InputFilenames.size() == 0) {
     return repl(getReplRuntimeConfig());

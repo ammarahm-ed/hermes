@@ -264,7 +264,7 @@ static opt<bool> Pretty(
 static opt<bool> Typed(
     "typed",
     init(false),
-    desc("Enable typed mode"),
+    desc("Enable typed mode (use -help-typed to learn more)"),
     cat(CompilerCategory));
 #else
 static constexpr bool Typed = false;
@@ -666,6 +666,12 @@ static opt<unsigned> PadFunctionBodiesPercent(
         "Add this much garbage after each function body (relative to its size)."),
     init(0),
     Hidden,
+    cat(CompilerCategory));
+
+opt<bool> HelpTyped(
+    "help-typed",
+    desc("Print the Typed language documentation and exit"),
+    init(false),
     cat(CompilerCategory));
 
 } // namespace cl
