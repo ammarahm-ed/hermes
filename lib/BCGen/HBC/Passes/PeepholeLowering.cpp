@@ -7,11 +7,39 @@
 
 #include "hermes/BCGen/HBC/Passes/PeepholeLowering.h"
 #include "hermes/BCGen/CommonPeepholeLowering.h"
+#include "hermes/FrontEndDefs/Typeof.h"
+#include "hermes/IR/IR.h"
 #include "hermes/IR/Instrs.h"
 
 namespace hermes {
 
 namespace hbc {
+
+/// Convert an IR Type to a TypeOfIsTypes bitmask for runtime type checking.
+static TypeOfIsTypes irTypeToTypeOfIsTypes(Type type) {
+  TypeOfIsTypes result;
+  // Uninit maps to undefined at runtime.
+  if (type.canBeUndefined() || type.canBeUninit())
+    result = result.withUndefined(true);
+  if (type.canBeNull())
+    result = result.withNull(true);
+  if (type.canBeBoolean())
+    result = result.withBoolean(true);
+  if (type.canBeString())
+    result = result.withString(true);
+  if (type.canBeNumber())
+    result = result.withNumber(true);
+  if (type.canBeBigInt())
+    result = result.withBigint(true);
+  if (type.canBeSymbol())
+    result = result.withSymbol(true);
+  // IR Object encompasses both objects and callables.
+  if (type.canBeObject()) {
+    result = result.withObject(true);
+    result = result.withFunction(true);
+  }
+  return result;
+}
 
 class DoLower {
   Function *const F_;
@@ -62,6 +90,8 @@ class DoLower {
         return lowerGetTemplateObject(llvh::cast<GetTemplateObjectInst>(I));
       case ValueKind::StringConcatInstKind:
         return lowerStringConcat(llvh::cast<StringConcatInst>(I));
+      case ValueKind::CheckedTypeCastInstKind:
+        return lowerCheckedTypeCast(llvh::cast<CheckedTypeCastInst>(I));
       case ValueKind::CallInstKind:
         return stripEnvFromCall(llvh::cast<CallInst>(I), builder_);
       case ValueKind::CreateFunctionInstKind:
@@ -72,6 +102,21 @@ class DoLower {
       default:
         return nullptr;
     }
+  }
+
+  Value *lowerCheckedTypeCast(CheckedTypeCastInst *inst) {
+    destroyer_.add(inst);
+    builder_.setInsertionPoint(inst);
+    if (inst->getCheckedValue()->getType().isSubsetOf(inst->getType())) {
+      // No need to do any work.
+      return inst->getCheckedValue();
+    }
+    TypeOfIsTypes types = irTypeToTypeOfIsTypes(inst->getType());
+    auto *replace = builder_.createCallBuiltinInst(
+        BuiltinMethod::HermesBuiltin_checkedTypeCast,
+        {inst->getCheckedValue(), builder_.getLiteralNumber(types.getRaw())});
+    replace->setType(inst->getType());
+    return replace;
   }
 
   Value *lowerThrowTypeError(ThrowTypeErrorInst *TTE) {

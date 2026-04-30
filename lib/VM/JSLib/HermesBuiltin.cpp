@@ -8,6 +8,7 @@
 #include "JSLibInternal.h"
 
 #include "hermes/FrontEndDefs/Builtins.h"
+#include "hermes/FrontEndDefs/Typeof.h"
 #include "hermes/Support/Base64vlq.h"
 #include "hermes/VM/Callable.h"
 #include "hermes/VM/JSArray.h"
@@ -193,6 +194,20 @@ CallResult<HermesValue> hermesBuiltinGetMethod(void *, Runtime &runtime) {
 CallResult<HermesValue> hermesBuiltinThrowTypeError(void *, Runtime &runtime) {
   NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
   return runtime.raiseTypeError(args.getArgHandle(0));
+}
+
+/// Check that \p value matches the type flags, throw TypeError if not.
+///
+/// \code
+///   HermesBuiltin.checkedTypeCast = function(value, typeFlags) {...}
+/// \endcode
+CallResult<HermesValue> hermesBuiltinCheckedTypeCast(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  HermesValue value = args.getArg(0);
+  uint16_t flags = static_cast<uint16_t>(args.getArg(1).getNumber());
+  if (LLVM_LIKELY(matchTypeOfIs(value, TypeOfIsTypes(flags))))
+    return value;
+  return runtime.raiseTypeError("Checked cast failed");
 }
 
 /// Throw a reference error with the argument as a message.
@@ -1100,6 +1115,11 @@ void createHermesBuiltins(Runtime &runtime) {
       B::HermesBuiltin_initRegexNamedGroups,
       P::initRegexNamedGroups,
       hermesBuiltinInitRegexNamedGroups);
+  defineInternMethod(
+      B::HermesBuiltin_checkedTypeCast,
+      P::checkedTypeCast,
+      hermesBuiltinCheckedTypeCast,
+      2);
   defineInternMethod(
       B::HermesBuiltin_setFunctionName,
       P::setFunctionName,

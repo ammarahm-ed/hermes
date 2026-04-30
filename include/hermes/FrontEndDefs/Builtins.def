@@ -150,6 +150,7 @@ PRIVATE_BUILTIN(applyWithNewTarget)
 PRIVATE_BUILTIN(exportAll)
 PRIVATE_BUILTIN(exponentiationOperator)
 PRIVATE_BUILTIN(initRegexNamedGroups)
+PRIVATE_BUILTIN(checkedTypeCast)
 
 PRIVATE_BUILTIN(setFunctionName)
 

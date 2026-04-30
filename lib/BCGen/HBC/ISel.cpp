@@ -2474,11 +2474,8 @@ void HBCISel::generateFastArrayStoreInst(
 void HBCISel::generateThrowTypeErrorInst(ThrowTypeErrorInst *, BasicBlock *) {
   hermes_fatal("ThrowTypeErrorInst should have been lowered.");
 }
-void HBCISel::generateCheckedTypeCastInst(
-    CheckedTypeCastInst *inst,
-    BasicBlock *) {
-  // TODO: Implement an actual checked cast.
-  emitMovIfNeeded(encodeValue(inst), encodeValue(inst->getCheckedValue()));
+void HBCISel::generateCheckedTypeCastInst(CheckedTypeCastInst *, BasicBlock *) {
+  hermes_fatal("CheckedTypeCastInst should have been lowered.");
 }
 void HBCISel::generateFastArrayAppendInst(
     FastArrayAppendInst *inst,
