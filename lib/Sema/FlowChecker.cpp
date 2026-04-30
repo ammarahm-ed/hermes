@@ -356,6 +356,9 @@ void FlowChecker::visit(ESTree::ArrowFunctionExpressionNode *node) {
 class FlowChecker::ParseClassType {
   FlowChecker &outer_;
   sema::LexicalScope *classScope_;
+  /// The class's type parameter declaration, if any. Used to shadow type
+  /// params with empty for static members.
+  ESTree::TypeParameterDeclarationNode *classTypeParams_ = nullptr;
 
   llvh::SmallDenseMap<UniqueString *, ESTree::Node *> fieldNames{};
   llvh::SmallVector<ClassType::Field, 4> fields{};
@@ -383,9 +386,13 @@ class FlowChecker::ParseClassType {
       ESTree::Node *body,
       Type *classType,
       sema::LexicalScope *classScope,
-      Type *classConsType)
+      Type *classConsType,
+      ESTree::Node *classTypeParameters)
       : outer_(outer),
         classScope_(classScope),
+        classTypeParams_(
+            llvh::cast_or_null<ESTree::TypeParameterDeclarationNode>(
+                classTypeParameters)),
         classConsType_(classConsType),
         superClassType(
             resolveSuperClass(outer, superClass, superTypeArguments)) {
@@ -415,12 +422,26 @@ class FlowChecker::ParseClassType {
     auto *classBody = llvh::cast<ESTree::ClassBodyNode>(body);
     for (ESTree::Node &node : classBody->_body) {
       if (auto *prop = llvh::dyn_cast<ESTree::ClassPropertyNode>(&node)) {
-        Type *fieldType = parseClassProperty(prop);
+        Type *fieldType;
+        if (prop->_static && classTypeParams_) {
+          ScopeRAII staticScope(outer_);
+          shadowClassTypeParamsWithEmpty();
+          fieldType = parseClassProperty(prop);
+        } else {
+          fieldType = parseClassProperty(prop);
+        }
         outer_.setNodeType(&node, fieldType);
       } else if (
           auto *prop =
               llvh::dyn_cast<ESTree::ClassPrivatePropertyNode>(&node)) {
-        Type *fieldType = parseClassPrivateProperty(prop);
+        Type *fieldType;
+        if (prop->_static && classTypeParams_) {
+          ScopeRAII staticScope(outer_);
+          shadowClassTypeParamsWithEmpty();
+          fieldType = parseClassPrivateProperty(prop);
+        } else {
+          fieldType = parseClassPrivateProperty(prop);
+        }
         outer_.setNodeType(&node, fieldType);
       } else if (
           auto *method = llvh::dyn_cast<ESTree::MethodDefinitionNode>(&node)) {
@@ -477,6 +498,18 @@ class FlowChecker::ParseClassType {
   }
 
  private:
+  /// Shadow class type parameters with empty in the current scope.
+  /// Must be called after opening a ScopeRAII.
+  void shadowClassTypeParamsWithEmpty() {
+    assert(classTypeParams_ && "must have type params");
+    Type *empty = outer_.flowContext_.getEmpty();
+    for (auto &param : classTypeParams_->_params) {
+      auto *typeParam = llvh::cast<ESTree::TypeParameterNode>(&param);
+      outer_.bindingTable_.try_emplace(
+          typeParam->_name, TypeDecl{empty, classScope_, &param});
+    }
+  }
+
   Type *resolveSuperClass(
       FlowChecker &outer_,
       ESTree::Node *superClass,
@@ -795,13 +828,25 @@ class FlowChecker::ParseClassType {
           outer_.semContext_.setExpressionDecl(keyId, decl);
         }
 
-        methodType = outer_.parseFunctionType(
-            fe->_params,
-            fe->_returnType,
-            fe->_async,
-            fe->_generator,
-            nullptr,
-            method->_static && classConsType_ ? classConsType_ : classType);
+        if (method->_static && classTypeParams_) {
+          ScopeRAII staticScope(outer_);
+          shadowClassTypeParamsWithEmpty();
+          methodType = outer_.parseFunctionType(
+              fe->_params,
+              fe->_returnType,
+              fe->_async,
+              fe->_generator,
+              nullptr,
+              classConsType_ ? classConsType_ : classType);
+        } else {
+          methodType = outer_.parseFunctionType(
+              fe->_params,
+              fe->_returnType,
+              fe->_async,
+              fe->_generator,
+              nullptr,
+              method->_static && classConsType_ ? classConsType_ : classType);
+        }
       }
 
       // Validate setter has exactly 1 parameter.
@@ -1016,7 +1061,8 @@ void FlowChecker::parseClassType(
     ESTree::Node *body,
     Type *classType,
     sema::LexicalScope *classScope,
-    Type *classConsType) {
+    Type *classConsType,
+    ESTree::Node *classTypeParameters) {
   ParseClassType(
       *this,
       superClass,
@@ -1024,7 +1070,8 @@ void FlowChecker::parseClassType(
       body,
       classType,
       classScope,
-      classConsType);
+      classConsType,
+      classTypeParameters);
 }
 
 void FlowChecker::visitClassNode(
@@ -1055,7 +1102,8 @@ void FlowChecker::visit(ESTree::ClassExpressionNode *node) {
       node->_body,
       classType,
       node->getScope(),
-      consType);
+      consType,
+      node->_typeParameters);
   if (sm_.getErrorCount() != errorsBefore) {
     // Failed to parse class.
     return;
@@ -1206,6 +1254,36 @@ void FlowChecker::visit(ESTree::MethodDefinitionNode *node) {
         funcType,
         curClassContext_->classType,
         /* newTargetType */ flowContext_.getVoid());
+
+    // For static methods on generic classes, replace the class type
+    // parameters with Empty since static methods can't reference them.
+    if (node->_static) {
+      ESTree::Node *typeParams = nullptr;
+      if (auto *cd = llvh::dyn_cast<ESTree::ClassDeclarationNode>(
+              curClassContext_->node)) {
+        typeParams = cd->_typeParameters;
+      } else if (
+          auto *ce = llvh::dyn_cast<ESTree::ClassExpressionNode>(
+              curClassContext_->node)) {
+        typeParams = ce->_typeParameters;
+      }
+      if (auto *tParams =
+              llvh::cast_or_null<ESTree::TypeParameterDeclarationNode>(
+                  typeParams)) {
+        // This is a static method on a generic class.
+        ScopeRAII staticTypeParamScope(*this);
+        Type *empty = flowContext_.getEmpty();
+        for (auto &param : tParams->_params) {
+          auto *typeParam = llvh::cast<ESTree::TypeParameterNode>(&param);
+          bindingTable_.try_emplace(
+              typeParam->_name,
+              TypeDecl{empty, curClassContext_->node->getScope(), &param});
+        }
+        visitFunctionLike(fe, fe->_body, fe->_params);
+        return;
+      }
+    }
+
     visitFunctionLike(fe, fe->_body, fe->_params);
   }
 }
@@ -3344,7 +3422,8 @@ void FlowChecker::typecheckGenericClassSpecialization(
         specialization->_body,
         classType,
         specialization->getScope(),
-        classConsType);
+        classConsType,
+        specialization->_typeParameters);
     typecheckQueue_.emplace_back(
         specialization,
         bindingTable_.getCurrentScope(),

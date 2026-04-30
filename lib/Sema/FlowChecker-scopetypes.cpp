@@ -1196,7 +1196,8 @@ class FlowChecker::DeclareScopeTypes {
           specialization->_body,
           deferred.classType,
           deferred.classScope,
-          deferred.classConsType);
+          deferred.classConsType,
+          specialization->_typeParameters);
 
       // Don't typecheck right now, because we need to parse everything in
       // current scope before descending into child functions.
