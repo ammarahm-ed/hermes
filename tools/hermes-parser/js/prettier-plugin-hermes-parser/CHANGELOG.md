@@ -1,3 +1,6 @@
+## 0.37.0
+- Support `async component` and `async hook` declaration formatting. See [PR #19053 in prettier](https://github.com/prettier/prettier/pull/19053).
+
 ## 0.36.0
 - Support new Flow variance syntax. See [PR #19102 in prettier](https://github.com/prettier/prettier/pull/19102).
 - Support `DeclareVariable` declarations array. See [commit 5f87177e8](https://github.com/pieterv/prettier/commit/5f87177e8).
