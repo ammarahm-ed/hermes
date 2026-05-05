@@ -89,10 +89,12 @@ import {
   isMemberExpressionWithNonComputedProperty,
 } from 'hermes-estree';
 
-const EMPTY_TRANSLATION_RESULT = [null, []];
+const EMPTY_TRANSLATION_RESULT: TranslatedResultOrNull<empty> = [null, []];
 
 type TranslatedDeps = $ReadOnlyArray<Dep>;
-type TranslatedResultOrNull<T> = [DetachedNode<T> | null, TranslatedDeps];
+type TranslatedResultOrNull<+T> = Readonly<
+  [DetachedNode<T> | null, TranslatedDeps],
+>;
 type TranslatedResultArray<T> = [
   $ReadOnlyArray<DetachedNode<T>>,
   TranslatedDeps,
@@ -1081,7 +1083,6 @@ function convertSuperClass(
   context: TranslationContext,
 ): TranslatedResultOrNull<InterfaceExtends> {
   if (superClass == null) {
-    // $FlowFixMe[incompatible-type]
     return EMPTY_TRANSLATION_RESULT;
   }
 
@@ -1176,7 +1177,6 @@ function convertClassMember(
     case 'PropertyDefinition': {
       // PrivateIdentifier's are not exposed so can be stripped.
       if (member.key.type === 'PrivateIdentifier') {
-        // $FlowFixMe[incompatible-type]
         return EMPTY_TRANSLATION_RESULT;
       }
       if (
@@ -1186,7 +1186,6 @@ function convertClassMember(
         member.key.name[0] === '_' &&
         member.key.name[1] !== '_'
       ) {
-        // $FlowFixMe[incompatible-type]
         return EMPTY_TRANSLATION_RESULT;
       }
       if (
@@ -1254,7 +1253,6 @@ function convertClassMember(
     case 'MethodDefinition': {
       // PrivateIdentifier's are not exposed so can be stripped.
       if (member.key.type === 'PrivateIdentifier') {
-        // $FlowFixMe[incompatible-type]
         return EMPTY_TRANSLATION_RESULT;
       }
       if (
@@ -1264,7 +1262,6 @@ function convertClassMember(
         member.key.name[0] === '_' &&
         member.key.name[1] !== '_'
       ) {
-        // $FlowFixMe[incompatible-type]
         return EMPTY_TRANSLATION_RESULT;
       }
       if (
@@ -1853,7 +1850,6 @@ function convertTypeAnnotationTypeOrNull(
   context: TranslationContext,
 ): TranslatedResultOrNull<TypeAnnotationType> {
   if (annot == null) {
-    // $FlowFixMe[incompatible-type]
     return EMPTY_TRANSLATION_RESULT;
   }
 
@@ -1864,7 +1860,6 @@ function convertTypeParameterDeclarationOrNull(
   context: TranslationContext,
 ): TranslatedResultOrNull<TypeParameterDeclaration> {
   if (decl == null) {
-    // $FlowFixMe[incompatible-type]
     return EMPTY_TRANSLATION_RESULT;
   }
   return [asDetachedNode(decl), analyzeTypeDependencies(decl, context)];
@@ -1874,7 +1869,6 @@ function convertTypeParameterInstantiationOrNull(
   context: TranslationContext,
 ): TranslatedResultOrNull<TypeParameterInstantiation> {
   if (inst == null) {
-    // $FlowFixMe[incompatible-type]
     return EMPTY_TRANSLATION_RESULT;
   }
   return [asDetachedNode(inst), analyzeTypeDependencies(inst, context)];
