@@ -830,4 +830,30 @@ describe('flowToFlowDef', () => {
       );
     });
   });
+  describe('HookDeclaration', () => {
+    it('basic', async () => {
+      await expectTranslate(
+        `export hook useFoo(): string { return ''; }`,
+        `declare export hook useFoo(): string;`,
+      );
+    });
+    it('with params', async () => {
+      await expectTranslate(
+        `export hook useFoo(x: number, y?: string): boolean { return true; }`,
+        `declare export hook useFoo(x: number, y?: string): boolean;`,
+      );
+    });
+    it('with type params', async () => {
+      await expectTranslate(
+        `export hook useFoo<T>(x: T): T { return x; }`,
+        `declare export hook useFoo<T>(x: T): T;`,
+      );
+    });
+    it('without return type', async () => {
+      await expectTranslate(
+        `export hook useFoo() {}`,
+        `declare export hook useFoo(): void;`,
+      );
+    });
+  });
 });

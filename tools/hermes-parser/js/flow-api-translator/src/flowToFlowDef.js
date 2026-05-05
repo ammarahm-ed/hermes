@@ -1562,7 +1562,7 @@ function convertHookDeclaration(
   const [resultTypeParams, typeParamsDeps] =
     convertTypeParameterDeclarationOrNull(hook.typeParameters, context);
 
-  const resultFunc = t.FunctionTypeAnnotation({
+  const resultFunc = t.HookTypeAnnotation({
     params: resultParams,
     returnType: resultReturnType,
     rest: restParam,
