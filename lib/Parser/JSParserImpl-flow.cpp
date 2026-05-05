@@ -308,6 +308,7 @@ Optional<ESTree::Node *> JSParserImpl::parseComponentDeclarationFlow(
     return None;
   }
 
+  llvh::SaveAndRestore<bool> saveParamAwait(paramAwait_, isAsync);
   SaveFunctionState saveFunctionState{this};
 
   auto parsedBody = parseFunctionBody(

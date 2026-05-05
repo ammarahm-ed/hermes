@@ -612,4 +612,21 @@ component Foo(bar: mixed = Foo, ref: any) {
       );
     });
   });
+
+  describe('async with await', () => {
+    const code = `
+      async component Foo() {
+        const x = await something();
+        return x;
+      }
+    `;
+
+    test('ESTree', async () => {
+      expect(await parseForSnapshotESTree(code)).toMatchSnapshot();
+    });
+
+    test('Babel', async () => {
+      expect(await parseForSnapshotBabel(code)).toMatchSnapshot();
+    });
+  });
 });
