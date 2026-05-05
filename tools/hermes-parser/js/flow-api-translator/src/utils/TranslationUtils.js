@@ -14,19 +14,23 @@ import type {Identifier, JSXIdentifier} from 'hermes-estree';
 import type {ScopeManager, Variable} from 'hermes-eslint';
 
 export type Dep = string;
-export type TranslationOptions = {recoverFromErrors: boolean};
+export type TranslationOptions = {
+  recoverFromErrors: boolean,
+  mungeUnderscores?: boolean,
+};
 export type TranslationContext = {
   scopeManager: ScopeManager,
   referenceMap: Map<Identifier | JSXIdentifier, Variable>,
   variableMap: Map<Dep, Variable>,
   recoverFromErrors: boolean,
+  mungeUnderscores: boolean,
   code: string,
 };
 
 export function createTranslationContext(
   code: string,
   scopeManager: ScopeManager,
-  {recoverFromErrors}: TranslationOptions,
+  {recoverFromErrors, mungeUnderscores = true}: TranslationOptions,
 ): TranslationContext {
   const referenceMap = new Map<Identifier | JSXIdentifier, Variable>();
   const variableMap = new Map<Dep, Variable>();
@@ -40,5 +44,12 @@ export function createTranslationContext(
       variableMap.set(variable.name, variable);
     }
   }
-  return {scopeManager, referenceMap, variableMap, recoverFromErrors, code};
+  return {
+    scopeManager,
+    referenceMap,
+    variableMap,
+    recoverFromErrors,
+    mungeUnderscores,
+    code,
+  };
 }

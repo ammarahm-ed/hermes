@@ -1180,6 +1180,16 @@ function convertClassMember(
         return EMPTY_TRANSLATION_RESULT;
       }
       if (
+        context.mungeUnderscores &&
+        member.key.type === 'Identifier' &&
+        member.key.name.length >= 2 &&
+        member.key.name[0] === '_' &&
+        member.key.name[1] !== '_'
+      ) {
+        // $FlowFixMe[incompatible-type]
+        return EMPTY_TRANSLATION_RESULT;
+      }
+      if (
         !isIdentifier(member.key) &&
         !isStringLiteral(member.key) &&
         !isNumericLiteral(member.key)
@@ -1244,6 +1254,16 @@ function convertClassMember(
     case 'MethodDefinition': {
       // PrivateIdentifier's are not exposed so can be stripped.
       if (member.key.type === 'PrivateIdentifier') {
+        // $FlowFixMe[incompatible-type]
+        return EMPTY_TRANSLATION_RESULT;
+      }
+      if (
+        context.mungeUnderscores &&
+        member.key.type === 'Identifier' &&
+        member.key.name.length >= 2 &&
+        member.key.name[0] === '_' &&
+        member.key.name[1] !== '_'
+      ) {
         // $FlowFixMe[incompatible-type]
         return EMPTY_TRANSLATION_RESULT;
       }

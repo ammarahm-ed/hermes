@@ -24,11 +24,13 @@ import {TSDefToFlowDef} from './TSDefToFlowDef';
 export async function translateFlowToFlowDef(
   code: string,
   prettierOptions: {...} = {},
+  opts?: {mungeUnderscores?: boolean},
 ): Promise<string> {
   const {ast, scopeManager} = await parse(code);
 
   const [flowDefAst, mutatedCode] = flowToFlowDef(ast, code, scopeManager, {
     recoverFromErrors: true,
+    mungeUnderscores: opts?.mungeUnderscores,
   });
 
   return print(flowDefAst, mutatedCode, prettierOptions);

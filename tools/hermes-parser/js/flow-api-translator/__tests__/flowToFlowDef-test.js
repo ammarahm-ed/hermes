@@ -14,11 +14,15 @@ import prettierConfig from '../../.prettierrc.json';
 import {parse, print} from 'hermes-transform';
 import {trimToBeCode} from './utils/inlineCodeHelpers';
 
-async function translate(code: string): Promise<string> {
+async function translate(
+  code: string,
+  opts?: {mungeUnderscores?: boolean},
+): Promise<string> {
   const {ast, scopeManager} = await parse(code);
 
   const [flowDefAst, mutatedCode] = flowToFlowDef(ast, code, scopeManager, {
     recoverFromErrors: false,
+    mungeUnderscores: opts?.mungeUnderscores,
   });
 
   return print(flowDefAst, mutatedCode, prettierConfig);
@@ -497,6 +501,84 @@ describe('flowToFlowDef', () => {
            @@iterator(): void;
            static get @@asyncIterator(): void;
          }`,
+      );
+    });
+    it('strips munged underscore members', async () => {
+      await expectTranslate(
+        `export class A {
+           _private: string = '';
+           public: string = '';
+           _alsoPrivate(): void {}
+           alsoPublic(): void {}
+         }`,
+        `declare export class A {
+           public: string;
+           alsoPublic(): void;
+         }`,
+      );
+    });
+    it('keeps double-underscore members', async () => {
+      await expectTranslate(
+        `export class A {
+           __notPrivate: string = '';
+           _private: string = '';
+         }`,
+        `declare export class A {
+           __notPrivate: string;
+         }`,
+      );
+    });
+    it('keeps single-char underscore member', async () => {
+      await expectTranslate(
+        `export class A {
+           _: string = '';
+         }`,
+        `declare export class A {
+           _: string;
+         }`,
+      );
+    });
+    it('strips static munged members', async () => {
+      await expectTranslate(
+        `export class A {
+           static _privateStatic: number = 1;
+           static publicStatic: number = 1;
+           static _privateMethod(): void {}
+           static publicMethod(): void {}
+         }`,
+        `declare export class A {
+           static publicStatic: number;
+           static publicMethod(): void;
+         }`,
+      );
+    });
+    it('strips munged members and their unused imports', async () => {
+      await expectTranslate(
+        `import PrivateDep from 'PrivateDep';
+         import PublicDep from 'PublicDep';
+         export class A {
+           _private: PrivateDep;
+           public: PublicDep;
+         }`,
+        `import PublicDep from 'PublicDep';
+         declare export class A {
+           public: PublicDep;
+         }`,
+      );
+    });
+    it('keeps munged members when mungeUnderscores is false', async () => {
+      const code = `export class A {
+           _private: string = '';
+           public: string = '';
+         }`;
+      const result = await translate(code, {mungeUnderscores: false});
+      expect(result).toBe(
+        trimToBeCode(
+          `declare export class A {
+             _private: string;
+             public: string;
+           }`,
+        ),
       );
     });
   });
