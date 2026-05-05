@@ -1,3 +1,8 @@
+## 0.36.1
+
+### `hermes-parser`
+- Fix `await` not recognized inside `async component` bodies
+
 ## 0.36.0
 
 ### `hermes-estree`
