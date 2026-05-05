@@ -1382,11 +1382,14 @@ function convertComponentParameters(
             context,
           );
 
-          const resultParam = t.ComponentTypeParameter({
-            name: asDetachedNode(param.name),
-            typeAnnotation: typeAnnotationType,
-            optional,
-          });
+          const resultParam = inheritComments(
+            param,
+            t.ComponentTypeParameter({
+              name: asDetachedNode(param.name),
+              typeAnnotation: typeAnnotationType,
+              optional,
+            }),
+          );
 
           return [
             [...resultParams, resultParam],
@@ -1420,14 +1423,18 @@ function convertComponentParameters(
             context,
           );
 
-          const resultRestParam = t.ComponentTypeParameter({
-            name: t.Identifier({
-              name: argument.type === 'Identifier' ? argument.name : 'rest',
+          const restName =
+            argument.type === 'Identifier' ? argument.name : 'rest';
+          const restOptional =
+            argument.type === 'Identifier' ? argument.optional : false;
+          const resultRestParam = inheritComments(
+            param,
+            t.ComponentTypeParameter({
+              name: t.Identifier({name: restName}),
+              typeAnnotation: typeAnnotationType,
+              optional: restOptional,
             }),
-            typeAnnotation: typeAnnotationType,
-            optional:
-              argument.type === 'Identifier' ? argument.optional : false,
-          });
+          );
 
           return [resultParams, resultRestParam, [...paramsDeps, ...typeDeps]];
         }

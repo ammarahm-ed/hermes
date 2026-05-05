@@ -755,6 +755,22 @@ describe('flowToFlowDef', () => {
         `declare export component Foo(foo: string, 'bar'?: string);`,
       );
     });
+    it('params with comments', async () => {
+      await expectTranslate(
+        `export component Foo(
+          /** The foo param */
+          foo: string,
+          /** The bar param */
+          bar?: number,
+        ) {}`,
+        `declare export component Foo(
+          /** The foo param */
+          foo: string,
+          /** The bar param */
+          bar?: number,
+        );`,
+      );
+    });
     it('default params', async () => {
       await expectTranslate(
         `export component Foo(foo: string = '') {}`,
