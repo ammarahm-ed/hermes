@@ -48,6 +48,7 @@ import type {
   ObjectExpression,
   ObjectTypeAnnotation,
   ObjectTypeProperty,
+  ObjectTypeSpreadProperty,
   OpaqueType,
   QualifiedTypeIdentifier,
   QualifiedTypeofIdentifier,
@@ -1358,34 +1359,61 @@ type TranslatedComponentParametersResults = [
   TranslatedDeps,
 ];
 
+function hasNonIdentifierStringLiteralParam(
+  params: $ReadOnlyArray<ComponentParameter | RestElement>,
+): boolean {
+  return params.some(
+    param =>
+      param.type === 'ComponentParameter' &&
+      isStringLiteral(param.name) &&
+      !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(param.name.value),
+  );
+}
+
+function extractParamTypeInfo(
+  param: ComponentParameter,
+  context: TranslationContext,
+): [boolean, BindingName, TranslatedResult<TypeAnnotationType>] {
+  let optional = false;
+  let local = param.local;
+  if (local.type === 'AssignmentPattern') {
+    local = local.left;
+    optional = true;
+  }
+  if (!optional && local.type === 'Identifier') {
+    optional = local.optional;
+  }
+  return [
+    optional,
+    local,
+    convertTypeAnnotation(local.typeAnnotation, param, context),
+  ];
+}
+
 function convertComponentParameters(
   params: $ReadOnlyArray<ComponentParameter | RestElement>,
   context: TranslationContext,
 ): TranslatedComponentParametersResults {
+  if (hasNonIdentifierStringLiteralParam(params)) {
+    return convertComponentParametersToPropsObject(params, context);
+  }
+
   return params.reduce<TranslatedComponentParametersResults>(
     ([resultParams, restParam, paramsDeps], param) => {
       switch (param.type) {
         case 'ComponentParameter': {
-          let optional = false;
-          let local = param.local;
-          if (local.type === 'AssignmentPattern') {
-            local = local.left;
-            optional = true;
-          }
-          if (!optional && local.type === 'Identifier') {
-            optional = local.optional;
-          }
+          const [optional, _local, [typeAnnotationType, typeDeps]] =
+            extractParamTypeInfo(param, context);
 
-          const [typeAnnotationType, typeDeps] = convertTypeAnnotation(
-            local.typeAnnotation,
-            param,
-            context,
-          );
-
+          const name =
+            isStringLiteral(param.name) &&
+            /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(param.name.value)
+              ? t.Identifier({name: param.name.value})
+              : asDetachedNode(param.name);
           const resultParam = inheritComments(
             param,
             t.ComponentTypeParameter({
-              name: asDetachedNode(param.name),
+              name,
               typeAnnotation: typeAnnotationType,
               optional,
             }),
@@ -1442,6 +1470,72 @@ function convertComponentParameters(
     },
     [[], null, []],
   );
+}
+
+function convertComponentParametersToPropsObject(
+  params: $ReadOnlyArray<ComponentParameter | RestElement>,
+  context: TranslationContext,
+): TranslatedComponentParametersResults {
+  const properties: Array<
+    DetachedNode<ObjectTypeProperty | ObjectTypeSpreadProperty>,
+  > = [];
+  const allDeps: Array<Dep> = [];
+
+  for (const param of params) {
+    if (param.type === 'RestElement') {
+      const argument = param.argument;
+      if (
+        argument.type !== 'AssignmentPattern' &&
+        argument.type !== 'ArrayPattern' &&
+        argument.type !== 'RestElement'
+      ) {
+        const [typeAnnotationType, typeDeps] = convertTypeAnnotation(
+          argument.typeAnnotation,
+          argument,
+          context,
+        );
+        allDeps.push(...typeDeps);
+        properties.push(
+          t.ObjectTypeSpreadProperty({argument: typeAnnotationType}),
+        );
+      }
+      continue;
+    }
+
+    const [optional, _local, [typeAnnotationType, typeDeps]] =
+      extractParamTypeInfo(param, context);
+    allDeps.push(...typeDeps);
+
+    properties.push(
+      inheritComments(
+        param,
+        t.ObjectTypePropertySignature({
+          key: asDetachedNode(param.name),
+          value: typeAnnotationType,
+          optional,
+          static: false,
+          variance: null,
+        }),
+      ),
+    );
+  }
+
+  const propsType = t.ObjectTypeAnnotation({
+    inexact: false,
+    exact: false,
+    properties,
+    indexers: [],
+    callProperties: [],
+    internalSlots: [],
+  });
+
+  const restParam = t.ComponentTypeParameter({
+    name: t.Identifier({name: 'props'}),
+    typeAnnotation: propsType,
+    optional: false,
+  });
+
+  return [[], restParam, allDeps];
 }
 
 function convertHookDeclaration(

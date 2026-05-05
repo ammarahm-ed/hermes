@@ -752,7 +752,19 @@ describe('flowToFlowDef', () => {
     it('params', async () => {
       await expectTranslate(
         `export component Foo(foo: string, 'bar' as BAR?: string) {}`,
-        `declare export component Foo(foo: string, 'bar'?: string);`,
+        `declare export component Foo(foo: string, bar?: string);`,
+      );
+    });
+    it('params with identifier-safe string literal names use individual params', async () => {
+      await expectTranslate(
+        `export component Foo(foo: string, 'bar' as bar?: string, 'baz' as qux: number) {}`,
+        `declare export component Foo(foo: string, bar?: string, baz: number);`,
+      );
+    });
+    it('params with non-identifier string literal names use props object', async () => {
+      await expectTranslate(
+        `export component Foo(foo: string, 'data-bar' as dataBar?: number) {}`,
+        `declare export component Foo(...props: {foo: string, 'data-bar'?: number});`,
       );
     });
     it('params with comments', async () => {
@@ -781,6 +793,26 @@ describe('flowToFlowDef', () => {
       await expectTranslate(
         `export component Foo(...foo: {...}) {}`,
         `declare export component Foo(...foo: {...});`,
+      );
+    });
+    it('params with rest param', async () => {
+      await expectTranslate(
+        `export component Foo(foo: string, ...rest: {bar: number}) {}`,
+        `declare export component Foo(foo: string, ...rest: {bar: number});`,
+      );
+    });
+    it('non-identifier string literal params with rest param', async () => {
+      await expectTranslate(
+        `export component Foo('data-x' as dataX: string, ...rest: {bar: number}) {}`,
+        `declare export component Foo(...props: {'data-x': string, ...{bar: number}});`,
+      );
+    });
+    it('non-identifier string literal params with typed rest param', async () => {
+      await expectTranslate(
+        `type Props = {bar: number};
+         export component Foo('data-x' as dataX: string, ...rest: Props) {}`,
+        `type Props = {bar: number};
+         declare export component Foo(...props: {'data-x': string, ...Props});`,
       );
     });
     it('destructured rest param', async () => {
