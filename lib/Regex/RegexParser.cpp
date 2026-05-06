@@ -1355,15 +1355,14 @@ class Parser {
             setError(constants::ErrorType::InvalidPropertyName);
             return;
           }
-          auto bracket = re_->startBracketList(
-              c == 'P' /* invert */, curFlags_.ignoreCase);
+          auto bracket = re_->startBracketList(false, curFlags_.ignoreCase);
           auto codePointRanges =
               unicodePropertyRanges(propertyName, propertyValue);
           if (codePointRanges.empty()) {
             setError(constants::ErrorType::InvalidPropertyName);
             return;
           }
-          bracket->addCodePointRanges(codePointRanges);
+          bracket->addCodePointRanges(codePointRanges, c == 'P');
           break;
         } else {
           // When not in Unicode mode, this is just a regular `p` or `P`

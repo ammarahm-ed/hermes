@@ -186,3 +186,7 @@ print(/[\P{ASCII}]/u.test(String.fromCodePoint(0x10FFFF)));
 // We must handle unsorted, overlapping pool data (coming from Script_Extensions) correctly.
 print(/[\P{Script_Extensions=Arabic}]/u.test('a'));
 // CHECK-NEXT: true
+
+// \P with case-insensitive matching in a modifier group.
+print(/(?i:\P{Lu})/u.test("A"));
+// CHECK-NEXT: true
