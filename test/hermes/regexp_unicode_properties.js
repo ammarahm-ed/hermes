@@ -182,3 +182,7 @@ print(/\p{Script_Extensions=Lao}/u.exec("\u{0E81}") !== null);
 // U+10FFFF must be included in inverted property ranges inside a bracket.
 print(/[\P{ASCII}]/u.test(String.fromCodePoint(0x10FFFF)));
 // CHECK-NEXT: true
+
+// We must handle unsorted, overlapping pool data (coming from Script_Extensions) correctly.
+print(/[\P{Script_Extensions=Arabic}]/u.test('a'));
+// CHECK-NEXT: true

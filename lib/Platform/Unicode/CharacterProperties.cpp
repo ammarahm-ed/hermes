@@ -360,25 +360,25 @@ void addRangeArrayPoolToBracket(
     CodePointSet *receiver,
     const llvh::ArrayRef<UnicodeRangePoolRef> rangeArrayPool,
     bool inverted) {
-  for (auto rangePoolRef : rangeArrayPool) {
-    auto rangePool = llvh::ArrayRef<UnicodeRange>{
-        &UNICODE_RANGE_POOL[rangePoolRef.offset], rangePoolRef.size};
-
-    if (inverted) {
-      uint32_t last = 0;
-      for (auto range : rangePool) {
-        receiver->add(CodePointRange{last, range.first - last});
-        last = range.second + 1;
-      }
-      // Add the final range covering [last, UNICODE_MAX_VALUE].
-      if (last <= UNICODE_MAX_VALUE)
-        receiver->add(CodePointRange{last, UNICODE_MAX_VALUE - last + 1});
-    } else {
+  auto addAllRanges = [&rangeArrayPool](CodePointSet *target) {
+    for (auto rangePoolRef : rangeArrayPool) {
+      auto rangePool = llvh::ArrayRef<UnicodeRange>{
+          &UNICODE_RANGE_POOL[rangePoolRef.offset], rangePoolRef.size};
       for (auto range : rangePool) {
         const uint32_t length = range.second - range.first + 1;
-        receiver->add(CodePointRange{range.first, length});
+        target->add(CodePointRange{range.first, length});
       }
     }
+  };
+
+  if (inverted) {
+    CodePointSet positive;
+    addAllRanges(&positive);
+    positive.invert(UNICODE_MAX_VALUE);
+    for (const auto &range : positive.ranges())
+      receiver->add(range);
+  } else {
+    addAllRanges(receiver);
   }
 }
 
