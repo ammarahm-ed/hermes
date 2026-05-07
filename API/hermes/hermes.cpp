@@ -247,6 +247,9 @@ class HermesRootAPI final : public IHermesRootAPI, public ISetFatalHandler {
 };
 
 namespace {
+using EventLoopCallback = const std::function<void()>;
+using ScheduleCallbackFunc = std::function<void(EventLoopCallback)>;
+
 class HermesRuntimeImpl final : public HermesRuntime,
                                 private IHermesTestHelpers,
                                 private InstallHermesFatalErrorHandler,
@@ -254,6 +257,7 @@ class HermesRuntimeImpl final : public HermesRuntime,
 #ifdef JSI_UNSTABLE
     ,
                                 public jsi::ISerialization,
+                                public ISetEventLoopControl,
                                 private IHermesTracingHelpers
 #endif
 {
@@ -715,6 +719,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
       const jsi::Serialized &serialized) const override;
   const std::shared_ptr<jsi::Serialized> makeSerialized(
       vm::SerializedValue &value) const override;
+
+  void setEventLoopControl(IEventLoopControl *eventLoopControl) override;
+  IEventLoopControl *getEventLoopControl() override;
 #endif
 
   // Concrete declarations of jsi::Runtime pure virtual methods
@@ -1351,6 +1358,15 @@ class HermesRuntimeImpl final : public HermesRuntime,
   /// before this member is destroyed to ensure all clean-up tasks are queued
   /// before the executor drains and joins.
   ::hermes::SerialExecutor finalizerExecutor_;
+
+#ifdef JSI_UNSTABLE
+  /// Provided by the integrator for the Runtime to schedule a task. This is
+  /// called whenever the Hermes Runtime wants to run a task, but should not
+  /// determine when it should be run. This is particularly useful for the
+  /// Worker implementation, where the Worker will queue a task for the main
+  /// thread to check a posted message.
+  IEventLoopControl *eventLoopControl_{nullptr};
+#endif
 };
 } // namespace
 
@@ -1579,6 +1595,8 @@ jsi::ICast *HermesRuntimeImpl::castInterface(const jsi::UUID &interfaceUUID) {
     return static_cast<ISerialization *>(this);
   } else if (interfaceUUID == IHermesTracingHelpers::uuid) {
     return static_cast<IHermesTracingHelpers *>(this);
+  } else if (interfaceUUID == ISetEventLoopControl::uuid) {
+    return static_cast<ISetEventLoopControl *>(this);
   }
 #endif
   return nullptr;
@@ -1672,6 +1690,15 @@ const vm::SerializedValue *HermesRuntimeImpl::getHermesSerializedValue(
 const std::shared_ptr<jsi::Serialized> HermesRuntimeImpl::makeSerialized(
     ::hermes::vm::SerializedValue &value) const {
   return std::make_unique<HermesSerialized>(value);
+}
+
+void HermesRuntimeImpl::setEventLoopControl(
+    IEventLoopControl *eventLoopControl) {
+  eventLoopControl_ = eventLoopControl;
+}
+
+IEventLoopControl *HermesRuntimeImpl::getEventLoopControl() {
+  return eventLoopControl_;
 }
 #endif
 
