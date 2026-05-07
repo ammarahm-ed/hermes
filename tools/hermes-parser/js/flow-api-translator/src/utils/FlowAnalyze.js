@@ -38,6 +38,11 @@ export function analyzeTypeDependencies(
         const variable = context.referenceMap.get(node);
         if (variable != null) {
           deps.push(variable.name);
+        } else if (context.variableMap.has(node.name)) {
+          // The scope manager may not track type references to value
+          // variables (e.g. `const Foo = require('foo')` used as `Foo`
+          // in a GenericTypeAnnotation). Fall back to variableMap.
+          deps.push(node.name);
         }
       }
     },

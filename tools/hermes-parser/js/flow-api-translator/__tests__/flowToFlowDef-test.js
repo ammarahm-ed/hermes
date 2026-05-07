@@ -613,6 +613,59 @@ describe('flowToFlowDef', () => {
     });
   });
   describe('VariableDeclaration', () => {
+    it('default require of class used as type', async () => {
+      await expectTranslate(
+        `const MyClass = require('MyClass');
+         declare export class Wrapper {
+           getInner(): MyClass<string>;
+         }`,
+        `import MyClass from 'MyClass';
+         declare export class Wrapper {
+           getInner(): MyClass<string>;
+         }`,
+      );
+    });
+    it('default require of function used with typeof', async () => {
+      await expectTranslate(
+        `const processData = require('processData');
+         export type Pipeline = {
+           transform: typeof processData,
+           label: string,
+         };`,
+        `import processData from 'processData';
+         export type Pipeline = {
+           transform: typeof processData,
+           label: string,
+         };`,
+      );
+    });
+    it('default require transitive dep', async () => {
+      await expectTranslate(
+        `const Foo = require('foo');
+         const Bar = Foo;
+         export type Baz = typeof Bar;`,
+        `import Foo from 'foo';
+         declare const Bar: typeof Foo;
+         export type Baz = typeof Bar;`,
+      );
+    });
+    it('default require member access', async () => {
+      await expectTranslate(
+        `const Utils = require('Utils');
+         const normalize = Utils.normalize;
+         export type Transformer = typeof normalize;`,
+        `import Utils from 'Utils';
+         declare const normalize: typeof Utils.normalize;
+         export type Transformer = typeof normalize;`,
+      );
+    });
+    it('unused default require is stripped', async () => {
+      await expectTranslate(
+        `const Foo = require('foo');
+         export type Bar = string;`,
+        `export type Bar = string;`,
+      );
+    });
     it('basic type parameter', async () => {
       await expectTranslate(
         `export const foo: number = 1;`,

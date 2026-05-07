@@ -409,6 +409,10 @@ function convertStatement(
       return [result, deps];
     }
     case 'VariableDeclaration': {
+      const requireImport = convertRequireToImport(stmt);
+      if (requireImport != null) {
+        return requireImport;
+      }
       const [result, deps] = convertVariableDeclaration(stmt, context);
       return [result, deps];
     }
@@ -936,6 +940,47 @@ function convertVariableDeclaration(
       kind: stmt.kind,
     }),
     annotDeps,
+  ];
+}
+
+function convertRequireToImport(
+  stmt: VariableDeclaration,
+): ?TranslatedResult<ProgramStatement> {
+  if (stmt.declarations.length !== 1) {
+    return null;
+  }
+  const decl = stmt.declarations[0];
+  const init = decl.init;
+  if (
+    init == null ||
+    init.type !== 'CallExpression' ||
+    init.callee.type !== 'Identifier' ||
+    init.callee.name !== 'require' ||
+    init.arguments.length !== 1
+  ) {
+    return null;
+  }
+  const sourceArg = init.arguments[0];
+  if (!isStringLiteral(sourceArg)) {
+    return null;
+  }
+  const id = decl.id;
+  if (id.type !== 'Identifier') {
+    return null;
+  }
+
+  return [
+    t.ImportDeclaration({
+      importKind: 'value',
+      source: asDetachedNode(sourceArg),
+      specifiers: [
+        t.ImportDefaultSpecifier({
+          local: t.Identifier({name: id.name}),
+        }),
+      ],
+      attributes: [],
+    }),
+    [],
   ];
 }
 
