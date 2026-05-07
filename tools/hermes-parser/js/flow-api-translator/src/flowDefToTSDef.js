@@ -35,11 +35,11 @@ const DUMMY_LOC: FlowESTree.SourceLocation = {
   end: {line: 1, column: 0},
 };
 
-type LooseOmit<O: interface {}, K: $Keys<$FlowFixMe>> = Pick<
+type LooseOmit<O extends interface {}, K extends keyof $FlowFixMe> = Pick<
   O,
-  Exclude<$Keys<O>, K>,
+  Exclude<keyof O, K>,
 >;
-function constructFlowNode<T: FlowESTree.BaseNode>(
+function constructFlowNode<T extends FlowESTree.BaseNode>(
   node: LooseOmit<NoInfer<T>, 'parent'>,
 ): T {
   return node as $FlowFixMe;
@@ -47,11 +47,11 @@ function constructFlowNode<T: FlowESTree.BaseNode>(
 
 const cloneJSDocCommentsToNewNode =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  cloneJSDocCommentsToNewNodeOriginal as (mixed, mixed) => void;
+  cloneJSDocCommentsToNewNodeOriginal as (unknown, unknown) => void;
 
 const makeCommentOwnLine =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  makeCommentOwnLineOriginal as (string, mixed) => string;
+  makeCommentOwnLineOriginal as (string, unknown) => string;
 
 const VALID_REACT_IMPORTS = new Set<string>(['React', 'react']);
 
@@ -1605,9 +1605,9 @@ const getTransforms = (
       };
     },
     ComponentTypeParameters(
-      params: $ReadOnlyArray<FlowESTree.ComponentTypeParameter>,
+      params: ReadonlyArray<FlowESTree.ComponentTypeParameter>,
       rest: FlowESTree.ComponentTypeParameter | null,
-    ): $ReadOnlyArray<TSESTree.Parameter> {
+    ): ReadonlyArray<TSESTree.Parameter> {
       if (params.length === 0 && rest != null) {
         return [
           {
@@ -2112,7 +2112,7 @@ const getTransforms = (
 
       const assertHasExactlyNTypeParameters = (
         count: number,
-      ): $ReadOnlyArray<TSESTree.TypeNode> => {
+      ): ReadonlyArray<TSESTree.TypeNode> => {
         if (node.typeParameters != null) {
           if (node.typeParameters.params.length !== count) {
             throw translationError(
@@ -2143,7 +2143,7 @@ const getTransforms = (
       function assertHasTypeParametersInRange(
         min: number,
         max: number,
-      ): $ReadOnlyArray<TSESTree.TypeNode> {
+      ): ReadonlyArray<TSESTree.TypeNode> {
         const {typeParameters} = node;
         if (typeParameters == null) {
           if (min > 0) {
@@ -2640,7 +2640,7 @@ const getTransforms = (
       const hasReactImport = isReactImport(baseId, baseId.name);
       if (validReactImportOrGlobal || hasReactImport) {
         switch (fullTypeName) {
-          // TODO: In flow this is `ChildrenArray<T> = T | $ReadOnlyArray<ChildrenArray<T>>`.
+          // TODO: In flow this is `ChildrenArray<T> = T | ReadonlyArray<ChildrenArray<T>>`.
           // The recursive nature of it is rarely needed, so we're simplifying this for now
           // but omitting that aspect. Once we're able to provide utility types for our translations,
           // we should update this.
@@ -2937,7 +2937,7 @@ const getTransforms = (
               );
             }
 
-            const newParams = ((): $ReadOnlyArray<TSESTree.TypeNode> => {
+            const newParams = ((): ReadonlyArray<TSESTree.TypeNode> => {
               if (params.length === 1) {
                 return assertHasExactlyNTypeParameters(1);
               }

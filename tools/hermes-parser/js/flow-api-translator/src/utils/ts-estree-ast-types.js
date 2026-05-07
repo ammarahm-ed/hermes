@@ -41,20 +41,20 @@ interface BaseToken extends NodeOrTokenData {
 export type Accessibility = 'private' | 'protected' | 'public';
 export interface ArrayExpression extends BaseNode {
   +type: 'ArrayExpression';
-  +elements: $ReadOnlyArray<Expression | SpreadElement>;
+  +elements: ReadonlyArray<Expression | SpreadElement>;
 }
 export interface ArrayPattern extends BaseNode {
   +type: 'ArrayPattern';
-  +elements: $ReadOnlyArray<DestructuringPattern | null>;
+  +elements: ReadonlyArray<DestructuringPattern | null>;
   +typeAnnotation?: TSTypeAnnotation;
   +optional?: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export interface ArrowFunctionExpression extends BaseNode {
   +type: 'ArrowFunctionExpression';
   +generator: boolean;
   +id: null;
-  +params: $ReadOnlyArray<Parameter>;
+  +params: ReadonlyArray<Parameter>;
   +body: BlockStatement | Expression;
   +async: boolean;
   +expression: boolean;
@@ -89,7 +89,7 @@ export interface AssignmentPattern extends BaseNode {
   +right: Expression;
   +typeAnnotation?: TSTypeAnnotation;
   +optional?: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export interface AwaitExpression extends BaseNode {
   +type: 'AwaitExpression';
@@ -113,7 +113,7 @@ export interface BlockComment extends BaseToken {
 }
 export interface BlockStatement extends BaseNode {
   +type: 'BlockStatement';
-  +body: $ReadOnlyArray<Statement>;
+  +body: ReadonlyArray<Statement>;
 }
 export interface BooleanLiteral extends LiteralBase {
   +type: 'Literal';
@@ -130,7 +130,7 @@ export interface BreakStatement extends BaseNode {
 export interface CallExpression extends BaseNode {
   +type: 'CallExpression';
   +callee: LeftHandSideExpression;
-  +arguments: $ReadOnlyArray<CallExpressionArgument>;
+  +arguments: ReadonlyArray<CallExpressionArgument>;
   +typeParameters?: TSTypeParameterInstantiation;
   +optional: boolean;
 }
@@ -178,7 +178,7 @@ interface ClassBase extends BaseNode {
    * ```
    * This is always `undefined` for `ClassExpression`.
    */
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
   /**
    * The class's name.
    * - For a `ClassExpression` this may be `null` if the name is omitted.
@@ -190,7 +190,7 @@ interface ClassBase extends BaseNode {
    * The implemented interfaces for the class.
    * This is `undefined` if there are no implemented interfaces.
    */
-  +implements?: $ReadOnlyArray<TSClassImplements>;
+  +implements?: ReadonlyArray<TSClassImplements>;
   /**
    * The super class this class extends.
    */
@@ -208,7 +208,7 @@ interface ClassBase extends BaseNode {
 }
 export interface ClassBody extends BaseNode {
   +type: 'ClassBody';
-  +body: $ReadOnlyArray<ClassElement>;
+  +body: ReadonlyArray<ClassElement>;
 }
 export type ClassDeclaration =
   | ClassDeclarationWithName
@@ -321,7 +321,7 @@ export interface ExportAllDeclaration extends BaseNode {
    * export * from 'mod' assert { type: 'json' };
    * ```
    */
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   /**
    * The name for the exported items. `null` if no name is assigned.
    */
@@ -364,7 +364,7 @@ interface ExportNamedDeclarationBase extends BaseNode {
    * ```
    * This will be an empty array if `source` is `null`
    */
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   /**
    * The exported declaration.
    * ```
@@ -388,7 +388,7 @@ interface ExportNamedDeclarationBase extends BaseNode {
    * ```
    * This will be an empty array if `declaration` is not `null`
    */
-  +specifiers: $ReadOnlyArray<ExportSpecifier>;
+  +specifiers: ReadonlyArray<ExportSpecifier>;
 }
 export interface ExportNamedDeclarationAmbiguous
   extends ExportNamedDeclarationBase {
@@ -397,7 +397,7 @@ export interface ExportNamedDeclarationAmbiguous
 export interface ExportNamedDeclarationWithoutSourceWithSingle
   extends ExportNamedDeclarationBase {
   +type: 'ExportNamedDeclaration';
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   +declaration: NamedExportDeclarations;
   +source: null;
   +specifiers: [];
@@ -405,18 +405,18 @@ export interface ExportNamedDeclarationWithoutSourceWithSingle
 export interface ExportNamedDeclarationWithoutSourceWithMultiple
   extends ExportNamedDeclarationBase {
   +type: 'ExportNamedDeclaration';
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   +declaration: null;
   +source: null;
-  +specifiers: $ReadOnlyArray<ExportSpecifier>;
+  +specifiers: ReadonlyArray<ExportSpecifier>;
 }
 export interface ExportNamedDeclarationWithSource
   extends ExportNamedDeclarationBase {
   +type: 'ExportNamedDeclaration';
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   +declaration: null;
   +source: StringLiteral;
-  +specifiers: $ReadOnlyArray<ExportSpecifier>;
+  +specifiers: ReadonlyArray<ExportSpecifier>;
 }
 export interface ExportSpecifier extends BaseNode {
   +type: 'ExportSpecifier';
@@ -539,7 +539,7 @@ interface FunctionBase extends BaseNode {
   /**
    * The list of parameters declared for the function.
    */
-  +params: $ReadOnlyArray<Parameter>;
+  +params: ReadonlyArray<Parameter>;
   /**
    * The return type annotation for the function.
    * This is `undefined` if there is no return type declared.
@@ -585,7 +585,7 @@ export interface Identifier extends BaseNode {
   +name: string;
   +typeAnnotation?: TSTypeAnnotation;
   +optional?: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export interface IdentifierToken extends BaseToken {
   +type: 'Identifier';
@@ -613,7 +613,7 @@ export interface ImportDeclaration extends BaseNode {
    * import * from 'mod' assert { type: 'json' };
    * ```
    */
-  +assertions: $ReadOnlyArray<ImportAttribute>;
+  +assertions: ReadonlyArray<ImportAttribute>;
   /**
    * The kind of the import.
    */
@@ -633,7 +633,7 @@ export interface ImportDeclaration extends BaseNode {
    * import 'mod';
    * ```
    */
-  +specifiers: $ReadOnlyArray<ImportClause>;
+  +specifiers: ReadonlyArray<ImportClause>;
 }
 export interface ImportDefaultSpecifier extends BaseNode {
   +type: 'ImportDefaultSpecifier';
@@ -678,7 +678,7 @@ export interface JSXElement extends BaseNode {
   +type: 'JSXElement';
   +openingElement: JSXOpeningElement;
   +closingElement: JSXClosingElement | null;
-  +children: $ReadOnlyArray<JSXChild>;
+  +children: ReadonlyArray<JSXChild>;
 }
 export interface JSXEmptyExpression extends BaseNode {
   +type: 'JSXEmptyExpression';
@@ -695,7 +695,7 @@ export interface JSXFragment extends BaseNode {
   +type: 'JSXFragment';
   +openingFragment: JSXOpeningFragment;
   +closingFragment: JSXClosingFragment;
-  +children: $ReadOnlyArray<JSXChild>;
+  +children: ReadonlyArray<JSXChild>;
 }
 export interface JSXIdentifier extends BaseNode {
   +type: 'JSXIdentifier';
@@ -719,7 +719,7 @@ export interface JSXOpeningElement extends BaseNode {
   +typeParameters?: TSTypeParameterInstantiation;
   +selfClosing: boolean;
   +name: JSXTagNameExpression;
-  +attributes: $ReadOnlyArray<JSXAttribute | JSXSpreadAttribute>;
+  +attributes: ReadonlyArray<JSXAttribute | JSXSpreadAttribute>;
 }
 export interface JSXOpeningFragment extends BaseNode {
   +type: 'JSXOpeningFragment';
@@ -828,7 +828,7 @@ export type MethodDefinition =
 interface MethodDefinitionBase extends BaseNode {
   +accessibility?: Accessibility;
   +computed: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
   +key: PropertyName;
   +kind: 'constructor' | 'get' | 'method' | 'set';
   +optional?: boolean;
@@ -880,7 +880,7 @@ export type NamedExportDeclarations =
 export interface NewExpression extends BaseNode {
   +type: 'NewExpression';
   +callee: LeftHandSideExpression;
-  +arguments: $ReadOnlyArray<CallExpressionArgument>;
+  +arguments: ReadonlyArray<CallExpressionArgument>;
   +typeParameters?: TSTypeParameterInstantiation;
 }
 export type Node =
@@ -1067,16 +1067,16 @@ export interface NumericToken extends BaseToken {
 }
 export interface ObjectExpression extends BaseNode {
   +type: 'ObjectExpression';
-  +properties: $ReadOnlyArray<ObjectLiteralElement>;
+  +properties: ReadonlyArray<ObjectLiteralElement>;
 }
 export type ObjectLiteralElement = MethodDefinition | Property | SpreadElement;
 export type ObjectLiteralElementLike = ObjectLiteralElement;
 export interface ObjectPattern extends BaseNode {
   +type: 'ObjectPattern';
-  +properties: $ReadOnlyArray<Property | RestElement>;
+  +properties: ReadonlyArray<Property | RestElement>;
   +typeAnnotation?: TSTypeAnnotation;
   +optional?: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export type Parameter =
   | ArrayPattern
@@ -1118,10 +1118,10 @@ export interface PrivateIdentifier extends BaseNode {
 }
 export interface Program extends BaseNode {
   +type: 'Program';
-  +body: $ReadOnlyArray<ProgramStatement>;
+  +body: ReadonlyArray<ProgramStatement>;
   +sourceType: 'module' | 'script';
-  +comments?: $ReadOnlyArray<Comment>;
-  +tokens?: $ReadOnlyArray<Token>;
+  +comments?: ReadonlyArray<Comment>;
+  +tokens?: ReadonlyArray<Token>;
 }
 export type ProgramStatement =
   | ExportAllDeclaration
@@ -1158,7 +1158,7 @@ interface PropertyDefinitionBase extends BaseNode {
   +accessibility?: Accessibility;
   +computed: boolean;
   +declare: boolean;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
   +definite?: boolean;
   +key: PropertyName;
   +optional?: boolean;
@@ -1279,7 +1279,7 @@ export interface RestElement extends BaseNode {
   +typeAnnotation?: TSTypeAnnotation;
   +optional?: boolean;
   +value?: AssignmentPattern;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export interface ReturnStatement extends BaseNode {
   +type: 'ReturnStatement';
@@ -1287,7 +1287,7 @@ export interface ReturnStatement extends BaseNode {
 }
 export interface SequenceExpression extends BaseNode {
   +type: 'SequenceExpression';
-  +expressions: $ReadOnlyArray<Expression>;
+  +expressions: ReadonlyArray<Expression>;
 }
 export interface SourceLocation {
   /**
@@ -1338,7 +1338,7 @@ export type Statement =
   | WithStatement;
 export interface StaticBlock extends BaseNode {
   +type: 'StaticBlock';
-  +body: $ReadOnlyArray<Statement>;
+  +body: ReadonlyArray<Statement>;
 }
 export interface StringLiteral extends LiteralBase {
   +type: 'Literal';
@@ -1353,12 +1353,12 @@ export interface Super extends BaseNode {
 export interface SwitchCase extends BaseNode {
   +type: 'SwitchCase';
   +test: Expression | null;
-  +consequent: $ReadOnlyArray<Statement>;
+  +consequent: ReadonlyArray<Statement>;
 }
 export interface SwitchStatement extends BaseNode {
   +type: 'SwitchStatement';
   +discriminant: Expression;
-  +cases: $ReadOnlyArray<SwitchCase>;
+  +cases: ReadonlyArray<SwitchCase>;
 }
 export interface TaggedTemplateExpression extends BaseNode {
   +type: 'TaggedTemplateExpression';
@@ -1376,8 +1376,8 @@ export interface TemplateElement extends BaseNode {
 }
 export interface TemplateLiteral extends BaseNode {
   +type: 'TemplateLiteral';
-  +quasis: $ReadOnlyArray<TemplateElement>;
-  +expressions: $ReadOnlyArray<Expression>;
+  +quasis: ReadonlyArray<TemplateElement>;
+  +expressions: ReadonlyArray<Expression>;
 }
 export interface TemplateToken extends BaseToken {
   +type: 'Template';
@@ -1518,8 +1518,8 @@ export interface TSEnumDeclaration extends BaseNode {
   /**
    * The enum members.
    */
-  +members: $ReadOnlyArray<TSEnumMember>;
-  +modifiers?: $ReadOnlyArray<Modifier>;
+  +members: ReadonlyArray<TSEnumMember>;
+  +modifiers?: ReadonlyArray<Modifier>;
 }
 export type TSEnumMember =
   | TSEnumMemberComputedName
@@ -1563,7 +1563,7 @@ export interface TSExternalModuleReference extends BaseNode {
   +expression: Expression;
 }
 interface TSFunctionSignatureBase extends BaseNode {
-  +params: $ReadOnlyArray<Parameter>;
+  +params: ReadonlyArray<Parameter>;
   +returnType?: TSTypeAnnotation;
   +typeParameters?: TSTypeParameterDeclaration;
 }
@@ -1614,7 +1614,7 @@ export interface TSIndexSignature extends BaseNode {
   +type: 'TSIndexSignature';
   +accessibility?: Accessibility;
   +export?: boolean;
-  +parameters: $ReadOnlyArray<Parameter>;
+  +parameters: ReadonlyArray<Parameter>;
   +readonly?: boolean;
   +static?: boolean;
   +typeAnnotation?: TSTypeAnnotation;
@@ -1630,7 +1630,7 @@ export interface TSInstantiationExpression extends BaseNode {
 }
 export interface TSInterfaceBody extends BaseNode {
   +type: 'TSInterfaceBody';
-  +body: $ReadOnlyArray<TypeElement>;
+  +body: ReadonlyArray<TypeElement>;
 }
 export interface TSInterfaceDeclaration extends BaseNode {
   +type: 'TSInterfaceDeclaration';
@@ -1646,12 +1646,12 @@ export interface TSInterfaceDeclaration extends BaseNode {
   /**
    * The types this interface `extends`
    */
-  +extends?: $ReadOnlyArray<TSInterfaceHeritage>;
+  +extends?: ReadonlyArray<TSInterfaceHeritage>;
   /**
    * The name of this interface
    */
   +id: Identifier;
-  +implements?: $ReadOnlyArray<TSInterfaceHeritage>;
+  +implements?: ReadonlyArray<TSInterfaceHeritage>;
   /**
    * The generic type parameters declared for the interface.
    * This is `undefined` if there are no generic type parameters declared.
@@ -1663,7 +1663,7 @@ export interface TSInterfaceHeritage extends TSHeritageBase {
 }
 export interface TSIntersectionType extends BaseNode {
   +type: 'TSIntersectionType';
-  +types: $ReadOnlyArray<TypeNode>;
+  +types: ReadonlyArray<TypeNode>;
 }
 export interface TSIntrinsicKeyword extends BaseNode {
   +type: 'TSIntrinsicKeyword';
@@ -1691,7 +1691,7 @@ interface TSMethodSignatureBase extends BaseNode {
   +key: PropertyName;
   +kind: 'get' | 'method' | 'set';
   +optional?: boolean;
-  +params: $ReadOnlyArray<Parameter>;
+  +params: ReadonlyArray<Parameter>;
   +readonly?: boolean;
   +returnType?: TSTypeAnnotation;
   +static?: boolean;
@@ -1710,7 +1710,7 @@ export interface TSMethodSignatureNonComputedName
 }
 export interface TSModuleBlock extends BaseNode {
   +type: 'TSModuleBlock';
-  +body: $ReadOnlyArray<ProgramStatement>;
+  +body: ReadonlyArray<ProgramStatement>;
 }
 export interface TSModuleDeclaration extends BaseNode {
   +type: 'TSModuleDeclaration';
@@ -1743,7 +1743,7 @@ export interface TSModuleDeclaration extends BaseNode {
    * ```
    */
   +declare?: boolean;
-  +modifiers?: $ReadOnlyArray<Modifier>;
+  +modifiers?: ReadonlyArray<Modifier>;
 }
 export interface TSNamedTupleMember extends BaseNode {
   +type: 'TSNamedTupleMember';
@@ -1786,7 +1786,7 @@ export interface TSParameterProperty extends BaseNode {
   +export?: boolean;
   +override?: boolean;
   +parameter: AssignmentPattern | BindingName | RestElement;
-  +decorators?: $ReadOnlyArray<Decorator>;
+  +decorators?: ReadonlyArray<Decorator>;
 }
 export interface TSPrivateKeyword extends BaseNode {
   +type: 'TSPrivateKeyword';
@@ -1847,15 +1847,15 @@ export interface TSSymbolKeyword extends BaseNode {
 }
 export interface TSTemplateLiteralType extends BaseNode {
   +type: 'TSTemplateLiteralType';
-  +quasis: $ReadOnlyArray<TemplateElement>;
-  +types: $ReadOnlyArray<TypeNode>;
+  +quasis: ReadonlyArray<TemplateElement>;
+  +types: ReadonlyArray<TypeNode>;
 }
 export interface TSThisType extends BaseNode {
   +type: 'TSThisType';
 }
 export interface TSTupleType extends BaseNode {
   +type: 'TSTupleType';
-  +elementTypes: $ReadOnlyArray<TypeNode>;
+  +elementTypes: ReadonlyArray<TypeNode>;
 }
 export interface TSTypeAliasDeclaration extends BaseNode {
   +type: 'TSTypeAliasDeclaration';
@@ -1891,7 +1891,7 @@ export interface TSTypeAssertion extends BaseNode {
 }
 export interface TSTypeLiteral extends BaseNode {
   +type: 'TSTypeLiteral';
-  +members: $ReadOnlyArray<TypeElement>;
+  +members: ReadonlyArray<TypeElement>;
 }
 export interface TSTypeOperator extends BaseNode {
   +type: 'TSTypeOperator';
@@ -1908,11 +1908,11 @@ export interface TSTypeParameter extends BaseNode {
 }
 export interface TSTypeParameterDeclaration extends BaseNode {
   +type: 'TSTypeParameterDeclaration';
-  +params: $ReadOnlyArray<TSTypeParameter>;
+  +params: ReadonlyArray<TSTypeParameter>;
 }
 export interface TSTypeParameterInstantiation extends BaseNode {
   +type: 'TSTypeParameterInstantiation';
-  +params: $ReadOnlyArray<TypeNode>;
+  +params: ReadonlyArray<TypeNode>;
 }
 export interface TSTypePredicate extends BaseNode {
   +type: 'TSTypePredicate';
@@ -1940,7 +1940,7 @@ export interface TSUndefinedKeyword extends BaseNode {
 }
 export interface TSUnionType extends BaseNode {
   +type: 'TSUnionType';
-  +types: $ReadOnlyArray<TypeNode>;
+  +types: ReadonlyArray<TypeNode>;
 }
 export interface TSUnknownKeyword extends BaseNode {
   +type: 'TSUnknownKeyword';
@@ -2023,7 +2023,7 @@ export interface VariableDeclaration extends BaseNode {
    * let y, z;
    * ```
    */
-  +declarations: $ReadOnlyArray<VariableDeclarator>;
+  +declarations: ReadonlyArray<VariableDeclarator>;
   /**
    * Whether the declaration is `declare`d
    * ```

@@ -32,11 +32,11 @@ const DUMMY_COMMON = {
   parent: DUMMY_PARENT,
 };
 
-type LooseOmit<O: interface {}, K: $Keys<$FlowFixMe>> = Pick<
+type LooseOmit<O extends interface {}, K extends keyof $FlowFixMe> = Pick<
   O,
-  Exclude<$Keys<O>, K>,
+  Exclude<keyof O, K>,
 >;
-function constructFlowNode<T: FlowESTree.BaseNode>(
+function constructFlowNode<T extends FlowESTree.BaseNode>(
   node: LooseOmit<NoInfer<T>, 'parent'>,
 ): T {
   return {
@@ -47,7 +47,7 @@ function constructFlowNode<T: FlowESTree.BaseNode>(
 
 const makeCommentOwnLine =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  makeCommentOwnLineOriginal as (string, mixed) => string;
+  makeCommentOwnLineOriginal as (string, unknown) => string;
 
 export function TSDefToFlowDef(
   originalCode: string,
@@ -369,7 +369,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
       | FlowESTree.ExportNamedDeclaration
       | FlowESTree.DeclareExportDeclarationNamedWithDeclaration
       | FlowESTree.DeclareExportDeclarationNamedWithSpecifiers
-      | $ReadOnlyArray<
+      | ReadonlyArray<
           | FlowESTree.DeclareExportDeclarationNamedWithDeclaration
           | FlowESTree.TypeAlias
           | FlowESTree.DeclareNamespace
@@ -725,7 +725,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
     ):
       | FlowESTree.Statement
       | FlowESTree.ModuleDeclaration
-      | $ReadOnlyArray<FlowESTree.Statement | FlowESTree.ModuleDeclaration> {
+      | ReadonlyArray<FlowESTree.Statement | FlowESTree.ModuleDeclaration> {
       switch (node.type) {
         case 'BlockStatement':
           return Transform.BlockStatement(node);
@@ -789,7 +789,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
 
     static Statement(
       node: TSESTree.Statement,
-    ): FlowESTree.Statement | $ReadOnlyArray<FlowESTree.Statement> {
+    ): FlowESTree.Statement | ReadonlyArray<FlowESTree.Statement> {
       return Transform.AllStatement(node) as $FlowFixMe;
     }
 
@@ -935,7 +935,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
     }
 
     static _partitionAndTranslateTSFunctionParams(
-      tsParams: $ReadOnlyArray<TSESTree.Parameter>,
+      tsParams: ReadonlyArray<TSESTree.Parameter>,
     ): {
       thisParam: FlowESTree.FunctionTypeParam | null,
       restParam: FlowESTree.FunctionTypeParam | null,
@@ -2005,7 +2005,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
 
     static VariableDeclaration(
       node: TSESTree.VariableDeclaration,
-    ): $ReadOnlyArray<FlowESTree.DeclareVariable> {
+    ): ReadonlyArray<FlowESTree.DeclareVariable> {
       return node.declarations.map(decl => {
         if (decl.id.type !== 'Identifier') {
           throw translationError(

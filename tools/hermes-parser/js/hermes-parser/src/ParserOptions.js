@@ -29,7 +29,7 @@ export type ParserOptions = {
   },
 };
 
-export const ParserOptionsKeys: $ReadOnlySet<$Keys<ParserOptions>> = new Set([
+export const ParserOptionsKeys: ReadonlySet<$Keys<ParserOptions>> = new Set([
   'allowReturnOutsideFunction',
   'babel',
   'flow',

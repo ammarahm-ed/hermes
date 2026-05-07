@@ -54,7 +54,7 @@ import {createReplaceNodeMutation} from './mutations/ReplaceNode';
 import {createReplaceStatementWithManyMutation} from './mutations/ReplaceStatementWithMany';
 import {createModifyNodeInPlaceMutation} from './mutations/ModifyNodeInPlace';
 
-type Mutation = $ReadOnly<
+type Mutation = Readonly<
   | AddCommentsMutation
   | CloneCommentsToMutation
   | InsertStatementMutation
@@ -66,9 +66,9 @@ type Mutation = $ReadOnly<
   | ModifyNodeInPlaceMutation,
 >;
 
-type SingleOrArray<+T> = T | $ReadOnlyArray<T>;
+type SingleOrArray<+T> = T | ReadonlyArray<T>;
 
-type ReplaceNodeOptions = $ReadOnly<{
+type ReplaceNodeOptions = Readonly<{
   /**
    * Moves the comments from the target node to the nodetoReplaceWith.
    * Note that this does not *clone* comments, it moves them and clears out
@@ -77,7 +77,7 @@ type ReplaceNodeOptions = $ReadOnly<{
   keepComments?: boolean,
 }>;
 
-type TransformCloneAPIs = $ReadOnly<{
+type TransformCloneAPIs = Readonly<{
   /**
    * Shallowly clones the given node.
    *
@@ -95,8 +95,8 @@ type TransformCloneAPIs = $ReadOnly<{
    * in the AST, then use `deepCloneNode` instead.
    */
   shallowCloneNode: {
-    <T: ESNode>(node: T): DetachedNode<T>,
-    <T: ESNode>(node: ?T): DetachedNode<T> | null,
+    <T extends ESNode>(node: T): DetachedNode<T>,
+    <T extends ESNode>(node: ?T): DetachedNode<T> | null,
   },
 
   /**
@@ -109,10 +109,16 @@ type TransformCloneAPIs = $ReadOnly<{
    * {@see shallowCloneNode}
    */
   shallowCloneArray: {
-    <T: ESNode>(node: $ReadOnlyArray<T>): $ReadOnlyArray<DetachedNode<T>>,
-    <T: ESNode>(node: ?$ReadOnlyArray<T>): ?$ReadOnlyArray<DetachedNode<T>>,
-    <T: ESNode>(node: $ReadOnlyArray<?T>): $ReadOnlyArray<DetachedNode<?T>>,
-    <T: ESNode>(node: ?$ReadOnlyArray<?T>): ?$ReadOnlyArray<DetachedNode<?T>>,
+    <T extends ESNode>(node: ReadonlyArray<T>): ReadonlyArray<DetachedNode<T>>,
+    <T extends ESNode>(
+      node: ?ReadonlyArray<T>,
+    ): ?ReadonlyArray<DetachedNode<T>>,
+    <T extends ESNode>(
+      node: ReadonlyArray<?T>,
+    ): ReadonlyArray<DetachedNode<?T>>,
+    <T extends ESNode>(
+      node: ?ReadonlyArray<?T>,
+    ): ?ReadonlyArray<DetachedNode<?T>>,
   },
 
   /**
@@ -123,8 +129,8 @@ type TransformCloneAPIs = $ReadOnly<{
    * result in a lot of work being done.
    */
   deepCloneNode: {
-    <T: ESNode>(node: T): DetachedNode<T>,
-    <T: ESNode>(node: ?T): DetachedNode<T> | null,
+    <T extends ESNode>(node: T): DetachedNode<T>,
+    <T extends ESNode>(node: ?T): DetachedNode<T> | null,
   },
 
   /**
@@ -135,7 +141,7 @@ type TransformCloneAPIs = $ReadOnly<{
   deepCloneNodeWithOverrides: TransformCloneSignatures,
 }>;
 
-type TransformCommentAPIs = $ReadOnly<{
+type TransformCommentAPIs = Readonly<{
   /**
    * Gets all of the comments attached to the given node.
    */
@@ -199,7 +205,7 @@ type TransformCommentAPIs = $ReadOnly<{
   removeComments: (comments: SingleOrArray<Comment>) => void,
 }>;
 
-type TransformInsertAPIs = $ReadOnly<{
+type TransformInsertAPIs = Readonly<{
   /**
    * Insert `nodeToInsert` after the `target` statement.
    * The inserted nodes will be kept in the order given.
@@ -223,7 +229,7 @@ type TransformInsertAPIs = $ReadOnly<{
   ) => void,
 }>;
 
-type TransformModifyAPIs = $ReadOnly<{
+type TransformModifyAPIs = Readonly<{
   /**
    * Modifies a given node in place.
    * This is equivalent to doing a replace with a shallow clone with overrides.
@@ -231,7 +237,7 @@ type TransformModifyAPIs = $ReadOnly<{
   modifyNodeInPlace: TransformModifySignatures,
 }>;
 
-type TransformRemoveAPIs = $ReadOnly<{
+type TransformRemoveAPIs = Readonly<{
   /**
    * Removes a given node from the AST.
    * The set of thigns that can be removed is intentionally restricted by types.
@@ -245,7 +251,7 @@ type TransformRemoveAPIs = $ReadOnly<{
   removeStatement: (node: RemoveStatementMutation['node']) => void,
 }>;
 
-type TransformReplaceAPIs = $ReadOnly<{
+type TransformReplaceAPIs = Readonly<{
   /**
    * Replace the `target` node with the `nodeToReplaceWith` node.
    * This simply does an in-place replacement in the AST.
@@ -295,7 +301,7 @@ type TransformReplaceAPIs = $ReadOnly<{
    */
   replaceStatementWithMany: (
     target: ReplaceStatementWithManyMutation['target'],
-    nodesToReplaceWith: $ReadOnlyArray<
+    nodesToReplaceWith: ReadonlyArray<
       MaybeDetachedNode<ReplaceStatementWithManyMutationNodes>,
     >,
     options?: {
@@ -309,8 +315,8 @@ type TransformReplaceAPIs = $ReadOnly<{
   ) => void,
 }>;
 
-export type TransformContextAdditions = $ReadOnly<{
-  mutations: $ReadOnlyArray<Mutation>,
+export type TransformContextAdditions = Readonly<{
+  mutations: ReadonlyArray<Mutation>,
   astWasMutated: boolean,
 
   ...TransformCommentAPIs,
@@ -345,7 +351,7 @@ export function getTransformContext(): TransformContextAdditions {
 
     shallowCloneNodeWithOverrides: ((
       node: ?ESNode,
-      newProps?: $ReadOnly<{...}> = {},
+      newProps?: Readonly<{...}> = {},
     ): // $FlowExpectedError[prop-missing]
     ?DetachedNode<ESNode> => {
       if (node == null) {
@@ -356,9 +362,9 @@ export function getTransformContext(): TransformContextAdditions {
     }) as $FlowFixMe as TransformCloneAPIs['shallowCloneNodeWithOverrides'],
 
     // $FlowFixMe[incompatible-exact]
-    shallowCloneArray: (<T: ESNode>(
-      nodes: ?$ReadOnlyArray<?T>,
-    ): ?$ReadOnlyArray<DetachedNode<?ESNode>> => {
+    shallowCloneArray: (<T extends ESNode>(
+      nodes: ?ReadonlyArray<?T>,
+    ): ?ReadonlyArray<DetachedNode<?ESNode>> => {
       if (nodes == null) {
         return null;
       }
@@ -384,7 +390,7 @@ export function getTransformContext(): TransformContextAdditions {
 
     deepCloneNodeWithOverrides: ((
       node: ?ESNode,
-      newProps?: $ReadOnly<{...}> = {},
+      newProps?: Readonly<{...}> = {},
     ): // $FlowExpectedError[prop-missing]
     ?DetachedNode<ESNode> => {
       if (node == null) {
@@ -529,7 +535,7 @@ export function getTransformContext(): TransformContextAdditions {
     }) as TransformReplaceAPIs['replaceStatementWithMany'],
   };
   const modifyAPIs: TransformModifyAPIs = {
-    modifyNodeInPlace: ((target: ESNode, newProps: $ReadOnly<{...}>): void => {
+    modifyNodeInPlace: ((target: ESNode, newProps: Readonly<{...}>): void => {
       const detachedProps = {};
       for (const [key, value] of Object.entries(newProps)) {
         if (isNode(value)) {
@@ -562,7 +568,7 @@ export function getTransformContext(): TransformContextAdditions {
   };
 }
 
-function toArray<T>(thing: SingleOrArray<T>): $ReadOnlyArray<T> {
+function toArray<T>(thing: SingleOrArray<T>): ReadonlyArray<T> {
   if (Array.isArray(thing)) {
     return thing as $FlowFixMe;
   }

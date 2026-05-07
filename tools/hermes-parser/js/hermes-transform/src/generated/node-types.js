@@ -17,7 +17,7 @@
 
 // lint directives to let us do some basic validation of generated files
 /* eslint no-undef: 'error', no-unused-vars: ['error', {vars: "local"}], no-redeclare: 'error' */
-/* global $NonMaybeType, Partial, $ReadOnly, $ReadOnlyArray, $FlowFixMe */
+/* global NonNullable, Partial, Readonly, ReadonlyArray, $FlowFixMe */
 
 'use strict';
 
@@ -228,14 +228,14 @@ import {
 export type AnyTypeAnnotationProps = {};
 
 export type ArrayExpressionProps = {
-  +elements: $ReadOnlyArray<
+  +elements: ReadonlyArray<
     MaybeDetachedNode<ArrayExpressionType['elements'][number]>,
   >,
   +trailingComma: ArrayExpressionType['trailingComma'],
 };
 
 export type ArrayPatternProps = {
-  +elements: $ReadOnlyArray<
+  +elements: ReadonlyArray<
     MaybeDetachedNode<ArrayPatternType['elements'][number]>,
   >,
   +typeAnnotation?: ?MaybeDetachedNode<ArrayPatternType['typeAnnotation']>,
@@ -295,7 +295,7 @@ export type BreakStatementProps = {
 export type CallExpressionProps = {
   +callee: MaybeDetachedNode<CallExpressionType['callee']>,
   +typeArguments?: ?MaybeDetachedNode<CallExpressionType['typeArguments']>,
-  +arguments: $ReadOnlyArray<
+  +arguments: ReadonlyArray<
     MaybeDetachedNode<CallExpressionType['arguments'][number]>,
   >,
 };
@@ -310,7 +310,7 @@ export type ChainExpressionProps = {
 };
 
 export type ClassBodyProps = {
-  +body: $ReadOnlyArray<MaybeDetachedNode<ClassBodyType['body'][number]>>,
+  +body: ReadonlyArray<MaybeDetachedNode<ClassBodyType['body'][number]>>,
 };
 
 export type ClassExpressionProps = {
@@ -320,10 +320,10 @@ export type ClassExpressionProps = {
   +superTypeArguments?: ?MaybeDetachedNode<
     ClassExpressionType['superTypeArguments'],
   >,
-  +implements: $ReadOnlyArray<
+  +implements: ReadonlyArray<
     MaybeDetachedNode<ClassExpressionType['implements'][number]>,
   >,
-  +decorators: $ReadOnlyArray<
+  +decorators: ReadonlyArray<
     MaybeDetachedNode<ClassExpressionType['decorators'][number]>,
   >,
   +body: MaybeDetachedNode<ClassExpressionType['body']>,
@@ -336,7 +336,7 @@ export type ClassImplementsProps = {
 
 export type ComponentDeclarationProps = {
   +id: MaybeDetachedNode<ComponentDeclarationType['id']>,
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<ComponentDeclarationType['params'][number]>,
   >,
   +body: MaybeDetachedNode<ComponentDeclarationType['body']>,
@@ -354,7 +354,7 @@ export type ComponentParameterProps = {
 };
 
 export type ComponentTypeAnnotationProps = {
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<ComponentTypeAnnotationType['params'][number]>,
   >,
   +rest?: ?MaybeDetachedNode<ComponentTypeAnnotationType['rest']>,
@@ -394,21 +394,19 @@ export type DebuggerStatementProps = {};
 export type DeclareClassProps = {
   +id: MaybeDetachedNode<DeclareClassType['id']>,
   +typeParameters?: ?MaybeDetachedNode<DeclareClassType['typeParameters']>,
-  +extends: $ReadOnlyArray<
+  +extends: ReadonlyArray<
     MaybeDetachedNode<DeclareClassType['extends'][number]>,
   >,
-  +implements: $ReadOnlyArray<
+  +implements: ReadonlyArray<
     MaybeDetachedNode<DeclareClassType['implements'][number]>,
   >,
-  +mixins: $ReadOnlyArray<
-    MaybeDetachedNode<DeclareClassType['mixins'][number]>,
-  >,
+  +mixins: ReadonlyArray<MaybeDetachedNode<DeclareClassType['mixins'][number]>>,
   +body: MaybeDetachedNode<DeclareClassType['body']>,
 };
 
 export type DeclareComponentProps = {
   +id: MaybeDetachedNode<DeclareComponentType['id']>,
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<DeclareComponentType['params'][number]>,
   >,
   +rest?: ?MaybeDetachedNode<DeclareComponentType['rest']>,
@@ -432,7 +430,7 @@ export type DeclareExportAllDeclarationProps = {
 export type DeclareInterfaceProps = {
   +id: MaybeDetachedNode<DeclareInterfaceType['id']>,
   +typeParameters?: ?MaybeDetachedNode<DeclareInterfaceType['typeParameters']>,
-  +extends: $ReadOnlyArray<
+  +extends: ReadonlyArray<
     MaybeDetachedNode<DeclareInterfaceType['extends'][number]>,
   >,
   +body: MaybeDetachedNode<DeclareInterfaceType['body']>,
@@ -488,7 +486,7 @@ export type EmptyStatementProps = {};
 export type EmptyTypeAnnotationProps = {};
 
 export type EnumBigIntBodyProps = {
-  +members: $ReadOnlyArray<
+  +members: ReadonlyArray<
     MaybeDetachedNode<EnumBigIntBodyType['members'][number]>,
   >,
   +explicitType: EnumBigIntBodyType['explicitType'],
@@ -501,7 +499,7 @@ export type EnumBigIntMemberProps = {
 };
 
 export type EnumBooleanBodyProps = {
-  +members: $ReadOnlyArray<
+  +members: ReadonlyArray<
     MaybeDetachedNode<EnumBooleanBodyType['members'][number]>,
   >,
   +explicitType: EnumBooleanBodyType['explicitType'],
@@ -523,7 +521,7 @@ export type EnumDefaultedMemberProps = {
 };
 
 export type EnumNumberBodyProps = {
-  +members: $ReadOnlyArray<
+  +members: ReadonlyArray<
     MaybeDetachedNode<EnumNumberBodyType['members'][number]>,
   >,
   +explicitType: EnumNumberBodyType['explicitType'],
@@ -536,7 +534,7 @@ export type EnumNumberMemberProps = {
 };
 
 export type EnumStringBodyProps = {
-  +members: $ReadOnlyArray<
+  +members: ReadonlyArray<
     MaybeDetachedNode<EnumStringBodyType['members'][number]>,
   >,
   +explicitType: EnumStringBodyType['explicitType'],
@@ -549,7 +547,7 @@ export type EnumStringMemberProps = {
 };
 
 export type EnumSymbolBodyProps = {
-  +members: $ReadOnlyArray<
+  +members: ReadonlyArray<
     MaybeDetachedNode<EnumSymbolBodyType['members'][number]>,
   >,
   +hasUnknownMembers: EnumSymbolBodyType['hasUnknownMembers'],
@@ -599,7 +597,7 @@ export type ForStatementProps = {
 
 export type FunctionDeclarationProps = {
   +id?: ?MaybeDetachedNode<FunctionDeclarationType['id']>,
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<FunctionDeclarationType['params'][number]>,
   >,
   +body: MaybeDetachedNode<FunctionDeclarationType['body']>,
@@ -614,7 +612,7 @@ export type FunctionDeclarationProps = {
 
 export type FunctionExpressionProps = {
   +id?: ?MaybeDetachedNode<FunctionExpressionType['id']>,
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<FunctionExpressionType['params'][number]>,
   >,
   +body: MaybeDetachedNode<FunctionExpressionType['body']>,
@@ -628,7 +626,7 @@ export type FunctionExpressionProps = {
 };
 
 export type FunctionTypeAnnotationProps = {
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<FunctionTypeAnnotationType['params'][number]>,
   >,
   +this?: ?MaybeDetachedNode<FunctionTypeAnnotationType['this']>,
@@ -654,7 +652,7 @@ export type GenericTypeAnnotationProps = {
 
 export type HookDeclarationProps = {
   +id: MaybeDetachedNode<HookDeclarationType['id']>,
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<HookDeclarationType['params'][number]>,
   >,
   +body: MaybeDetachedNode<HookDeclarationType['body']>,
@@ -664,7 +662,7 @@ export type HookDeclarationProps = {
 };
 
 export type HookTypeAnnotationProps = {
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<HookTypeAnnotationType['params'][number]>,
   >,
   +returnType: MaybeDetachedNode<HookTypeAnnotationType['returnType']>,
@@ -686,11 +684,11 @@ export type ImportAttributeProps = {
 };
 
 export type ImportDeclarationProps = {
-  +specifiers: $ReadOnlyArray<
+  +specifiers: ReadonlyArray<
     MaybeDetachedNode<ImportDeclarationType['specifiers'][number]>,
   >,
   +source: MaybeDetachedNode<ImportDeclarationType['source']>,
-  +attributes?: ?$ReadOnlyArray<
+  +attributes?: ?ReadonlyArray<
     MaybeDetachedNode<ImportDeclarationType['attributes'][number]>,
   >,
   +importKind: ImportDeclarationType['importKind'],
@@ -731,7 +729,7 @@ export type InterfaceDeclarationProps = {
   +typeParameters?: ?MaybeDetachedNode<
     InterfaceDeclarationType['typeParameters'],
   >,
-  +extends: $ReadOnlyArray<
+  +extends: ReadonlyArray<
     MaybeDetachedNode<InterfaceDeclarationType['extends'][number]>,
   >,
   +body: MaybeDetachedNode<InterfaceDeclarationType['body']>,
@@ -743,14 +741,14 @@ export type InterfaceExtendsProps = {
 };
 
 export type InterfaceTypeAnnotationProps = {
-  +extends: $ReadOnlyArray<
+  +extends: ReadonlyArray<
     MaybeDetachedNode<InterfaceTypeAnnotationType['extends'][number]>,
   >,
   +body?: ?MaybeDetachedNode<InterfaceTypeAnnotationType['body']>,
 };
 
 export type IntersectionTypeAnnotationProps = {
-  +types: $ReadOnlyArray<
+  +types: ReadonlyArray<
     MaybeDetachedNode<IntersectionTypeAnnotationType['types'][number]>,
   >,
 };
@@ -768,7 +766,7 @@ export type JSXClosingFragmentProps = {};
 
 export type JSXElementProps = {
   +openingElement: MaybeDetachedNode<JSXElementType['openingElement']>,
-  +children: $ReadOnlyArray<
+  +children: ReadonlyArray<
     MaybeDetachedNode<JSXElementType['children'][number]>,
   >,
   +closingElement?: ?MaybeDetachedNode<JSXElementType['closingElement']>,
@@ -782,7 +780,7 @@ export type JSXExpressionContainerProps = {
 
 export type JSXFragmentProps = {
   +openingFragment: MaybeDetachedNode<JSXFragmentType['openingFragment']>,
-  +children: $ReadOnlyArray<
+  +children: ReadonlyArray<
     MaybeDetachedNode<JSXFragmentType['children'][number]>,
   >,
   +closingFragment: MaybeDetachedNode<JSXFragmentType['closingFragment']>,
@@ -804,7 +802,7 @@ export type JSXNamespacedNameProps = {
 
 export type JSXOpeningElementProps = {
   +name: MaybeDetachedNode<JSXOpeningElementType['name']>,
-  +attributes: $ReadOnlyArray<
+  +attributes: ReadonlyArray<
     MaybeDetachedNode<JSXOpeningElementType['attributes'][number]>,
   >,
   +selfClosing: JSXOpeningElementType['selfClosing'],
@@ -842,7 +840,7 @@ export type LogicalExpressionProps = {
 };
 
 export type MatchArrayPatternProps = {
-  +elements: $ReadOnlyArray<
+  +elements: ReadonlyArray<
     MaybeDetachedNode<MatchArrayPatternType['elements'][number]>,
   >,
   +rest?: ?MaybeDetachedNode<MatchArrayPatternType['rest']>,
@@ -860,7 +858,7 @@ export type MatchBindingPatternProps = {
 
 export type MatchExpressionProps = {
   +argument: MaybeDetachedNode<MatchExpressionType['argument']>,
-  +cases: $ReadOnlyArray<
+  +cases: ReadonlyArray<
     MaybeDetachedNode<MatchExpressionType['cases'][number]>,
   >,
 };
@@ -876,7 +874,7 @@ export type MatchIdentifierPatternProps = {
 };
 
 export type MatchInstanceObjectPatternProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<MatchInstanceObjectPatternType['properties'][number]>,
   >,
   +rest?: ?MaybeDetachedNode<MatchInstanceObjectPatternType['rest']>,
@@ -899,7 +897,7 @@ export type MatchMemberPatternProps = {
 };
 
 export type MatchObjectPatternProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<MatchObjectPatternType['properties'][number]>,
   >,
   +rest?: ?MaybeDetachedNode<MatchObjectPatternType['rest']>,
@@ -912,7 +910,7 @@ export type MatchObjectPatternPropertyProps = {
 };
 
 export type MatchOrPatternProps = {
-  +patterns: $ReadOnlyArray<
+  +patterns: ReadonlyArray<
     MaybeDetachedNode<MatchOrPatternType['patterns'][number]>,
   >,
 };
@@ -923,9 +921,7 @@ export type MatchRestPatternProps = {
 
 export type MatchStatementProps = {
   +argument: MaybeDetachedNode<MatchStatementType['argument']>,
-  +cases: $ReadOnlyArray<
-    MaybeDetachedNode<MatchStatementType['cases'][number]>,
-  >,
+  +cases: ReadonlyArray<MaybeDetachedNode<MatchStatementType['cases'][number]>>,
 };
 
 export type MatchStatementCaseProps = {
@@ -952,7 +948,7 @@ export type MethodDefinitionProps = {
   +kind: MethodDefinitionType['kind'],
   +computed: MethodDefinitionType['computed'],
   +static: MethodDefinitionType['static'],
-  +decorators: $ReadOnlyArray<
+  +decorators: ReadonlyArray<
     MaybeDetachedNode<MethodDefinitionType['decorators'][number]>,
   >,
 };
@@ -964,7 +960,7 @@ export type NeverTypeAnnotationProps = {};
 export type NewExpressionProps = {
   +callee: MaybeDetachedNode<NewExpressionType['callee']>,
   +typeArguments?: ?MaybeDetachedNode<NewExpressionType['typeArguments']>,
-  +arguments: $ReadOnlyArray<
+  +arguments: ReadonlyArray<
     MaybeDetachedNode<NewExpressionType['arguments'][number]>,
   >,
 };
@@ -985,29 +981,29 @@ export type NumberLiteralTypeAnnotationProps = {
 export type NumberTypeAnnotationProps = {};
 
 export type ObjectExpressionProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<ObjectExpressionType['properties'][number]>,
   >,
 };
 
 export type ObjectPatternProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<ObjectPatternType['properties'][number]>,
   >,
   +typeAnnotation?: ?MaybeDetachedNode<ObjectPatternType['typeAnnotation']>,
 };
 
 export type ObjectTypeAnnotationProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<ObjectTypeAnnotationType['properties'][number]>,
   >,
-  +indexers: $ReadOnlyArray<
+  +indexers: ReadonlyArray<
     MaybeDetachedNode<ObjectTypeAnnotationType['indexers'][number]>,
   >,
-  +callProperties: $ReadOnlyArray<
+  +callProperties: ReadonlyArray<
     MaybeDetachedNode<ObjectTypeAnnotationType['callProperties'][number]>,
   >,
-  +internalSlots: $ReadOnlyArray<
+  +internalSlots: ReadonlyArray<
     MaybeDetachedNode<ObjectTypeAnnotationType['internalSlots'][number]>,
   >,
   +inexact: ObjectTypeAnnotationType['inexact'],
@@ -1082,7 +1078,7 @@ export type PropertyDefinitionProps = {
   +value?: ?MaybeDetachedNode<PropertyDefinitionType['value']>,
   +computed: PropertyDefinitionType['computed'],
   +static: PropertyDefinitionType['static'],
-  +decorators: $ReadOnlyArray<
+  +decorators: ReadonlyArray<
     MaybeDetachedNode<PropertyDefinitionType['decorators'][number]>,
   >,
   +declare: PropertyDefinitionType['declare'],
@@ -1110,14 +1106,14 @@ export type QualifiedTypeofIdentifierProps = {
 export type RecordDeclarationProps = {
   +id: MaybeDetachedNode<RecordDeclarationType['id']>,
   +typeParameters?: ?MaybeDetachedNode<RecordDeclarationType['typeParameters']>,
-  +implements: $ReadOnlyArray<
+  +implements: ReadonlyArray<
     MaybeDetachedNode<RecordDeclarationType['implements'][number]>,
   >,
   +body: MaybeDetachedNode<RecordDeclarationType['body']>,
 };
 
 export type RecordDeclarationBodyProps = {
-  +elements: $ReadOnlyArray<
+  +elements: ReadonlyArray<
     MaybeDetachedNode<RecordDeclarationBodyType['elements'][number]>,
   >,
 };
@@ -1156,7 +1152,7 @@ export type RecordExpressionProps = {
 };
 
 export type RecordExpressionPropertiesProps = {
-  +properties: $ReadOnlyArray<
+  +properties: ReadonlyArray<
     MaybeDetachedNode<RecordExpressionPropertiesType['properties'][number]>,
   >,
 };
@@ -1170,7 +1166,7 @@ export type ReturnStatementProps = {
 };
 
 export type SequenceExpressionProps = {
-  +expressions: $ReadOnlyArray<
+  +expressions: ReadonlyArray<
     MaybeDetachedNode<SequenceExpressionType['expressions'][number]>,
   >,
 };
@@ -1180,7 +1176,7 @@ export type SpreadElementProps = {
 };
 
 export type StaticBlockProps = {
-  +body: $ReadOnlyArray<MaybeDetachedNode<StaticBlockType['body'][number]>>,
+  +body: ReadonlyArray<MaybeDetachedNode<StaticBlockType['body'][number]>>,
 };
 
 export type StringLiteralTypeAnnotationProps = {
@@ -1194,14 +1190,14 @@ export type SuperProps = {};
 
 export type SwitchCaseProps = {
   +test?: ?MaybeDetachedNode<SwitchCaseType['test']>,
-  +consequent: $ReadOnlyArray<
+  +consequent: ReadonlyArray<
     MaybeDetachedNode<SwitchCaseType['consequent'][number]>,
   >,
 };
 
 export type SwitchStatementProps = {
   +discriminant: MaybeDetachedNode<SwitchStatementType['discriminant']>,
-  +cases: $ReadOnlyArray<
+  +cases: ReadonlyArray<
     MaybeDetachedNode<SwitchStatementType['cases'][number]>,
   >,
 };
@@ -1214,10 +1210,10 @@ export type TaggedTemplateExpressionProps = {
 };
 
 export type TemplateLiteralProps = {
-  +quasis: $ReadOnlyArray<
+  +quasis: ReadonlyArray<
     MaybeDetachedNode<TemplateLiteralType['quasis'][number]>,
   >,
-  +expressions: $ReadOnlyArray<
+  +expressions: ReadonlyArray<
     MaybeDetachedNode<TemplateLiteralType['expressions'][number]>,
   >,
 };
@@ -1237,7 +1233,7 @@ export type TryStatementProps = {
 };
 
 export type TupleTypeAnnotationProps = {
-  +elementTypes: $ReadOnlyArray<
+  +elementTypes: ReadonlyArray<
     MaybeDetachedNode<TupleTypeAnnotationType['elementTypes'][number]>,
   >,
   +inexact: TupleTypeAnnotationType['inexact'],
@@ -1294,13 +1290,13 @@ export type TypeParameterProps = {
 };
 
 export type TypeParameterDeclarationProps = {
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<TypeParameterDeclarationType['params'][number]>,
   >,
 };
 
 export type TypeParameterInstantiationProps = {
-  +params: $ReadOnlyArray<
+  +params: ReadonlyArray<
     MaybeDetachedNode<TypeParameterInstantiationType['params'][number]>,
   >,
 };
@@ -1320,7 +1316,7 @@ export type UnaryExpressionProps = {
 export type UndefinedTypeAnnotationProps = {};
 
 export type UnionTypeAnnotationProps = {
-  +types: $ReadOnlyArray<
+  +types: ReadonlyArray<
     MaybeDetachedNode<UnionTypeAnnotationType['types'][number]>,
   >,
 };
@@ -1335,7 +1331,7 @@ export type UpdateExpressionProps = {
 
 export type VariableDeclarationProps = {
   +kind: VariableDeclarationType['kind'],
-  +declarations: $ReadOnlyArray<
+  +declarations: ReadonlyArray<
     MaybeDetachedNode<VariableDeclarationType['declarations'][number]>,
   >,
 };

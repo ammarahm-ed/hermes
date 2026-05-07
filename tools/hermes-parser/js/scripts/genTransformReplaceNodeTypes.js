@@ -42,7 +42,7 @@ for (const node of nodes) {
     `type ${signatureName} = (
       target: ${node.name},
       nodeToReplaceWith: DetachedNode<${node.name}>,
-      options?: $ReadOnly<{keepComments?: boolean}>,
+      options?: Readonly<{keepComments?: boolean}>,
     ) => void`,
   );
 }

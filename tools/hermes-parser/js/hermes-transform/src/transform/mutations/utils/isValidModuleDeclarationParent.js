@@ -43,7 +43,7 @@ function isModuleDeclaration(node: ESNode) /*: node is (
 
 export function isValidModuleDeclarationParent(
   target: ESNode,
-  nodesToInsertOrReplace: $ReadOnlyArray<
+  nodesToInsertOrReplace: ReadonlyArray<
     DetachedNode<ModuleDeclaration | Statement>,
   >,
 ): boolean {

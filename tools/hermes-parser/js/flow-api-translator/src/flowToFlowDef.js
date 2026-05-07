@@ -91,12 +91,12 @@ import {
 
 const EMPTY_TRANSLATION_RESULT: TranslatedResultOrNull<empty> = [null, []];
 
-type TranslatedDeps = $ReadOnlyArray<Dep>;
+type TranslatedDeps = ReadonlyArray<Dep>;
 type TranslatedResultOrNull<+T> = Readonly<
   [DetachedNode<T> | null, TranslatedDeps],
 >;
 type TranslatedResultArray<T> = [
-  $ReadOnlyArray<DetachedNode<T>>,
+  ReadonlyArray<DetachedNode<T>>,
   TranslatedDeps,
 ];
 type TranslatedResult<T> = [DetachedNode<T>, TranslatedDeps];
@@ -104,7 +104,7 @@ type TranslatedResult<T> = [DetachedNode<T>, TranslatedDeps];
 type ProgramStatement = Statement | ModuleDeclaration;
 
 function convertArray<TIn, TOut>(
-  items: $ReadOnlyArray<TIn>,
+  items: ReadonlyArray<TIn>,
   convert: TIn => TranslatedResultOrNull<TOut>,
 ): TranslatedResultArray<TOut> {
   const resultItems: Array<DetachedNode<TOut>> = [];
@@ -490,7 +490,7 @@ function convertExpressionToTypeAnnotation(
   }
 }
 
-function inheritComments<T: DetachedNode<ESNode>>(
+function inheritComments<T extends DetachedNode<ESNode>>(
   fromNode: ESNode,
   toNode: T,
 ): T {
@@ -667,7 +667,7 @@ function convertLiteral(
 function convertExportDeclaration(
   decl:
     | ExportDefaultDeclaration['declaration']
-    | $NonMaybeType<ExportNamedDeclaration['declaration']>,
+    | NonNullable<ExportNamedDeclaration['declaration']>,
   opts: {default: boolean},
   context: TranslationContext,
 ): TranslatedResult<ProgramStatement> {
@@ -1447,13 +1447,13 @@ function convertComponentDeclaration(
 }
 
 type TranslatedComponentParametersResults = [
-  $ReadOnlyArray<DetachedNode<ComponentTypeParameter>>,
+  ReadonlyArray<DetachedNode<ComponentTypeParameter>>,
   ?DetachedNode<ComponentTypeParameter>,
   TranslatedDeps,
 ];
 
 function hasNonIdentifierStringLiteralParam(
-  params: $ReadOnlyArray<ComponentParameter | RestElement>,
+  params: ReadonlyArray<ComponentParameter | RestElement>,
 ): boolean {
   return params.some(
     param =>
@@ -1484,7 +1484,7 @@ function extractParamTypeInfo(
 }
 
 function convertComponentParameters(
-  params: $ReadOnlyArray<ComponentParameter | RestElement>,
+  params: ReadonlyArray<ComponentParameter | RestElement>,
   context: TranslationContext,
 ): TranslatedComponentParametersResults {
   if (hasNonIdentifierStringLiteralParam(params)) {
@@ -1566,7 +1566,7 @@ function convertComponentParameters(
 }
 
 function convertComponentParametersToPropsObject(
-  params: $ReadOnlyArray<ComponentParameter | RestElement>,
+  params: ReadonlyArray<ComponentParameter | RestElement>,
   context: TranslationContext,
 ): TranslatedComponentParametersResults {
   const properties: Array<
@@ -1749,12 +1749,12 @@ function convertAFunction(
 }
 
 type TranslatedFunctionParametersResults = [
-  $ReadOnlyArray<DetachedNode<FunctionTypeParam>>,
+  ReadonlyArray<DetachedNode<FunctionTypeParam>>,
   ?DetachedNode<FunctionTypeParam>,
   TranslatedDeps,
 ];
 function convertFunctionParameters(
-  params: $ReadOnlyArray<FunctionParameter>,
+  params: ReadonlyArray<FunctionParameter>,
   context: TranslationContext,
 ): TranslatedFunctionParametersResults {
   return params.reduce<TranslatedFunctionParametersResults>(

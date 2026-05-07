@@ -19,7 +19,7 @@ export type SourceMapperParams = {
   module: string,
 };
 
-export type MapperOptions = $ReadOnly<{
+export type MapperOptions = Readonly<{
   sourceMapper: SourceMapperParams => string,
 }>;
 

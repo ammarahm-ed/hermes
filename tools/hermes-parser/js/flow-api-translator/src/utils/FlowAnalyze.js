@@ -30,7 +30,7 @@ export function analyzeFunctionReturn(func: AFunction): TypeAnnotation {
 export function analyzeTypeDependencies(
   rootNode: ESNode,
   context: TranslationContext,
-): $ReadOnlyArray<Dep> {
+): ReadonlyArray<Dep> {
   const deps = [];
   SimpleTraverser.traverse(rootNode, {
     enter(node: ESNode) {

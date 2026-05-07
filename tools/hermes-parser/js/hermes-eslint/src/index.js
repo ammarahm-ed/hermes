@@ -17,7 +17,7 @@ import type {PartialAnalyzeOptions, ScopeManager} from './scope-manager';
 import * as HermesParser from 'hermes-parser';
 import {analyze} from './scope-manager';
 
-type ParseForESLintOptions = $ReadOnly<{
+type ParseForESLintOptions = Readonly<{
   ...PartialAnalyzeOptions,
 }>;
 

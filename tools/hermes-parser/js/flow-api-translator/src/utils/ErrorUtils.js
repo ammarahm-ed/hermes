@@ -33,7 +33,7 @@ class TranslationErrorBase extends Error {
   constructor(
     node: ObjectWithLoc,
     message: string,
-    context: $ReadOnly<{code: string, ...}>,
+    context: Readonly<{code: string, ...}>,
   ) {
     const framedMessage = buildCodeFrame(node, message, context.code);
     super(
@@ -59,7 +59,7 @@ export class ExpectedTranslationError extends TranslationErrorBase {
 export function translationError(
   node: ObjectWithLoc,
   message: string,
-  context: $ReadOnly<{code: string, ...}>,
+  context: Readonly<{code: string, ...}>,
 ): ExpectedTranslationError {
   return new ExpectedTranslationError(node, message, context);
 }
@@ -70,7 +70,7 @@ export class UnexpectedTranslationError extends TranslationErrorBase {
 export function unexpectedTranslationError(
   node: ObjectWithLoc,
   message: string,
-  context: $ReadOnly<{code: string, ...}>,
+  context: Readonly<{code: string, ...}>,
 ): UnexpectedTranslationError {
   return new UnexpectedTranslationError(node, message, context);
 }

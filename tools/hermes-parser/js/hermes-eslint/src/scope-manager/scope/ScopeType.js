@@ -30,7 +30,7 @@ const ScopeType = {
   Switch: 'switch',
   Type: 'type',
   With: 'with',
-} as $ReadOnly<{
+} as Readonly<{
   Block: 'block',
   Catch: 'catch',
   Component: 'component',
@@ -51,7 +51,7 @@ const ScopeType = {
   Type: 'type',
   With: 'with',
 }>;
-type ScopeTypeType = $Values<typeof ScopeType>;
+type ScopeTypeType = Values<typeof ScopeType>;
 
 export type {ScopeTypeType};
 export {ScopeType};

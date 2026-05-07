@@ -29,7 +29,7 @@ export type DeclareHookProps = {
   +functionType: MaybeDetachedNode<HookTypeAnnotationType>,
 };
 export function DeclareHook(props: {
-  ...$ReadOnly<DeclareHookProps>,
+  ...Readonly<DeclareHookProps>,
   +parent?: ESNode,
 }): DetachedNode<DeclareHookType> {
   const node = detachedProps<DeclareHookType>(props.parent, {

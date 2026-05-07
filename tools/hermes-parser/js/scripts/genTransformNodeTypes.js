@@ -79,7 +79,7 @@ export type ${node.name}Props = {
       if (arg.type === 'NodePtr') {
         type = `MaybeDetachedNode<${type}>`;
       } else if (arg.type === 'NodeList') {
-        type = `$ReadOnlyArray<MaybeDetachedNode<${type}[number]>>`;
+        type = `ReadonlyArray<MaybeDetachedNode<${type}[number]>>`;
       }
 
       if (arg.optional) {

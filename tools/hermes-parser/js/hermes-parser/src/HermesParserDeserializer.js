@@ -33,14 +33,14 @@ export default class HermesParserDeserializer {
   +options: ParserOptions;
 
   // Matches StoredComment::Kind enum in JSLexer.h
-  +commentTypes: $ReadOnlyArray<HermesComment['type']> = [
+  +commentTypes: ReadonlyArray<HermesComment['type']> = [
     'CommentLine',
     'CommentBlock',
     'InterpreterDirective',
   ];
 
   // Matches TokenType enum in HermesParserJSSerializer.h
-  +tokenTypes: $ReadOnlyArray<HermesToken['type']> = [
+  +tokenTypes: ReadonlyArray<HermesToken['type']> = [
     'Boolean',
     'Identifier',
     'Keyword',

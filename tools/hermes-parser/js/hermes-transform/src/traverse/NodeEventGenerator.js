@@ -17,7 +17,7 @@ import type {SafeEmitter} from './SafeEmitter';
 import {FlowVisitorKeys} from 'hermes-parser';
 import * as esquery from './esquery';
 
-type ParsedSelector = $ReadOnly<{
+type ParsedSelector = Readonly<{
   /** The string that was parsed into this selector */
   rawSelector: string,
   /** `true` if this should be emitted when exiting the node rather than when entering */

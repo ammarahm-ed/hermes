@@ -16,7 +16,7 @@ import type {ESNode} from 'hermes-estree';
 import {getVisitorKeys, isNode} from './getVisitorKeys';
 
 export type TraverserCallback = (node: ESNode, parent: ?ESNode) => void;
-export type TraverserOptions = $ReadOnly<{
+export type TraverserOptions = Readonly<{
   /** The callback function which is called on entering each node. */
   enter: TraverserCallback,
   /** The callback function which is called on leaving each node. */
@@ -85,7 +85,7 @@ export class SimpleTraverser {
     for (const key of keys) {
       const lookupKey: $FlowFixMe = key;
       const childAny: $FlowFixMe = node[lookupKey];
-      const child: ESNode | $ReadOnlyArray<ESNode> = childAny;
+      const child: ESNode | ReadonlyArray<ESNode> = childAny;
 
       if (Array.isArray(child)) {
         for (let j = 0; j < child.length; ++j) {

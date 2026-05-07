@@ -15,7 +15,7 @@ import {astNodeMutationHelpers} from 'hermes-parser';
 export opaque type DetachedNode<+T> = T;
 export type MaybeDetachedNode<+T> = T | DetachedNode<T>;
 
-type DetachConfig = $ReadOnly<{
+type DetachConfig = Readonly<{
   preserveLocation?: boolean,
   originalNode?: ESNode,
 }>;
@@ -47,16 +47,16 @@ export function asDetachedNodeForCodeGen(node: any): ?DetachedNode<any> {
 }
 
 export const asDetachedNode: {
-  <T: ESNode>(
+  <T extends ESNode>(
     node: MaybeDetachedNode<T>,
     config?: {useDeepClone: boolean},
   ): DetachedNode<T>,
-  <T: ?ESNode>(
+  <T extends ?ESNode>(
     node: ?MaybeDetachedNode<T>,
     config?: {useDeepClone: boolean},
   ): ?DetachedNode<T>,
   // $FlowFixMe[incompatible-exact]
-} = <T: ESNode>(
+} = <T extends ESNode>(
   node: ?MaybeDetachedNode<T>,
   {useDeepClone}: {useDeepClone: boolean} = {useDeepClone: false},
 ): // $FlowExpectedError[incompatible-type]
@@ -75,7 +75,7 @@ export const asDetachedNode: {
 };
 
 // used by the node type function codegen
-export function detachedProps<T: BaseNode>(
+export function detachedProps<T extends BaseNode>(
   parent: ?ESNode,
   props: {...},
   config: DetachConfig = {},
@@ -142,7 +142,7 @@ export function detachedProps<T: BaseNode>(
 /**
  * Shallowly clones the node, but not its children.
  */
-export function shallowCloneNode<T: ESNode>(
+export function shallowCloneNode<T extends ESNode>(
   node: T,
   newProps: {...},
   config?: DetachConfig = {},
@@ -160,7 +160,7 @@ export function shallowCloneNode<T: ESNode>(
 /**
  * Deeply clones node and its entire tree.
  */
-export function deepCloneNode<T: ESNode>(
+export function deepCloneNode<T extends ESNode>(
   node: T,
   newProps: {...},
 ): DetachedNode<T> {

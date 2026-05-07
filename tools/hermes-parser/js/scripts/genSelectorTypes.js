@@ -44,8 +44,8 @@ for (const node of HermesESTreeJSON.concat({name: 'Literal', arguments: []})) {
     typeAliases.set(
       typeAliasName,
       // This creates an "override" type that enforces that the property exists and is not nullish
-      // interface VariableDeclarator_With_Init VariableDeclarator { +init: $NonMaybeType<VariableDeclarator['init']> }
-      `interface ${typeAliasName} extends ${node.name} { +${arg.name}: $NonMaybeType<${node.name}['${arg.name}']> }`,
+      // interface VariableDeclarator_With_Init VariableDeclarator { +init: NonNullable<VariableDeclarator['init']> }
+      `interface ${typeAliasName} extends ${node.name} { +${arg.name}: NonNullable<${node.name}['${arg.name}']> }`,
     );
     pushSelector(`${node.name}[${arg.name}]`, typeAliasName);
   }
