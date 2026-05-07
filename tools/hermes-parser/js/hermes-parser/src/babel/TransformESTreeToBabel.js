@@ -534,12 +534,13 @@ function mapProperty(node: Property): BabelObjectMethod | BabelObjectProperty {
   }
 
   // Non-method property nodes should be renamed to ObjectProperty
+  // $FlowExpectedError[incompatible-type]
+  const propertyValue: Expression = value;
   return {
     type: 'ObjectProperty',
     computed: node.computed,
     key: node.key,
-    // $FlowExpectedError[incompatible-type]
-    value: (node.value: Expression),
+    value: propertyValue,
     method: node.method,
     shorthand: node.shorthand,
     loc: node.loc,

@@ -23,7 +23,7 @@ import {
 } from './utils/ErrorUtils';
 import {EOL} from 'os';
 
-const DUMMY_LOC: FlowESTree.SourceLocation = (null: $FlowFixMe);
+const DUMMY_LOC: FlowESTree.SourceLocation = null as $FlowFixMe;
 const DUMMY_RANGE: [number, number] = [0, 0];
 const DUMMY_PARENT: $FlowFixMe = null;
 const DUMMY_COMMON = {
@@ -40,14 +40,14 @@ function constructFlowNode<T: FlowESTree.BaseNode>(
   node: LooseOmit<NoInfer<T>, 'parent'>,
 ): T {
   return {
-    ...(node: $FlowFixMe),
+    ...(node as $FlowFixMe),
     ...DUMMY_COMMON,
   };
 }
 
 const makeCommentOwnLine =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  (makeCommentOwnLineOriginal: (string, mixed) => string);
+  makeCommentOwnLineOriginal as (string, mixed) => string;
 
 export function TSDefToFlowDef(
   originalCode: string,
@@ -113,7 +113,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
     // $FlowExpectedError[cannot-write]
     node.comments ??= [];
     // $FlowExpectedError[incompatible-type]
-    (node.comments: Array<TSESTree.Comment>).push(comment);
+    (node.comments as Array<TSESTree.Comment>).push(comment);
   }
   function unsupportedAnnotation(
     node: ObjectWithLoc,
@@ -330,13 +330,13 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
         case 'ClassDeclaration':
           declaration = Transform.ClassDeclarationWithName(
             // possibly missing id
-            (node.declaration: $FlowFixMe),
+            node.declaration as $FlowFixMe,
           );
           break;
         case 'FunctionDeclaration':
           declaration = Transform.FunctionDeclarationWithName(
             // possibly missing id
-            (node.declaration: $FlowFixMe),
+            node.declaration as $FlowFixMe,
           );
           break;
         case 'TSDeclareFunction':
@@ -379,7 +379,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
       if (node.declaration == null) {
         const source: FlowESTree.StringLiteral =
           node.source == null
-            ? (null: $FlowFixMe)
+            ? (null as $FlowFixMe)
             : constructFlowNode<FlowESTree.StringLiteral>({
                 type: 'Literal',
                 literalType: 'string',
@@ -410,7 +410,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
               type: 'DeclareExportDeclaration',
               declaration: Transform.ClassDeclarationWithName(
                 // possibly missing id
-                (node.declaration: $FlowFixMe),
+                node.declaration as $FlowFixMe,
               ),
               default: false,
               source: null,
@@ -423,7 +423,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
               type: 'DeclareExportDeclaration',
               declaration: Transform.FunctionDeclarationWithName(
                 // possibly missing id
-                (node.declaration: $FlowFixMe),
+                node.declaration as $FlowFixMe,
               ),
               default: false,
               source: null,
@@ -660,7 +660,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
           type: 'Literal',
           literalType: 'regexp',
           value: node.value,
-          regex: (null: $FlowFixMe),
+          regex: null as $FlowFixMe,
           raw: node.raw,
         });
       } else if (node.value == null) {
@@ -715,7 +715,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
         case 'regexp':
           return unsupportedAnnotation(node, 'regexp literal type');
         default:
-          (literal: empty);
+          literal as empty;
           throw 'unreachable';
       }
     }
@@ -790,7 +790,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
     static Statement(
       node: TSESTree.Statement,
     ): FlowESTree.Statement | $ReadOnlyArray<FlowESTree.Statement> {
-      return (Transform.AllStatement(node): $FlowFixMe);
+      return Transform.AllStatement(node) as $FlowFixMe;
     }
 
     static TSAnyType(): FlowESTree.AnyTypeAnnotation {
@@ -1243,8 +1243,8 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
       node: TSESTree.TSMappedType,
     ): FlowESTree.ObjectTypeAnnotation {
       const keyTparam = Transform.TSTypeParameter(node.typeParameter);
-      const sourceType: FlowESTree.TypeAnnotationType = (keyTparam.bound
-        ?.typeAnnotation: $FlowFixMe);
+      const sourceType: FlowESTree.TypeAnnotationType = keyTparam.bound
+        ?.typeAnnotation as $FlowFixMe;
       // $FlowFixMe[cannot-write]
       keyTparam.bound = null;
       const prop = constructFlowNode<FlowESTree.ObjectTypeMappedTypeProperty>({
@@ -1303,7 +1303,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
       if (node.id.type === 'Literal') {
         return constructFlowNode<FlowESTree.DeclareModule>({
           type: 'DeclareModule',
-          id: (Transform.Literal(node.id): $FlowFixMe),
+          id: Transform.Literal(node.id) as $FlowFixMe,
           body,
         });
       }
@@ -1712,7 +1712,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
                   ? (constructFlowNode<FlowESTree.PrivateIdentifier>({
                       type: 'PrivateIdentifier',
                       name: key.name,
-                    }): $FlowFixMe)
+                    }) as $FlowFixMe)
                   : constructFlowNode<FlowESTree.StringLiteral>({
                       type: 'Literal',
                       literalType: 'string',
@@ -1767,7 +1767,7 @@ const getTransforms = (originalCode: string, opts: TranslationOptions) => {
             ? (constructFlowNode<FlowESTree.PrivateIdentifier>({
                 type: 'PrivateIdentifier',
                 name: originalKey.name,
-              }): $FlowFixMe)
+              }) as $FlowFixMe)
             : constructFlowNode<FlowESTree.StringLiteral>({
                 type: 'Literal',
                 literalType: 'string',

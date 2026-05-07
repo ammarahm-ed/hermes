@@ -29,7 +29,9 @@ const NODE_LIST = 'NodeList';
  *
  * TODO: Change babel to use the Hermes AST format so this is no longer needed.
  */
-export default ({
+const customASTDefs: $ReadOnly<{
+  [string]: $ReadOnly<{[string]: AstType}>,
+}> = {
   File: {
     program: NODE,
   },
@@ -84,6 +86,5 @@ export default ({
   ExportNamespaceSpecifier: {
     exported: NODE,
   },
-}: $ReadOnly<{
-  [string]: $ReadOnly<{[string]: AstType}>,
-}>);
+};
+export default customASTDefs;

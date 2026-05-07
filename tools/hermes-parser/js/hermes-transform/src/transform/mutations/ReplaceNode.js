@@ -61,7 +61,7 @@ export function performReplaceNodeMutation(
       [mutation.nodeToReplaceWith],
     );
   } else {
-    (replacementParent.parent: interface {[string]: mixed})[
+    (replacementParent.parent as interface {[string]: mixed})[
       replacementParent.key
     ] = mutation.nodeToReplaceWith;
   }
@@ -88,7 +88,7 @@ function getParentKey(target: ESNode): $ReadOnly<
 > {
   const parent = target.parent;
   for (const key of getVisitorKeys(parent)) {
-    const child = (parent: $FlowFixMe)[key];
+    const child = (parent as $FlowFixMe)[key];
     if (isNode(child)) {
       // $FlowFixMe[invalid-compare]
       if (child === target) {

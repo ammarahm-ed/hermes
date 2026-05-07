@@ -65,7 +65,7 @@ export const asDetachedNode: {
     return null;
   }
 
-  if (isDetachedNode((node: MaybeDetachedNode<T>))) {
+  if (isDetachedNode(node as MaybeDetachedNode<T>)) {
     return node;
   }
 
@@ -116,7 +116,7 @@ export function detachedProps<T: BaseNode>(
     // if not provided, then we purposely don't set this here
     // and will rely on the tooling to update it as appropriate.
     // nothing should be reading from this before it's set anyway.
-    parent: (parent: $FlowFixMe),
+    parent: parent as $FlowFixMe,
   };
 
   // mark the node as detached
@@ -149,7 +149,7 @@ export function shallowCloneNode<T: ESNode>(
 ): DetachedNode<T> {
   return detachedProps<T>(
     null,
-    {...(node: $FlowFixMe), ...newProps},
+    {...(node as $FlowFixMe), ...newProps},
     {
       preserveLocation: config.preserveLocation ?? true,
       originalNode: config.originalNode ?? node,

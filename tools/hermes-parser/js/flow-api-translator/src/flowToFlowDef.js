@@ -495,7 +495,7 @@ function inheritComments<T: DetachedNode<ESNode>>(
   toNode: T,
 ): T {
   // $FlowFixMe[unclear-type]
-  (toNode: any).comments = (fromNode: any).comments;
+  (toNode as any).comments = (fromNode as any).comments;
   return toNode;
 }
 
@@ -835,8 +835,8 @@ function convertExportDefaultDeclaration(
   context: TranslationContext,
 ): TranslatedResult<ProgramStatement> {
   const expr = stmt.declaration;
-  if (isExpression(expr) && (expr: $FlowFixMe).type === 'Identifier') {
-    const name = ((expr: $FlowFixMe): Identifier).name;
+  if (isExpression(expr) && (expr as $FlowFixMe).type === 'Identifier') {
+    const name = (expr as $FlowFixMe as Identifier).name;
     const [declDecl, deps] = [
       t.TypeofTypeAnnotation({argument: t.Identifier({name})}),
       analyzeTypeDependencies(expr, context),

@@ -58,7 +58,7 @@ export function isValidModuleDeclarationParent(
     if (
       !isModuleDeclaration(
         // $FlowExpectedError[incompatible-type]
-        (node: ESNode),
+node as ESNode,
       )
     ) {
       continue;

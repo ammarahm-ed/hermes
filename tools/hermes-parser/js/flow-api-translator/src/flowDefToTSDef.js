@@ -42,16 +42,16 @@ type LooseOmit<O: interface {}, K: $Keys<$FlowFixMe>> = Pick<
 function constructFlowNode<T: FlowESTree.BaseNode>(
   node: LooseOmit<NoInfer<T>, 'parent'>,
 ): T {
-  return (node: $FlowFixMe);
+  return node as $FlowFixMe;
 }
 
 const cloneJSDocCommentsToNewNode =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  (cloneJSDocCommentsToNewNodeOriginal: (mixed, mixed) => void);
+  cloneJSDocCommentsToNewNodeOriginal as (mixed, mixed) => void;
 
 const makeCommentOwnLine =
   // $FlowExpectedError[incompatible-type] - trust me this re-type is 100% safe
-  (makeCommentOwnLineOriginal: (string, mixed) => string);
+  makeCommentOwnLineOriginal as (string, mixed) => string;
 
 const VALID_REACT_IMPORTS = new Set<string>(['React', 'react']);
 
@@ -180,7 +180,7 @@ const getTransforms = (
     // $FlowExpectedError[cannot-write]
     node.comments ??= [];
     // $FlowExpectedError[incompatible-type]
-    (node.comments: Array<TSESTree.Comment>).push(comment);
+    (node.comments as Array<TSESTree.Comment>).push(comment);
   }
   function unsupportedAnnotation(
     node: ObjectWithLoc,
@@ -385,12 +385,12 @@ const getTransforms = (
             loc: DUMMY_LOC,
             computed: false,
             id: transform.Identifier(member.id, false),
-            initializer: ({
+            initializer: {
               type: 'Literal',
               loc: DUMMY_LOC,
               raw: `"${member.id.name}"`,
               value: member.id.name,
-            }: TSESTree.StringLiteral),
+            } as TSESTree.StringLiteral,
           });
           break;
         }
@@ -818,13 +818,13 @@ const getTransforms = (
       return {
         type: 'TSLiteralType',
         loc: DUMMY_LOC,
-        literal: ({
+        literal: {
           type: 'Literal',
           loc: DUMMY_LOC,
           value: node.value,
           raw: node.raw,
           bigint,
-        }: TSESTree.BigIntLiteral),
+        } as TSESTree.BigIntLiteral,
       };
     },
     BigIntTypeAnnotation(
@@ -849,12 +849,12 @@ const getTransforms = (
       return {
         type: 'TSLiteralType',
         loc: DUMMY_LOC,
-        literal: ({
+        literal: {
           type: 'Literal',
           loc: DUMMY_LOC,
           value: node.value,
           raw: node.raw,
-        }: TSESTree.BooleanLiteral),
+        } as TSESTree.BooleanLiteral,
       };
     },
     BooleanTypeAnnotation(
@@ -1084,7 +1084,7 @@ const getTransforms = (
             ? null
             : superClass.id.type === 'QualifiedTypeIdentifier'
               ? transform.QualifiedTypeIdentifier(superClass.id)
-              : transform.Identifier((superClass.id: $FlowFixMe), false),
+              : transform.Identifier(superClass.id as $FlowFixMe, false),
         superTypeParameters: transform.TypeParameterInstantiation(
           superClass?.typeParameters,
         ),
@@ -1378,7 +1378,7 @@ const getTransforms = (
         if (node.source === null) {
           // eslint-disable-next-line eqeqeq
           if (node.declaration === null) {
-            return ({
+            return {
               type: 'ExportNamedDeclaration',
               loc: DUMMY_LOC,
               // flow does not currently support attributes
@@ -1388,7 +1388,7 @@ const getTransforms = (
               exportKind: 'value',
               source: null,
               specifiers: node.specifiers.map(transform.ExportSpecifier),
-            }: TSESTree.ExportNamedDeclarationWithoutSourceWithMultiple);
+            } as TSESTree.ExportNamedDeclarationWithoutSourceWithMultiple;
           }
 
           const declarations = ((): Array<{
@@ -1537,7 +1537,7 @@ const getTransforms = (
 
           return mappedDeclarations.flat();
         } else {
-          return ({
+          return {
             type: 'ExportNamedDeclaration',
             loc: DUMMY_LOC,
             // flow does not currently support attributes
@@ -1547,7 +1547,7 @@ const getTransforms = (
             exportKind: 'value',
             source: transform.StringLiteral(node.source),
             specifiers: node.specifiers.map(transform.ExportSpecifier),
-          }: TSESTree.ExportNamedDeclarationWithSource);
+          } as TSESTree.ExportNamedDeclarationWithSource;
         }
       }
     },
@@ -1974,7 +1974,7 @@ const getTransforms = (
       })();
 
       const mainExport = {
-        type: ('ExportNamedDeclaration': 'ExportNamedDeclaration'),
+        type: 'ExportNamedDeclaration' as 'ExportNamedDeclaration',
         loc: DUMMY_LOC,
         assertions: [],
         declaration: exportedDeclaration,
@@ -2309,7 +2309,7 @@ const getTransforms = (
           }
 
           // New AST format for `typeof import('module')`
-          return ({
+          return {
             type: 'TSTypeQuery',
             loc: DUMMY_LOC,
             exprName: {
@@ -2319,7 +2319,7 @@ const getTransforms = (
               qualifier: null,
               typeParameters: null,
             },
-          }: $FlowFixMe);
+          } as $FlowFixMe;
         }
 
         case '$FlowFixMe': {
@@ -3276,7 +3276,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               loc: DUMMY_LOC,
               // Bug: ex.id can be qualified
-              typeName: transform.Identifier((ex.id: $FlowFixMe), false),
+              typeName: transform.Identifier(ex.id as $FlowFixMe, false),
               typeParameters: transform.TypeParameterInstantiation(
                 ex.typeParameters,
               ),
@@ -3364,12 +3364,12 @@ const getTransforms = (
       return {
         type: 'TSLiteralType',
         loc: DUMMY_LOC,
-        literal: ({
+        literal: {
           type: 'Literal',
           loc: DUMMY_LOC,
           value: node.value,
           raw: node.raw,
-        }: TSESTree.NumberLiteral),
+        } as TSESTree.NumberLiteral,
       };
     },
     NumberTypeAnnotation(
@@ -3931,12 +3931,12 @@ const getTransforms = (
       return {
         type: 'TSLiteralType',
         loc: DUMMY_LOC,
-        literal: ({
+        literal: {
           type: 'Literal',
           loc: DUMMY_LOC,
           value: node.value,
           raw: node.raw,
-        }: TSESTree.StringLiteral),
+        } as TSESTree.StringLiteral,
       };
     },
     StringTypeAnnotation(

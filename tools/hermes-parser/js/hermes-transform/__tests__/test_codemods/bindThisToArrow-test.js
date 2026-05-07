@@ -189,7 +189,7 @@ f = function y() {}.bind(foo);
   });
 
   it('should log with codeframe when using logWithNode', async () => {
-    const logSpy = ((console.log: $FlowFixMe): JestMockFn<Array<mixed>, mixed>);
+    const logSpy = console.log as $FlowFixMe as JestMockFn<Array<mixed>, mixed>;
 
     await codemod(ignoredExamples, true);
 
@@ -225,7 +225,7 @@ f = function y() {}.bind(foo);
   });
 
   it('should log with a prefix when using logWithNode', async () => {
-    const logSpy = ((console.log: $FlowFixMe): JestMockFn<Array<mixed>, mixed>);
+    const logSpy = console.log as $FlowFixMe as JestMockFn<Array<mixed>, mixed>;
 
     await codemod(ignoredExamples, false);
 
