@@ -965,23 +965,54 @@ function convertRequireToImport(
     return null;
   }
   const id = decl.id;
-  if (id.type !== 'Identifier') {
-    return null;
+
+  if (id.type === 'Identifier') {
+    return [
+      t.ImportDeclaration({
+        importKind: 'value',
+        source: asDetachedNode(sourceArg),
+        specifiers: [
+          t.ImportDefaultSpecifier({
+            local: t.Identifier({name: id.name}),
+          }),
+        ],
+        attributes: [],
+      }),
+      [],
+    ];
   }
 
-  return [
-    t.ImportDeclaration({
-      importKind: 'value',
-      source: asDetachedNode(sourceArg),
-      specifiers: [
-        t.ImportDefaultSpecifier({
-          local: t.Identifier({name: id.name}),
+  if (id.type === 'ObjectPattern') {
+    const specifiers = [];
+    for (const prop of id.properties) {
+      if (prop.type === 'RestElement') {
+        return null;
+      }
+      const key = prop.key;
+      const value = prop.value;
+      if (key.type !== 'Identifier' || value.type !== 'Identifier') {
+        return null;
+      }
+      specifiers.push(
+        t.ImportSpecifier({
+          imported: t.Identifier({name: key.name}),
+          local: t.Identifier({name: value.name}),
+          importKind: null,
         }),
-      ],
-      attributes: [],
-    }),
-    [],
-  ];
+      );
+    }
+    return [
+      t.ImportDeclaration({
+        importKind: 'value',
+        source: asDetachedNode(sourceArg),
+        specifiers,
+        attributes: [],
+      }),
+      [],
+    ];
+  }
+
+  return null;
 }
 
 function convertImportDeclaration(

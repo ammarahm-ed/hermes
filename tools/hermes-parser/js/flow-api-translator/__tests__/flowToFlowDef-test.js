@@ -659,11 +659,63 @@ describe('flowToFlowDef', () => {
          export type Transformer = typeof normalize;`,
       );
     });
+    it('destructured require all specifiers used', async () => {
+      await expectTranslate(
+        `const {normalize, format, DEFAULT_TIMEOUT} = require('Utils');
+         export type Config = {
+           transformer: typeof normalize,
+           formatter: typeof format,
+           timeout: typeof DEFAULT_TIMEOUT,
+         };`,
+        `import {normalize, format, DEFAULT_TIMEOUT} from 'Utils';
+         export type Config = {
+           transformer: typeof normalize,
+           formatter: typeof format,
+           timeout: typeof DEFAULT_TIMEOUT,
+         };`,
+      );
+    });
+    it('destructured require strips unused specifiers', async () => {
+      await expectTranslate(
+        `const {normalize, format} = require('Utils');
+         export type Formatter = typeof format;`,
+        `import {format} from 'Utils';
+         export type Formatter = typeof format;`,
+      );
+    });
+    it('destructured require with rename', async () => {
+      await expectTranslate(
+        `const {foo: bar} = require('source');
+         export type Baz = typeof bar;`,
+        `import {foo as bar} from 'source';
+         export type Baz = typeof bar;`,
+      );
+    });
     it('unused default require is stripped', async () => {
       await expectTranslate(
         `const Foo = require('foo');
          export type Bar = string;`,
         `export type Bar = string;`,
+      );
+    });
+    it('unused destructured require is stripped', async () => {
+      await expectTranslate(
+        `const {Foo} = require('foo');
+         export type Bar = string;`,
+        `export type Bar = string;`,
+      );
+    });
+    it('mixed default and destructured requires', async () => {
+      await expectTranslate(
+        `const MyClass = require('MyClass');
+         const {normalize} = require('Utils');
+         declare export class Processor {
+           getInstance(): MyClass<string>;
+         }`,
+        `import MyClass from 'MyClass';
+         declare export class Processor {
+           getInstance(): MyClass<string>;
+         }`,
       );
     });
     it('basic type parameter', async () => {
