@@ -53,6 +53,12 @@ function parse(code: string, options?: ParseForESLintOptions): Program {
 
 const VisitorKeys = HermesParser.FlowVisitorKeys;
 
+const meta: Readonly<{name: string, version: string}> = {
+  name: 'hermes-eslint',
+  // $FlowExpectedError[untyped-import]
+  version: require('../package.json').version as string,
+};
+
 type ParseForESLintReturn = {
   ast: Program,
   scopeManager: ScopeManager,
@@ -85,4 +91,4 @@ function parseForESLint(
 export type * from './scope-manager';
 export type {ParseForESLintOptions, ParseForESLintReturn};
 export {ScopeType, DefinitionType} from './scope-manager';
-export {parse, parseForESLint, VisitorKeys};
+export {parse, parseForESLint, VisitorKeys, meta};
