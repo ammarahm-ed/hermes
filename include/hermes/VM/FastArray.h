@@ -124,7 +124,7 @@ class FastArray : public JSObject {
     auto *otherStorage = other->indexedStorage_.getNonNull(runtime);
     size_t curSz = storage->size();
     size_t newSz = curSz + otherStorage->size();
-    if (LLVM_LIKELY(newSz < storage->capacity())) {
+    if (LLVM_LIKELY(newSz <= storage->capacity())) {
       storage->appendWithinCapacity(runtime, otherStorage);
       auto shv = SmallHermesValue::encodeNumberValue(newSz, runtime);
       self->setLength(runtime, shv);

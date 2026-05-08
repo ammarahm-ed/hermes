@@ -284,7 +284,7 @@ class ArrayStorageBase final : public VariableSizeRuntimeCell,
       Runtime &runtime,
       Handle<ArrayStorageBase> other) {
     auto *self = selfHandle.get();
-    if (LLVM_LIKELY(self->size() + other->size() < self->capacity())) {
+    if (LLVM_LIKELY(self->size() + other->size() <= self->capacity())) {
       self->appendWithinCapacity(runtime, *other);
       return ExecutionStatus::RETURNED;
     }
