@@ -563,6 +563,7 @@ napi_status NAPI_CDECL napi_define_class(
   struct : public Locals {
     PinnedValue<Callable> ctor;
     PinnedValue<JSObject> proto;
+    PinnedValue<SymbolID> name;
   } lv;
   LocalsRAII lraii(runtime, &lv);
 
@@ -577,7 +578,7 @@ napi_status NAPI_CDECL napi_define_class(
   CallbackBundle *bundle = &env->callbackBundles_.back();
 
   // Resolve the class name to a SymbolID.
-  SymbolID nameSym = Predefined::getSymbolID(Predefined::emptyString);
+  lv.name = Predefined::getSymbolID(Predefined::emptyString);
   if (utf8name != nullptr) {
     size_t nameLen =
         (length == NAPI_AUTO_LENGTH) ? std::strlen(utf8name) : length;
@@ -597,7 +598,7 @@ napi_status NAPI_CDECL napi_define_class(
         env->callbackBundles_.pop_back();
         return captureRuntimeException(env, napi_generic_failure);
       }
-      nameSym = **symRes;
+      lv.name = **symRes;
     }
   }
 
@@ -626,7 +627,7 @@ napi_status NAPI_CDECL napi_define_class(
   auto defRes = Callable::defineNameLengthAndPrototype(
       lv.ctor,
       runtime,
-      nameSym,
+      *lv.name,
       0, // paramCount for .length
       lv.proto,
       Callable::WritablePrototype::Yes);

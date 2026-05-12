@@ -33,7 +33,7 @@ napi_status NAPI_CDECL napi_create_dataview(
   RETURN_STATUS_IF_FALSE(
       env, abPhv->isObject() && vmisa<JSArrayBuffer>(*abPhv), napi_invalid_arg);
 
-  auto *ab = vmcast<JSArrayBuffer>(*abPhv);
+  Handle<JSArrayBuffer> ab = Handle<JSArrayBuffer>::vmcast(abPhv);
 
   // Validate bounds: byte_offset + length <= buffer size.
   RETURN_STATUS_IF_FALSE(
@@ -53,7 +53,7 @@ napi_status NAPI_CDECL napi_create_dataview(
   // raw pointers — safe because the DataView is already rooted.
   lv.dv->setBuffer(
       runtime,
-      ab,
+      *ab,
       static_cast<JSDataView::size_type>(byte_offset),
       static_cast<JSDataView::size_type>(length));
 
