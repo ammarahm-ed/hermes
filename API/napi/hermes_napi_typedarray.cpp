@@ -83,12 +83,13 @@ static bool cellKindToTypedArrayType(
 
 /// Create a TypedArray of the given \p type, then call setBuffer to attach
 /// it to \p buf at \p byteOffset for \p length elements. The TypedArray
-/// object is stored in \p taOut. Requires an active GCScope.
+/// object is stored in \p taOut. Requires an active GCScope. \p buf must
+/// be pinned, since the TypedArray allocation below is a GC point.
 /// Returns ExecutionStatus.
 static hermes::vm::ExecutionStatus createTypedArrayForType(
     napi_typedarray_type type,
     hermes::vm::Runtime &runtime,
-    hermes::vm::JSArrayBuffer *buf,
+    hermes::vm::PinnedValue<hermes::vm::JSArrayBuffer> &buf,
     size_t byteOffset,
     size_t length,
     hermes::vm::PinnedValue<hermes::vm::JSTypedArrayBase> &taOut) {
@@ -126,7 +127,7 @@ static hermes::vm::ExecutionStatus createTypedArrayForType(
   JSTypedArrayBase::setBuffer(
       runtime,
       vmcast<JSTypedArrayBase>(taOut.getHermesValue()),
-      buf,
+      buf.get(),
       static_cast<JSTypedArrayBase::size_type>(byteOffset),
       static_cast<JSTypedArrayBase::size_type>(length * elemSize),
       elemSize);
@@ -173,12 +174,14 @@ napi_status NAPI_CDECL napi_create_typedarray(
   GCScope gcScope(runtime);
 
   struct : public Locals {
+    PinnedValue<JSArrayBuffer> ab;
     PinnedValue<JSTypedArrayBase> ta;
   } lv;
   LocalsRAII lraii(runtime, &lv);
+  lv.ab.castAndSetHermesValue<JSArrayBuffer>(*abPhv);
 
   auto status =
-      createTypedArrayForType(type, runtime, ab, byte_offset, length, lv.ta);
+      createTypedArrayForType(type, runtime, lv.ab, byte_offset, length, lv.ta);
   if (LLVM_UNLIKELY(status == ExecutionStatus::EXCEPTION)) {
     return captureRuntimeException(env, napi_pending_exception);
   }
