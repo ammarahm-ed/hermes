@@ -322,9 +322,6 @@
         "test262/test/language/expressions/await/await-monkey-patched-promise.js",
         "test262/test/built-ins/Promise/all/S25.4.4.1_A7.2_T1.js",
         "test262/test/built-ins/Promise/all/S25.4.4.1_A8.1_T1.js",
-        "test262/test/built-ins/Promise/try/args.js",
-        "test262/test/built-ins/Promise/try/return-value.js",
-        "test262/test/built-ins/Promise/try/throws.js",
         "test262/test/language/statements/for-await-of/iterator-close-throw-get-method-abrupt.js",
         "test262/test/language/statements/for-await-of/iterator-close-throw-get-method-non-callable.js"
       ],
@@ -534,18 +531,6 @@
       "comment": "These are rest failing tests in mjsunit that we may support soon."
     },
     {
-      "comment": "Promise.try is not implemented. All Promise.try tests fail with 'undefined is not a function'.",
-      "paths": [
-        "test262/test/built-ins/Promise/try/ctx-ctor-throws.js",
-        "test262/test/built-ins/Promise/try/ctx-ctor.js",
-        "test262/test/built-ins/Promise/try/length.js",
-        "test262/test/built-ins/Promise/try/name.js",
-        "test262/test/built-ins/Promise/try/not-a-constructor.js",
-        "test262/test/built-ins/Promise/try/promise.js",
-        "test262/test/built-ins/Promise/try/prop-desc.js"
-      ]
-    },
-    {
       "comment": "Promise subclassing (PromiseCapability via this) is not supported. Static methods (all, allSettled, any, race, reject, resolve) and prototype.then always use the built-in Promise constructor instead of reading 'this'. This breaks constructor dispatch, capability validation, resolve/reject element functions, iterator close on resolve throw, and same-thenable resolution ordering.",
       "paths": [
         "test262/test/built-ins/Promise/all/S25.4.4.1_A3.1_T3.js",
@@ -719,7 +704,8 @@
         "test262/test/built-ins/Promise/reject-function-nonconstructor.js",
         "test262/test/built-ins/Promise/reject/not-a-constructor.js",
         "test262/test/built-ins/Promise/resolve-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/resolve/not-a-constructor.js"
+        "test262/test/built-ins/Promise/resolve/not-a-constructor.js",
+        "test262/test/built-ins/Promise/try/not-a-constructor.js"
       ]
     },
     {
