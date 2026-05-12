@@ -214,6 +214,8 @@ struct UnionInternKeyInfo {
   }
 };
 
+class TypeContextRAII;
+
 /// Owns the type table for a Module and provides type operations.
 ///
 /// The constructor pre-allocates entries for all well-known types (primitives
@@ -222,6 +224,13 @@ struct UnionInternKeyInfo {
 class TypeContext {
  public:
   TypeContext();
+
+  /// \return the current thread-local TypeContext. Asserts that one has been
+  /// installed via TypeContextRAII.
+  static TypeContext &current() {
+    assert(current_ && "No TypeContext installed on this thread");
+    return *current_;
+  }
 
   /// Return the kind of the type entry at \p id.
   TypeKind getKind(uint32_t id) const {
@@ -312,6 +321,11 @@ class TypeContext {
   void format(llvh::raw_ostream &OS, uint32_t id) const;
 
  private:
+  friend class TypeContextRAII;
+
+  /// Thread-local pointer to the current context.
+  static thread_local TypeContext *current_;
+
   /// Type table. Index 0 = NoType. Pre-allocated entries for primitives.
   std::vector<TypeEntry> entries_;
 
@@ -372,6 +386,28 @@ class TypeContext {
 
   /// Canonicalize a list of non-union type IDs into an interned union.
   uint32_t createUnionFromLeafArms(llvh::ArrayRef<uint32_t> arms);
+};
+
+/// RAII guard that installs an TypeContext as the current thread-local
+/// context. The previous context (if any) is restored on destruction.
+/// Non-copyable, non-movable.
+class TypeContextRAII {
+ public:
+  explicit TypeContextRAII(TypeContext &ctx) : saved_(TypeContext::current_) {
+    TypeContext::current_ = &ctx;
+  }
+
+  ~TypeContextRAII() {
+    TypeContext::current_ = saved_;
+  }
+
+  TypeContextRAII(const TypeContextRAII &) = delete;
+  TypeContextRAII &operator=(const TypeContextRAII &) = delete;
+  TypeContextRAII(TypeContextRAII &&) = delete;
+  TypeContextRAII &operator=(TypeContextRAII &&) = delete;
+
+ private:
+  TypeContext *saved_;
 };
 
 } // namespace hermes

@@ -636,4 +636,26 @@ TEST(TypeContextTest, FormatAnySupersetShowsExtraArms) {
   EXPECT_EQ(fmt(kAnyEmptyUninitId), "any|empty|uninit");
 }
 
+TEST(TypeContextTest, CurrentWithGuard) {
+  TypeContext ctx;
+  TypeContextRAII guard(ctx);
+  EXPECT_EQ(&TypeContext::current(), &ctx);
+}
+
+TEST(TypeContextTest, NestedGuards) {
+  TypeContext outer;
+  TypeContext inner;
+
+  TypeContextRAII outerGuard(outer);
+  EXPECT_EQ(&TypeContext::current(), &outer);
+
+  {
+    TypeContextRAII innerGuard(inner);
+    EXPECT_EQ(&TypeContext::current(), &inner);
+  }
+
+  // Outer context restored after inner guard destruction.
+  EXPECT_EQ(&TypeContext::current(), &outer);
+}
+
 } // anonymous namespace

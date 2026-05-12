@@ -15,6 +15,8 @@
 
 namespace hermes {
 
+thread_local TypeContext *TypeContext::current_ = nullptr;
+
 namespace {
 
 /// \return true if \p k is a number kind (including subtypes).
