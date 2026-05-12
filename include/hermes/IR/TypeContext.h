@@ -25,6 +25,8 @@ class raw_ostream;
 
 namespace hermes {
 
+class Type;
+
 /// Kinds of types in the IR type system.
 enum class TypeKind : uint8_t {
   // --- Leaf kinds (no sub-type data) ---
@@ -225,6 +227,11 @@ class TypeContext {
  public:
   TypeContext();
 
+  /// \return true if a thread-local TypeContext is currently installed.
+  static bool hasCurrent() {
+    return current_ != nullptr;
+  }
+
   /// \return the current thread-local TypeContext. Asserts that one has been
   /// installed via TypeContextRAII.
   static TypeContext &current() {
@@ -232,95 +239,85 @@ class TypeContext {
     return *current_;
   }
 
-  /// Return the kind of the type entry at \p id.
-  TypeKind getKind(uint32_t id) const {
-    assert(id < entries_.size() && "Type ID out of range");
-    return entries_[id].kind;
-  }
+  /// Return the kind of the type entry for \p t.
+  TypeKind getKind(Type t) const;
 
-  /// Return the arm IDs of a union type entry. Asserts that \p id is a Union.
+  /// Return the arm types of a union type entry. Asserts that \p t is a
+  /// Union.
   /// \warning The returned ArrayRef points into an internal vector. It is
-  /// invalidated by any call that adds new type entries (e.g. addUnionEntry).
-  llvh::ArrayRef<uint32_t> getUnionArms(uint32_t id) const {
-    assert(id < entries_.size() && "Type ID out of range");
-    const auto &entry = entries_[id];
-    assert(entry.kind == TypeKind::Union && "Not a union type");
-    assert(
-        size_t(entry.union_.armOffset) + entry.union_.armCount <=
-            typeArrays_.size() &&
-        "Union arms out of bounds");
-    return llvh::ArrayRef<uint32_t>(
-        typeArrays_.data() + entry.union_.armOffset, entry.union_.armCount);
-  }
+  /// invalidated by any operation that creates a new union type (e.g.
+  /// unionTy, intersectTy, subtractTy), since that may reallocate the
+  /// underlying typeArrays_. Copy the arms into a local container before
+  /// calling such operations during iteration.
+  llvh::ArrayRef<Type> getUnionArms(Type t) const;
 
-  /// \return true if the type at \p id is NoType (empty set).
-  bool isNoType(uint32_t id) const {
-    return getKind(id) == TypeKind::NoType;
-  }
+  /// \return true if \p t is NoType (empty set).
+  bool isNoType(Type t) const;
 
-  /// \return true if the type at \p id can represent a Number value.
-  bool canBeNumber(uint32_t id) const;
-  /// \return true if the type at \p id can represent a String value.
-  bool canBeString(uint32_t id) const;
-  /// \return true if the type at \p id can represent an Object value.
-  bool canBeObject(uint32_t id) const;
-  /// \return true if the type at \p id can represent a Null value.
-  bool canBeNull(uint32_t id) const;
-  /// \return true if the type at \p id can represent an Undefined value.
-  bool canBeUndefined(uint32_t id) const;
-  /// \return true if the type at \p id can represent an Empty value.
-  bool canBeEmpty(uint32_t id) const;
-  /// \return true if the type at \p id can represent an Uninit value.
-  bool canBeUninit(uint32_t id) const;
-  /// \return true if the type at \p id can represent a BigInt value.
-  bool canBeBigInt(uint32_t id) const;
-  /// \return true if the type at \p id can represent a Boolean value.
-  bool canBeBoolean(uint32_t id) const;
-  /// \return true if the type at \p id can represent a Symbol value.
-  bool canBeSymbol(uint32_t id) const;
+  /// \return true if \p t can represent a Number value.
+  bool canBeNumber(Type t) const;
+  /// \return true if \p t can represent a String value.
+  bool canBeString(Type t) const;
+  /// \return true if \p t can represent an Object value.
+  bool canBeObject(Type t) const;
+  /// \return true if \p t can represent a Null value.
+  bool canBeNull(Type t) const;
+  /// \return true if \p t can represent an Undefined value.
+  bool canBeUndefined(Type t) const;
+  /// \return true if \p t can represent an Empty value.
+  bool canBeEmpty(Type t) const;
+  /// \return true if \p t can represent an Uninit value.
+  bool canBeUninit(Type t) const;
+  /// \return true if \p t can represent a BigInt value.
+  bool canBeBigInt(Type t) const;
+  /// \return true if \p t can represent a Boolean value.
+  bool canBeBoolean(Type t) const;
+  /// \return true if \p t can represent a Symbol value.
+  bool canBeSymbol(Type t) const;
 
-  /// \return true if the type at \p id represents only primitive types
+  /// \return true if \p t represents only primitive types
   /// (Number, String, BigInt, Null, Undefined, Boolean, Symbol).
   /// Returns false for NoType.
-  bool isPrimitive(uint32_t id) const;
+  bool isPrimitive(Type t) const;
 
-  /// \return true if any of the types at \p id are primitive.
-  bool canBePrimitive(uint32_t id) const;
+  /// \return true if any of the types in \p t are primitive.
+  bool canBePrimitive(Type t) const;
 
-  /// \return true if the type at \p id is not referenced by a pointer
+  /// \return true if \p t is not referenced by a pointer
   /// (Number, Boolean, Null, Undefined only). Returns false for NoType.
-  bool isNonPtr(uint32_t id) const;
+  bool isNonPtr(Type t) const;
 
   /// \return true if all values of type \p a are also values of type \p b.
-  bool isSubsetOf(uint32_t a, uint32_t b) const;
+  bool isSubsetOf(Type a, Type b) const;
 
   /// \return true if types \p a and \p b have no values in common.
-  bool areDisjoint(uint32_t a, uint32_t b) const;
+  bool areDisjoint(Type a, Type b) const;
 
   /// \return the union of types \p a and \p b. May create and intern a new
   /// union type.
-  uint32_t unionTy(uint32_t a, uint32_t b);
+  Type unionTy(Type a, Type b);
 
   /// \return the intersection of types \p a and \p b.
-  uint32_t intersectTy(uint32_t a, uint32_t b);
+  Type intersectTy(Type a, Type b);
 
   /// \return type \p a minus type \p b (conservative approximation).
-  uint32_t subtractTy(uint32_t a, uint32_t b);
+  Type subtractTy(Type a, Type b);
 
   /// \return the number of kinds in the type: 0 for NoType, arm count for
   /// unions, 1 for leaf types.
-  unsigned countKinds(uint32_t id) const;
+  unsigned countKinds(Type t) const;
 
   /// \return the TypeKind of the type. For unions, returns the kind of the
   /// first arm. For NoType, returns TypeKind::NoType.
-  TypeKind getFirstKind(uint32_t id) const;
+  TypeKind getFirstKind(Type t) const;
 
   /// Print the human-readable type name to \p OS. Leaf kinds print their name
   /// (e.g. "number"). Unions print pipe-separated arms (e.g. "number|string").
   /// NoType prints "notype". AnyType prints "any".
-  void format(llvh::raw_ostream &OS, uint32_t id) const;
+  void format(llvh::raw_ostream &OS, Type t) const;
 
  private:
+  friend class Type;
   friend class TypeContextRAII;
 
   /// Thread-local pointer to the current context.
@@ -329,10 +326,9 @@ class TypeContext {
   /// Type table. Index 0 = NoType. Pre-allocated entries for primitives.
   std::vector<TypeEntry> entries_;
 
-  /// Side array storing union arm IDs (and in the future, tuple element IDs).
-  /// Uses raw uint32_t since Type is still a bitmask at this point; changed
-  /// to Type in P1-S8.
-  std::vector<uint32_t> typeArrays_;
+  /// Side array storing union arm types (and in the future, tuple element
+  /// types). Type is layout-compatible with uint32_t (it wraps a uint32_t id).
+  std::vector<Type> typeArrays_;
 
   /// Intern table mapping sorted arm sets to existing union type IDs.
   llvh::DenseMap<UnionInternKey, uint32_t, UnionInternKeyInfo> internTable_;
@@ -340,41 +336,14 @@ class TypeContext {
   /// Return true if any component of the type at \p id satisfies \p pred.
   /// For leaf types, tests the kind directly. For unions, tests any arm.
   template <typename Pred>
-  bool containsMatchingKind(uint32_t id, Pred pred) const {
-    assert(id < entries_.size() && "Type ID out of range");
-    const auto &entry = entries_[id];
-    if (entry.kind != TypeKind::Union)
-      return pred(entry.kind);
-    auto arms = getUnionArms(id);
-    for (uint32_t armId : arms) {
-      assert(entries_[armId].kind != TypeKind::Union && "Nested unions");
-      if (pred(entries_[armId].kind))
-        return true;
-    }
-    return false;
-  }
+  bool containsMatchingKind(uint32_t id, Pred pred) const;
 
   /// Return true if all components of the type at \p id satisfy \p pred.
   /// Returns false for NoType.
   template <typename Pred>
-  bool allMatchKind(uint32_t id, Pred pred) const {
-    assert(id < entries_.size() && "Type ID out of range");
-    const auto &entry = entries_[id];
-    if (entry.kind == TypeKind::NoType)
-      return false;
-    if (entry.kind != TypeKind::Union)
-      return pred(entry.kind);
-    auto arms = getUnionArms(id);
-    for (uint32_t armId : arms) {
-      if (!pred(entries_[armId].kind))
-        return false;
-    }
-    return true;
-  }
+  bool allMatchKind(uint32_t id, Pred pred) const;
 
   /// Helper to append arms to typeArrays_ and create a union entry.
-  /// \pre \p arms must not reference storage inside \c typeArrays_, because
-  /// the append may reallocate the vector and invalidate the ArrayRef.
   uint32_t addUnionEntry(llvh::ArrayRef<uint32_t> arms);
 
   /// Intersect two non-union, non-empty type IDs.
