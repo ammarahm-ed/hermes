@@ -539,48 +539,15 @@
       ]
     },
     {
-      "comment": "Promise and Promise.prototype method property descriptors are incorrect. Methods are enumerable when they should not be, function.name values are wrong, and Promise.prototype is writable when it should not be.",
+      "comment": "Promise internal functions (executor, resolve/reject callbacks, element functions) are incorrectly constructable. The exposed Promise methods are now non-constructable via object-shorthand syntax, but the internal anonymous function expressions used inside core.all/allSettled/any element handlers and inside doResolve still have [[Construct]].",
       "paths": [
-        "test262/test/built-ins/Promise/all/name.js",
-        "test262/test/built-ins/Promise/all/prop-desc.js",
-        "test262/test/built-ins/Promise/allSettled/name.js",
-        "test262/test/built-ins/Promise/allSettled/prop-desc.js",
-        "test262/test/built-ins/Promise/any/name.js",
-        "test262/test/built-ins/Promise/any/prop-desc.js",
-        "test262/test/built-ins/Promise/promise.js",
-        "test262/test/built-ins/Promise/prototype/catch/name.js",
-        "test262/test/built-ins/Promise/prototype/catch/prop-desc.js",
-        "test262/test/built-ins/Promise/prototype/prop-desc.js",
-        "test262/test/built-ins/Promise/prototype/then/name.js",
-        "test262/test/built-ins/Promise/prototype/then/prop-desc.js",
-        "test262/test/built-ins/Promise/race/name.js",
-        "test262/test/built-ins/Promise/race/prop-desc.js",
-        "test262/test/built-ins/Promise/reject/name.js",
-        "test262/test/built-ins/Promise/reject/prop-desc.js",
-        "test262/test/built-ins/Promise/resolve/name.js",
-        "test262/test/built-ins/Promise/resolve/prop-desc.js"
-      ]
-    },
-    {
-      "comment": "Promise functions (methods, executor, resolve/reject callbacks, element functions) are incorrectly constructable. Tests check that these are not constructors via Reflect.construct or new, but our implementation allows construction.",
-      "paths": [
-        "test262/test/built-ins/Promise/all/not-a-constructor.js",
         "test262/test/built-ins/Promise/all/resolve-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/allSettled/not-a-constructor.js",
         "test262/test/built-ins/Promise/allSettled/reject-element-function-nonconstructor.js",
         "test262/test/built-ins/Promise/allSettled/resolve-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/any/not-a-constructor.js",
         "test262/test/built-ins/Promise/any/reject-element-function-nonconstructor.js",
         "test262/test/built-ins/Promise/executor-function-not-a-constructor.js",
-        "test262/test/built-ins/Promise/prototype/catch/not-a-constructor.js",
-        "test262/test/built-ins/Promise/prototype/finally/not-a-constructor.js",
-        "test262/test/built-ins/Promise/prototype/then/not-a-constructor.js",
-        "test262/test/built-ins/Promise/race/not-a-constructor.js",
         "test262/test/built-ins/Promise/reject-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/reject/not-a-constructor.js",
-        "test262/test/built-ins/Promise/resolve-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/resolve/not-a-constructor.js",
-        "test262/test/built-ins/Promise/try/not-a-constructor.js"
+        "test262/test/built-ins/Promise/resolve-function-nonconstructor.js"
       ]
     },
     {
