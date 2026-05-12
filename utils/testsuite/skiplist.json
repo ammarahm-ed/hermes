@@ -713,6 +713,7 @@
         "test262/test/built-ins/Promise/any/reject-element-function-nonconstructor.js",
         "test262/test/built-ins/Promise/executor-function-not-a-constructor.js",
         "test262/test/built-ins/Promise/prototype/catch/not-a-constructor.js",
+        "test262/test/built-ins/Promise/prototype/finally/not-a-constructor.js",
         "test262/test/built-ins/Promise/prototype/then/not-a-constructor.js",
         "test262/test/built-ins/Promise/race/not-a-constructor.js",
         "test262/test/built-ins/Promise/reject-function-nonconstructor.js",
@@ -4717,7 +4718,6 @@
     "test262/test/language/statements/class/elements/new-sc-line-gen-rs-field-identifier.js"
   ],
   "unsupported_features": [
-    "Promise.prototype.finally",
     "Symbol.species",
     "Symbol.unscopables",
     "caller",
