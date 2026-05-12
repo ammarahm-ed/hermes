@@ -539,18 +539,6 @@
       ]
     },
     {
-      "comment": "Promise internal functions (executor, resolve/reject callbacks, element functions) are incorrectly constructable. The exposed Promise methods are now non-constructable via object-shorthand syntax, but the internal anonymous function expressions used inside core.all/allSettled/any element handlers and inside doResolve still have [[Construct]].",
-      "paths": [
-        "test262/test/built-ins/Promise/all/resolve-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/allSettled/reject-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/allSettled/resolve-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/any/reject-element-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/executor-function-not-a-constructor.js",
-        "test262/test/built-ins/Promise/reject-function-nonconstructor.js",
-        "test262/test/built-ins/Promise/resolve-function-nonconstructor.js"
-      ]
-    },
-    {
       "paths": [
         "mjsunit/es8/async-await-interleaved.js",
         "mjsunit/compiler/promise-prototype-finally.js",
