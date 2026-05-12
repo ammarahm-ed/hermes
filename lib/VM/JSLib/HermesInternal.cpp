@@ -434,6 +434,10 @@ CallResult<HermesValue> hermesInternalUseEngineQueue(void *, Runtime &runtime) {
   return HermesValue::encodeBoolValue(runtime.hasMicrotaskQueue());
 }
 
+CallResult<HermesValue> hermesInternalTest262Enabled(void *, Runtime &runtime) {
+  return HermesValue::encodeBoolValue(runtime.test262);
+}
+
 /// \code
 ///   HermesInternal.enqueueJob = function (func) {}
 /// \endcode
@@ -835,6 +839,10 @@ HermesValue createHermesInternalObject(
       P::enablePromiseRejectionTracker,
       hermesInternalEnablePromiseRejectionTracker);
   defineInternMethod(P::useEngineQueue, hermesInternalUseEngineQueue);
+  // test262Enabled() reflects the --test262 CLI flag so JS code can branch
+  // on it (e.g. test262 harness wiring). Returns false when the flag is
+  // absent or false.
+  defineInternMethodAndSymbol("test262Enabled", hermesInternalTest262Enabled);
 
 #ifdef HERMES_ENABLE_FUZZILLI
   defineInternMethod(P::fuzzilli, hermesInternalFuzzilli);
