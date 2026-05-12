@@ -8,16 +8,22 @@
 #include "hermes/IR/TypeContext.h"
 #include "hermes/Support/HermesSafeMath.h"
 
+#include <algorithm>
 #include <cassert>
 
 namespace hermes {
 
 namespace {
 
-/// \return true if \p k is a number kind (including subtypes Int32, Uint32).
+/// \return true if \p k is a number kind (including subtypes).
 bool isNumberKind(TypeKind k) {
   return k == TypeKind::Number || k == TypeKind::Int32 ||
       k == TypeKind::Uint32 || k == TypeKind::UInt31;
+}
+
+/// \return true if \p k is a refined object kind that carries payload data.
+[[maybe_unused]] bool isRefinedKind(TypeKind k) {
+  return k >= TypeKind::_RefinedFirst && k <= TypeKind::_RefinedLast;
 }
 
 /// \return true if \p k is an object kind (including refinements).
@@ -68,6 +74,50 @@ bool isNonPtrKind(TypeKind k) {
     default:
       return false;
   }
+}
+
+/// \return true if leaf kind \p a is a subtype of leaf kind \p b.
+bool isLeafSubtype(TypeKind a, TypeKind b) {
+  // Refined kinds carry payloads and require structural comparison that is
+  // not yet implemented.
+  hermes_assert(
+      !isRefinedKind(a) && !isRefinedKind(b),
+      "refined object kinds not yet supported in subtype check");
+  if (a == b)
+    return true;
+  // Int32, Uint32, UInt31 are subtypes of Number.
+  if (b == TypeKind::Number &&
+      (a == TypeKind::Int32 || a == TypeKind::Uint32 || a == TypeKind::UInt31))
+    return true;
+  // UInt31 is a subtype of both Int32 and Uint32.
+  if (a == TypeKind::UInt31 && (b == TypeKind::Int32 || b == TypeKind::Uint32))
+    return true;
+  // Object refinements are subtypes of Object.
+  if (b == TypeKind::Object) {
+    switch (a) {
+      case TypeKind::ClassInstance:
+      case TypeKind::Array:
+      case TypeKind::Tuple:
+      case TypeKind::Function:
+      case TypeKind::ExactObject:
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
+/// \return true if leaf kinds \p a and \p b have no values in common.
+bool areLeafKindsDisjoint(TypeKind a, TypeKind b) {
+  // If one is a subtype of the other, not disjoint.
+  if (isLeafSubtype(a, b) || isLeafSubtype(b, a))
+    return false;
+  // Number family (Number, Int32, Uint32, UInt31) overlap pairwise.
+  if (isNumberKind(a) && isNumberKind(b))
+    return false;
+  // All other pairs of different kinds are disjoint.
+  return true;
 }
 
 } // anonymous namespace
@@ -157,6 +207,286 @@ bool TypeContext::canBePrimitive(uint32_t id) const {
 
 bool TypeContext::isNonPtr(uint32_t id) const {
   return allMatchKind(id, isNonPtrKind);
+}
+
+bool TypeContext::isSubsetOf(uint32_t a, uint32_t b) const {
+  if (a == b)
+    return true;
+  if (a == kNoTypeId)
+    return true;
+  if (b == kNoTypeId)
+    return false;
+
+  TypeKind aKind = getKind(a);
+  TypeKind bKind = getKind(b);
+
+  // Union on left: all arms must be subsets of b.
+  if (aKind == TypeKind::Union) {
+    for (uint32_t arm : getUnionArms(a)) {
+      if (!isSubsetOf(arm, b))
+        return false;
+    }
+    return true;
+  }
+
+  // Leaf on left, union on right: a must be subset of some arm.
+  if (bKind == TypeKind::Union) {
+    for (uint32_t arm : getUnionArms(b)) {
+      if (isSubsetOf(a, arm))
+        return true;
+    }
+    return false;
+  }
+
+  // Both leaf types.
+  return isLeafSubtype(aKind, bKind);
+}
+
+bool TypeContext::areDisjoint(uint32_t a, uint32_t b) const {
+  if (a == kNoTypeId || b == kNoTypeId)
+    return true;
+  if (a == b)
+    return false;
+
+  TypeKind aKind = getKind(a);
+  TypeKind bKind = getKind(b);
+
+  // Union on left: disjoint iff all arms are disjoint from b.
+  if (aKind == TypeKind::Union) {
+    for (uint32_t arm : getUnionArms(a)) {
+      if (!areDisjoint(arm, b))
+        return false;
+    }
+    return true;
+  }
+
+  // Union on right: disjoint iff a is disjoint from all arms.
+  if (bKind == TypeKind::Union) {
+    for (uint32_t arm : getUnionArms(b)) {
+      if (!areDisjoint(a, arm))
+        return false;
+    }
+    return true;
+  }
+
+  // Both leaf types.
+  return areLeafKindsDisjoint(aKind, bKind);
+}
+
+uint32_t TypeContext::createUnionImpl(uint32_t a, uint32_t b) {
+  // Get sorted arm lists. Leaf types are trivial single-element sequences;
+  // union arms are already sorted from prior canonicalization.
+  uint32_t aBuf, bBuf;
+  auto getArms = [this](
+                     uint32_t id, uint32_t &buf) -> llvh::ArrayRef<uint32_t> {
+    if (getKind(id) == TypeKind::Union)
+      return getUnionArms(id);
+    buf = id;
+    return {&buf, 1};
+  };
+  auto aArms = getArms(a, aBuf);
+  auto bArms = getArms(b, bBuf);
+
+  // Remove cross-subsumed arms. Arms within each input are already
+  // canonical (no internal subsumption), so we only check across inputs.
+  auto isSubsumedBy = [this](uint32_t id, llvh::ArrayRef<uint32_t> others) {
+    TypeKind k = getKind(id);
+    for (uint32_t o : others) {
+      if (o != id && isLeafSubtype(k, getKind(o)))
+        return true;
+    }
+    return false;
+  };
+
+  llvh::SmallVector<uint32_t, 8> aFiltered, bFiltered;
+  for (uint32_t id : aArms) {
+    if (!isSubsumedBy(id, bArms))
+      aFiltered.push_back(id);
+  }
+  for (uint32_t id : bArms) {
+    if (!isSubsumedBy(id, aArms))
+      bFiltered.push_back(id);
+  }
+
+  // Merge both sorted sequences, skipping duplicates.
+  llvh::SmallVector<uint32_t, 16> arms;
+  size_t ai = 0, bi = 0;
+  while (ai < aFiltered.size() && bi < bFiltered.size()) {
+    if (aFiltered[ai] < bFiltered[bi]) {
+      arms.push_back(aFiltered[ai++]);
+    } else if (aFiltered[ai] > bFiltered[bi]) {
+      arms.push_back(bFiltered[bi++]);
+    } else {
+      arms.push_back(aFiltered[ai]);
+      ++ai;
+      ++bi;
+    }
+  }
+  while (ai < aFiltered.size())
+    arms.push_back(aFiltered[ai++]);
+  while (bi < bFiltered.size())
+    arms.push_back(bFiltered[bi++]);
+
+  if (arms.empty())
+    return kNoTypeId;
+  if (arms.size() == 1)
+    return arms[0];
+
+  // Intern: check if this union already exists.
+  UnionInternKey key(arms);
+  auto it = internTable_.find(key);
+  if (it != internTable_.end())
+    return it->second;
+
+  // Create new union entry.
+  uint32_t id = addUnionEntry(arms);
+  internTable_[std::move(key)] = id;
+  return id;
+}
+
+uint32_t TypeContext::unionTy(uint32_t a, uint32_t b) {
+  if (a == b)
+    return a;
+  if (a == kNoTypeId)
+    return b;
+  if (b == kNoTypeId)
+    return a;
+  if (isSubsetOf(a, b))
+    return b;
+  if (isSubsetOf(b, a))
+    return a;
+  return createUnionImpl(a, b);
+}
+
+uint32_t TypeContext::intersectLeafTy(uint32_t a, uint32_t b) const {
+  assert(a != kNoTypeId && b != kNoTypeId && "NoType must be handled first");
+  TypeKind aKind = getKind(a);
+  TypeKind bKind = getKind(b);
+  assert(aKind != TypeKind::Union && bKind != TypeKind::Union);
+
+  if (isLeafSubtype(aKind, bKind))
+    return a;
+  if (isLeafSubtype(bKind, aKind))
+    return b;
+
+  // The only non-subset overlap in the number family is Int32 ∩ Uint32 =
+  // UInt31. All other number-family pairs are handled by the subtype checks
+  // above.
+  if (isNumberKind(aKind) && isNumberKind(bKind))
+    return kUInt31Id;
+  return kNoTypeId;
+}
+
+uint32_t TypeContext::createUnionFromLeafArms(llvh::ArrayRef<uint32_t> arms) {
+  llvh::SmallVector<uint32_t, 16> normalized;
+  normalized.reserve(arms.size());
+  for (uint32_t arm : arms) {
+    if (arm != kNoTypeId)
+      normalized.push_back(arm);
+  }
+
+  if (normalized.empty())
+    return kNoTypeId;
+
+  std::sort(normalized.begin(), normalized.end());
+  normalized.erase(
+      std::unique(normalized.begin(), normalized.end()), normalized.end());
+
+  llvh::SmallVector<uint32_t, 16> filtered;
+  filtered.reserve(normalized.size());
+  for (size_t i = 0; i < normalized.size(); ++i) {
+    TypeKind candidate = getKind(normalized[i]);
+    bool subsumed = false;
+    for (size_t j = 0; j < normalized.size(); ++j) {
+      if (i == j)
+        continue;
+      if (isLeafSubtype(candidate, getKind(normalized[j]))) {
+        subsumed = true;
+        break;
+      }
+    }
+    if (!subsumed)
+      filtered.push_back(normalized[i]);
+  }
+
+  if (filtered.empty())
+    return kNoTypeId;
+  if (filtered.size() == 1)
+    return filtered[0];
+
+  UnionInternKey key(filtered);
+  auto it = internTable_.find(key);
+  if (it != internTable_.end())
+    return it->second;
+
+  uint32_t id = addUnionEntry(filtered);
+  internTable_[std::move(key)] = id;
+  return id;
+}
+
+uint32_t TypeContext::intersectTy(uint32_t a, uint32_t b) {
+  if (a == b)
+    return a;
+  if (a == kNoTypeId || b == kNoTypeId)
+    return kNoTypeId;
+  TypeKind aKind = getKind(a);
+  TypeKind bKind = getKind(b);
+
+  if (aKind != TypeKind::Union && bKind != TypeKind::Union)
+    return intersectLeafTy(a, b);
+
+  llvh::SmallVector<uint32_t, 16> intersections;
+
+  if (aKind == TypeKind::Union && bKind == TypeKind::Union) {
+    auto aArms = getUnionArms(a);
+    auto bArms = getUnionArms(b);
+    intersections.reserve(aArms.size() * bArms.size());
+    for (uint32_t aArm : aArms) {
+      for (uint32_t bArm : bArms) {
+        uint32_t intersection = intersectLeafTy(aArm, bArm);
+        if (intersection != kNoTypeId)
+          intersections.push_back(intersection);
+      }
+    }
+    return createUnionFromLeafArms(intersections);
+  }
+
+  auto unionArms = aKind == TypeKind::Union ? getUnionArms(a) : getUnionArms(b);
+  uint32_t leaf = aKind == TypeKind::Union ? b : a;
+  intersections.reserve(unionArms.size());
+  for (uint32_t arm : unionArms) {
+    uint32_t intersection = intersectLeafTy(arm, leaf);
+    if (intersection != kNoTypeId)
+      intersections.push_back(intersection);
+  }
+  return createUnionFromLeafArms(intersections);
+}
+
+uint32_t TypeContext::subtractTy(uint32_t a, uint32_t b) {
+  if (a == kNoTypeId)
+    return kNoTypeId;
+  if (b == kNoTypeId)
+    return a;
+  if (isSubsetOf(a, b))
+    return kNoTypeId;
+  if (areDisjoint(a, b))
+    return a;
+
+  // Distribute over unions in a.
+  // NOTE: copy arms before iterating because unionTy may grow typeArrays_,
+  // invalidating the ArrayRef returned by getUnionArms.
+  if (getKind(a) == TypeKind::Union) {
+    auto ref = getUnionArms(a);
+    llvh::SmallVector<uint32_t, 16> arms(ref.begin(), ref.end());
+    uint32_t result = kNoTypeId;
+    for (uint32_t arm : arms)
+      result = unionTy(result, subtractTy(arm, b));
+    return result;
+  }
+
+  // a is a leaf, not subset of b, not disjoint from b.
+  // Conservative: return a.
+  return a;
 }
 
 uint32_t TypeContext::addUnionEntry(llvh::ArrayRef<uint32_t> arms) {
@@ -307,6 +637,12 @@ TypeContext::TypeContext() {
     uint32_t id = addUnionEntry(nuArms);
     (void)id;
     assert(id == kNullOrUndefId);
+  }
+
+  // Pre-populate intern table with well-known unions.
+  for (uint32_t id :
+       {kAnyTypeId, kNumericId, kAnyEmptyUninitId, kNullOrUndefId}) {
+    internTable_[UnionInternKey(getUnionArms(id))] = id;
   }
 
   // Pad remaining entries up to kFirstDynamicId with NoType placeholders.

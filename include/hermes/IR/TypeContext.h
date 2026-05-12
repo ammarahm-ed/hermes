@@ -11,6 +11,9 @@
 #include "hermes/Support/StringTable.h"
 
 #include "llvh/ADT/ArrayRef.h"
+#include "llvh/ADT/DenseMap.h"
+#include "llvh/ADT/Hashing.h"
+#include "llvh/ADT/SmallVector.h"
 
 #include <cassert>
 #include <cstdint>
@@ -175,6 +178,38 @@ enum : uint32_t {
   kFirstDynamicId = 32,
 };
 
+/// Hashable key for interning union types. Contains sorted arm IDs.
+/// TODO: This is inefficient. DenseMap stores a full SmallVector in every
+/// bucket, including empty and tombstone slots (~56 bytes each), and the arm
+/// data duplicates what is already in typeArrays_.
+struct UnionInternKey {
+  llvh::SmallVector<uint32_t, 8> arms;
+
+  UnionInternKey() = default;
+  explicit UnionInternKey(llvh::ArrayRef<uint32_t> a)
+      : arms(a.begin(), a.end()) {}
+};
+
+/// DenseMap info for UnionInternKey.
+struct UnionInternKeyInfo {
+  static UnionInternKey getEmptyKey() {
+    UnionInternKey k;
+    k.arms.push_back(UINT32_MAX);
+    return k;
+  }
+  static UnionInternKey getTombstoneKey() {
+    UnionInternKey k;
+    k.arms.push_back(UINT32_MAX - 1);
+    return k;
+  }
+  static unsigned getHashValue(const UnionInternKey &k) {
+    return llvh::hash_combine_range(k.arms.begin(), k.arms.end());
+  }
+  static bool isEqual(const UnionInternKey &a, const UnionInternKey &b) {
+    return a.arms == b.arms;
+  }
+};
+
 /// Owns the type table for a Module and provides type operations.
 ///
 /// The constructor pre-allocates entries for all well-known types (primitives
@@ -243,6 +278,22 @@ class TypeContext {
   /// (Number, Boolean, Null, Undefined only). Returns false for NoType.
   bool isNonPtr(uint32_t id) const;
 
+  /// \return true if all values of type \p a are also values of type \p b.
+  bool isSubsetOf(uint32_t a, uint32_t b) const;
+
+  /// \return true if types \p a and \p b have no values in common.
+  bool areDisjoint(uint32_t a, uint32_t b) const;
+
+  /// \return the union of types \p a and \p b. May create and intern a new
+  /// union type.
+  uint32_t unionTy(uint32_t a, uint32_t b);
+
+  /// \return the intersection of types \p a and \p b.
+  uint32_t intersectTy(uint32_t a, uint32_t b);
+
+  /// \return type \p a minus type \p b (conservative approximation).
+  uint32_t subtractTy(uint32_t a, uint32_t b);
+
  private:
   /// Type table. Index 0 = NoType. Pre-allocated entries for primitives.
   std::vector<TypeEntry> entries_;
@@ -251,6 +302,9 @@ class TypeContext {
   /// Uses raw uint32_t since Type is still a bitmask at this point; changed
   /// to Type in P1-S8.
   std::vector<uint32_t> typeArrays_;
+
+  /// Intern table mapping sorted arm sets to existing union type IDs.
+  llvh::DenseMap<UnionInternKey, uint32_t, UnionInternKeyInfo> internTable_;
 
   /// Return true if any component of the type at \p id satisfies \p pred.
   /// For leaf types, tests the kind directly. For unions, tests any arm.
@@ -291,6 +345,16 @@ class TypeContext {
   /// \pre \p arms must not reference storage inside \c typeArrays_, because
   /// the append may reallocate the vector and invalidate the ArrayRef.
   uint32_t addUnionEntry(llvh::ArrayRef<uint32_t> arms);
+
+  /// Intersect two non-union, non-empty type IDs.
+  uint32_t intersectLeafTy(uint32_t a, uint32_t b) const;
+
+  /// Create a union from two operands with full canonicalization and interning.
+  /// Flattens, deduplicates, removes subsumed arms, sorts, and interns.
+  uint32_t createUnionImpl(uint32_t a, uint32_t b);
+
+  /// Canonicalize a list of non-union type IDs into an interned union.
+  uint32_t createUnionFromLeafArms(llvh::ArrayRef<uint32_t> arms);
 };
 
 } // namespace hermes
