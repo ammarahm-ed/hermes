@@ -5,10 +5,18 @@
 
 # CMake script to run Node-API CTS tests under Hermes.
 # Invoked via cmake -P with the following variables:
-#   HERMES         - path to the hermes binary
-#   CTS_TESTS_DIR  - path to the CTS tests/js-native-api directory
+#   HERMES          - path to the hermes binary
+#   CTS_TESTS_DIR   - path to the CTS tests/js-native-api directory
 #   IMPLEMENTOR_DIR - path to the hermes implementor directory
-#   ADDON_BASE_DIR - build-tree directory containing compiled .node addons
+#   ADDON_BASE_DIR  - build-tree directory containing compiled .node addons
+#   QEMU_RUN_PREFIX - optional command prefix for cross-compile runs
+#                     (e.g., "qemu-arm -L /path/to/sysroot"); empty for native
+
+# Split QEMU_RUN_PREFIX into argv tokens; empty list when not cross-compiling.
+set(QEMU_PREFIX_LIST "")
+if(QEMU_RUN_PREFIX)
+  separate_arguments(QEMU_PREFIX_LIST UNIX_COMMAND "${QEMU_RUN_PREFIX}")
+endif()
 
 # Read harness files.
 file(READ "${IMPLEMENTOR_DIR}/assert.js" ASSERT_JS)
@@ -76,9 +84,11 @@ foreach(TEST_FILE ${TEST_FILES})
   set(TEMP_FILE "${ADDON_DIR}/_hermes_test_runner.js")
   file(WRITE "${TEMP_FILE}" "${COMBINED_JS}")
 
-  # Run hermes.
+  # Run hermes. When cross-compiling, QEMU_PREFIX_LIST is prepended so the
+  # cross-compiled hermes runs under qemu instead of being executed directly
+  # by the host.
   execute_process(
-    COMMAND "${HERMES}" "${TEMP_FILE}"
+    COMMAND ${QEMU_PREFIX_LIST} "${HERMES}" "${TEMP_FILE}"
     RESULT_VARIABLE EXIT_CODE
     OUTPUT_VARIABLE STDOUT
     ERROR_VARIABLE STDERR

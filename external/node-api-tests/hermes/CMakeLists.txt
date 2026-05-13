@@ -256,6 +256,7 @@ add_custom_target(check-napi-node-tests
     -DNODE_API_DIR=${NODE_API_DIR}
     -DHARNESS_DIR=${HERMES_NODE_TESTS_DIR}
     -DADDON_BASE_DIR=${CMAKE_CURRENT_BINARY_DIR}
+    -DQEMU_RUN_PREFIX=${QEMU_RUN_PREFIX}
     -P ${HERMES_NODE_TESTS_DIR}/run-node-tests.cmake
   WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
   COMMENT "Running Node.js NAPI tests under Hermes"

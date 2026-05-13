@@ -10,6 +10,14 @@
 #   NODE_API_DIR     - path to the node-api test directory
 #   HARNESS_DIR      - path to the hermes harness directory
 #   ADDON_BASE_DIR   - build-tree directory containing compiled .node addons
+#   QEMU_RUN_PREFIX  - optional command prefix for cross-compile runs
+#                      (e.g., "qemu-arm -L /path/to/sysroot"); empty for native
+
+# Split QEMU_RUN_PREFIX into argv tokens; empty list when not cross-compiling.
+set(QEMU_PREFIX_LIST "")
+if(QEMU_RUN_PREFIX)
+  separate_arguments(QEMU_PREFIX_LIST UNIX_COMMAND "${QEMU_RUN_PREFIX}")
+endif()
 
 # Read harness files.
 file(READ "${HARNESS_DIR}/assert.js" ASSERT_JS)
@@ -176,9 +184,11 @@ foreach(TEST_FILE ${TEST_FILES})
   endif()
 
   # Run hermes. HERMES_ARGS is an optional semicolon-separated list
-  # of extra flags (e.g., -gc-sanitize-handles=1).
+  # of extra flags (e.g., -gc-sanitize-handles=1). When cross-compiling,
+  # QEMU_PREFIX_LIST is prepended so the cross-compiled hermes runs under
+  # qemu instead of being executed directly by the host.
   execute_process(
-    COMMAND "${HERMES}" ${HERMES_ARGS} ${STRICT_FLAG} "${TEMP_FILE}"
+    COMMAND ${QEMU_PREFIX_LIST} "${HERMES}" ${HERMES_ARGS} ${STRICT_FLAG} "${TEMP_FILE}"
     RESULT_VARIABLE EXIT_CODE
     OUTPUT_VARIABLE STDOUT
     ERROR_VARIABLE STDERR
