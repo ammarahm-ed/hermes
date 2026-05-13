@@ -396,8 +396,9 @@ static bool isCpuIdSupported() {
     return false;
 #endif
   return true;
-#endif
+#else
   return true;
+#endif
 }
 
 /// getX86CpuIDAndInfo - Execute the specified cpuid and return the 4 values in
