@@ -159,8 +159,6 @@ napi_status NAPI_CDECL napi_create_typedarray(
   uint8_t elemSize = typedArrayElementSize(type);
   RETURN_STATUS_IF_FALSE(env, elemSize > 0, napi_invalid_arg);
 
-  auto *ab = vmcast<JSArrayBuffer>(*abPhv);
-
   // Validate alignment: byte_offset must be a multiple of element size.
   if (elemSize > 1) {
     RETURN_STATUS_IF_FALSE(env, byte_offset % elemSize == 0, napi_invalid_arg);
@@ -169,7 +167,9 @@ napi_status NAPI_CDECL napi_create_typedarray(
   // Validate bounds: byte_offset + length * elemSize <= buffer size.
   size_t byteLength = static_cast<size_t>(length) * elemSize;
   RETURN_STATUS_IF_FALSE(
-      env, byte_offset + byteLength <= ab->size(), napi_invalid_arg);
+      env,
+      byte_offset + byteLength <= vmcast<JSArrayBuffer>(*abPhv)->size(),
+      napi_invalid_arg);
 
   GCScope gcScope(runtime);
 
