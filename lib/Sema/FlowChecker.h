@@ -801,7 +801,8 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   /// Propagates the Decl from final method definitions to the property's
   /// identifier for IRGen.
   /// \return a pair of (type, field) for the found property, or (nullptr,
-  /// nullptr) if not found.
+  /// nullptr) if not found. If the method is overloaded, return nullptr for the
+  /// type because we can't determine it uniquely.
   std::pair<Type *, const flow::ClassType::Field *> lookupPropertyOnClass(
       flow::ClassType *classType,
       Identifier propName,

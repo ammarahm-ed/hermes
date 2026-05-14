@@ -1134,7 +1134,8 @@ void ESTreeIRGen::emitTypedFinalMethodClosureStore(
   Builder.createStoreFrameInst(curFunction()->curScope(), function, var);
   setDeclData(decl, var);
   if (auto *CFI = llvh::dyn_cast<CreateFunctionInst>(function)) {
-    nonOverriddenMethods_.try_emplace(&field, CFI->getFunctionCode());
+    // Don't populate nonOverriddenMethods_ here,
+    // because it's only read for methods placed in the vtable.
     declFunctions_.try_emplace(decl, CFI->getFunctionCode());
   }
 }

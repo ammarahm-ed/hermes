@@ -717,6 +717,8 @@ class ClassType : public TypeWithId {
     const Identifier name;
     /// The type of the field. For accessor fields, this is the getter's
     /// return type (or Void for setter-only).
+    /// For overloaded methods this is null; per-overload types are stored in
+    /// \c overloads. See \c isOverloaded().
     Type *type;
     /// The slot for PrLoad and PrStore, used during IRGen.
     /// This ideally should be computed during conversion to IR Type,
@@ -725,6 +727,8 @@ class ClassType : public TypeWithId {
     /// private methods).
     const OptValue<size_t> layoutSlotIR;
     /// If the field is a method, AST for the method (getter for accessors).
+    /// For overloaded methods this is null; per-overload method nodes are
+    /// stored in \c overloads. See \c isOverloaded().
     ESTree::MethodDefinitionNode *method;
     /// The key AST node for static fields/methods that use variables instead
     /// of layout slots. Used to propagate the Decl to member access sites.
@@ -753,6 +757,17 @@ class ClassType : public TypeWithId {
     /// Whether this is a private field for this class.
     bool isPrivate;
 
+    /// All overloads for overloaded methods, mapping method AST node to its
+    /// type. For non-overloaded methods, this is empty and the existing
+    /// \c type and \c method fields are used. For overloaded methods, ALL
+    /// overload entries are stored here and \c type and \c method are null.
+    llvh::MapVector<ESTree::MethodDefinitionNode *, Type *> overloads;
+
+    /// Whether this field is an overloaded method.
+    bool isOverloaded() const {
+      return !overloads.empty();
+    }
+
     Field(
         Identifier name,
         Type *type,
@@ -776,7 +791,7 @@ class ClassType : public TypeWithId {
           isPrivate(isPrivate) {}
 
     bool isMethod() const {
-      return method != nullptr || setterMethod != nullptr;
+      return method != nullptr || setterMethod != nullptr || isOverloaded();
     }
 
     /// Whether this field is an accessor (getter and/or setter).

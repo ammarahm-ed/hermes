@@ -222,6 +222,29 @@ Spread of an array into an array literal is supported.
 const xs: number[] = [1, 2, ...other];
 ```
 
+### Overloading
+
+Class methods can be overloaded using the `@Hermes.overload` decoration. Overloaded methods must be final.
+```
+class C {
+  @Hermes.final
+  @Hermes.overload
+  foo(x: number): string { return 'a'; }
+  @Hermes.final
+  @Hermes.overload
+  foo(x: string): void {}
+}
+```
+
+Overloads are resolved at compile time, and are not stored on the home object.
+
+Both public and private methods may be overloaded, and an overload set may mix non-generic and generic overloads.
+
+Restrictions:
+* No overloading constructors/accessors
+* Overloaded methods must be called (`var x = obj.overloadedMethod` is an error)
+* No overloading static methods
+
 ### Other Features
 
 * Arrow functions (without type parameters).

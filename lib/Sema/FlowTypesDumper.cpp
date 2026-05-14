@@ -176,9 +176,18 @@ void FlowTypesDumper::printTypeDescription(
         os << "  " << field.name;
         if (field.isMethod())
           os << (field.overridden ? " [overridden]" : " [final]");
-        os << ": ";
-        printTypeRef(os, field.type);
-        os << '\n';
+        if (field.isOverloaded()) {
+          os << " [overloaded]:";
+          for (const auto &[overloadMethod, overloadType] : field.overloads) {
+            os << ' ';
+            printTypeRef(os, overloadType);
+          }
+          os << '\n';
+        } else {
+          os << ": ";
+          printTypeRef(os, field.type);
+          os << '\n';
+        }
       }
       os << "})";
     } break;

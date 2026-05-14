@@ -369,6 +369,11 @@ class FlowChecker::ParseClassType {
   llvh::SmallDenseMap<UniqueString *, ESTree::Node *> staticNames{};
   llvh::SmallVector<ClassType::Field, 4> statics{};
 
+  /// Maps field/method names to their index in the corresponding field
+  /// vector, for O(1) lookup when checking for duplicate declarations.
+  llvh::SmallDenseMap<UniqueString *, size_t> methodFieldIdx{};
+  llvh::SmallDenseMap<UniqueString *, size_t> staticFieldIdx{};
+
   Type *constructorType = nullptr;
   /// The ClassConstructorType wrapping the class, used as the 'this' type for
   /// static methods. May be nullptr.
@@ -676,6 +681,7 @@ class FlowChecker::ParseClassType {
     }
 
     if (isStatic) {
+      staticFieldIdx[name.getUnderlyingPointer()] = statics.size();
       // Static fields use layoutSlotIR = None because they will use
       // Variables, not object property slots.
       // Create a Decl so IRGen can associate a Variable with it.
@@ -728,6 +734,14 @@ class FlowChecker::ParseClassType {
             "ft: @Hermes.final cannot be applied to a constructor");
         return outer_.flowContext_.getAny();
       }
+      if (hermes::findDecorator(
+              method->_decorators,
+              {outer_.kw_.identHermes, outer_.kw_.identOverload})) {
+        outer_.sm_.error(
+            method->getStartLoc(),
+            "ft: @Hermes.overload cannot be applied to a constructor");
+        return outer_.flowContext_.getAny();
+      }
 
       // Constructor
       if (fe->_returnType) {
@@ -757,11 +771,36 @@ class FlowChecker::ParseClassType {
 
       bool finalMethod = hermes::findDecorator(
           method->_decorators, {outer_.kw_.identHermes, outer_.kw_.identFinal});
+      bool overloadMethod = hermes::findDecorator(
+          method->_decorators,
+          {outer_.kw_.identHermes, outer_.kw_.identOverload});
+
+      // @Hermes.overload requires @Hermes.final.
+      if (overloadMethod && !finalMethod) {
+        outer_.sm_.error(
+            method->getStartLoc(),
+            "ft: @Hermes.overload requires @Hermes.final");
+        return outer_.flowContext_.getAny();
+      }
+
+      // @Hermes.overload is not supported on static methods.
+      if (overloadMethod && method->_static) {
+        outer_.sm_.error(
+            method->getStartLoc(),
+            "ft: @Hermes.overload cannot be applied to static methods");
+        return outer_.flowContext_.getAny();
+      }
 
       // Detect getter/setter kind.
       bool isGetter = (method->_kind == outer_.kw_.identGet);
       bool isSetter = (method->_kind == outer_.kw_.identSet);
       if (isGetter || isSetter) {
+        if (overloadMethod) {
+          outer_.sm_.error(
+              method->getStartLoc(),
+              "ft: @Hermes.overload cannot be applied to getters/setters");
+          return outer_.flowContext_.getAny();
+        }
         if (!finalMethod) {
           outer_.sm_.error(
               method->getStartLoc(),
@@ -921,23 +960,53 @@ class FlowChecker::ParseClassType {
       // Allow getter+setter pairs with the same name.
       auto &nameMap = method->_static ? staticNames : methodNames;
       auto &fieldVec = method->_static ? statics : methods;
+      auto &idxMap = method->_static ? staticFieldIdx : methodFieldIdx;
       auto [it, inserted] =
           nameMap.try_emplace(name.getUnderlyingPointer(), method);
       if (!inserted) {
         // Try to merge getter+setter pair. Find the existing field.
-        ClassType::Field *existingField = nullptr;
-        for (auto &f : fieldVec) {
-          if (f.name == name) {
-            existingField = &f;
-            break;
-          }
-        }
-        bool canMerge = existingField &&
-            ((isGetter && existingField->hasSetter() &&
-              !existingField->hasGetter()) ||
-             (isSetter && existingField->hasGetter() &&
-              !existingField->hasSetter()));
+        ClassType::Field *existingField =
+            &fieldVec[idxMap[name.getUnderlyingPointer()]];
+        bool canMerge = (isGetter && existingField->hasSetter() &&
+                         !existingField->hasGetter()) ||
+            (isSetter && existingField->hasGetter() &&
+             !existingField->hasSetter());
         if (!canMerge) {
+          // Check if this is an overloaded method.
+          bool existingIsOverload = existingField->isOverloaded() ||
+              (existingField->method &&
+               hermes::findDecorator(
+                   existingField->method->_decorators,
+                   {outer_.kw_.identHermes, outer_.kw_.identOverload}));
+
+          if (overloadMethod && existingIsOverload) {
+            // Both methods have @Hermes.overload — merge as overload.
+            if (!existingField->isOverloaded()) {
+              // First duplicate: move the existing method/type into
+              // the overloads map.
+              existingField->overloads.insert(
+                  {existingField->method, existingField->type});
+              existingField->type = nullptr;
+              existingField->method = nullptr;
+            }
+            // For non-generic overloads, a Decl was already created
+            // during final method processing before we reached the
+            // duplicate name check.
+            // For generic overloads, registerGenericMethod was already
+            // called during generic method processing before the
+            // duplicate name check.
+            existingField->overloads.insert({method, methodType});
+            return methodType;
+          } else if (overloadMethod || existingIsOverload) {
+            // Mismatch in overload expectation between two methods.
+            assert(overloadMethod != existingIsOverload);
+            outer_.sm_.error(
+                method->_key->getStartLoc(),
+                "ft: all overloads of " + name.str() +
+                    " must be decorated with @Hermes.overload");
+            return outer_.flowContext_.getAny();
+          }
+
           outer_.sm_.error(
               method->_key->getStartLoc(),
               "ft: method " + name.str() + " already declared");
@@ -986,6 +1055,9 @@ class FlowChecker::ParseClassType {
       // For getters/regular methods, method is set and setterMethod is null.
       ESTree::MethodDefinitionNode *getterMethod = isSetter ? nullptr : method;
       ESTree::MethodDefinitionNode *setMethod = isSetter ? method : nullptr;
+
+      // Record the index for O(1) field lookup on duplicate name checks.
+      idxMap[name.getUnderlyingPointer()] = fieldVec.size();
 
       if (method->_static) {
         // Static methods use layoutSlotIR = None because they will use
@@ -1218,11 +1290,20 @@ void FlowChecker::visit(ESTree::MethodDefinitionNode *node) {
     }
     Type *funcType = optField->getField()->type;
 
+    // For overloaded fields, find the type for this specific method.
+    if (optField->getField()->isOverloaded()) {
+      funcType = optField->getField()->overloads.lookup(node);
+      assert(funcType && "overload type missing — overload not registered");
+    }
+
     // Typecheck overriding methods.
     // Private methods are not inherited, so they don't need to be checked.
+    // Skip override checking for overloaded methods — each overload has a
+    // different signature and override semantics are not well-defined.
     Type *superClassType =
         curClassContext_->getClassTypeInfo()->getSuperClass();
-    if (!optField->getField()->isPrivate && superClassType) {
+    if (!optField->getField()->isPrivate &&
+        !optField->getField()->isOverloaded() && superClassType) {
       auto *superClassTypeInfo = llvh::cast<ClassType>(superClassType->info);
       OptValue<ClassType::FieldLookupEntry> superIt;
       if (node->_static) {
@@ -1236,6 +1317,13 @@ void FlowChecker::visit(ESTree::MethodDefinitionNode *node) {
       }
       if (superIt) {
         auto *superMethod = superIt->getField();
+        // An overloaded parent method has no single `type`; overriding it
+        // is rejected earlier in phase 1 by the "cannot override final
+        // method" check, so we should never reach phase 2 in that case.
+        assert(
+            !superMethod->isOverloaded() &&
+            "overriding an overloaded parent method should have been "
+            "rejected in phase 1");
         // Overriding method's function type must flow into the overridden
         // method's function type.
         bool canOverride = canAOverrideB(
@@ -1317,6 +1405,13 @@ void FlowChecker::visit(ESTree::DecoratorNode *node, ESTree::Node *parent) {
   if (propID->_name == kw_.identFinal) {
     if (!llvh::isa<ESTree::MethodDefinitionNode>(parent)) {
       sm_.error(node->getSourceRange(), "ft: invalid @Hermes.final");
+      return;
+    }
+  } else if (propID->_name == kw_.identOverload) {
+    if (!llvh::isa<ESTree::MethodDefinitionNode>(parent)) {
+      sm_.error(
+          node->getSourceRange(),
+          "ft: @Hermes.overload is only valid on methods");
       return;
     }
   } else {
@@ -3265,6 +3360,8 @@ std::pair<Type *, const ClassType::Field *> FlowChecker::lookupPropertyOnClass(
                              : homeObj->findPublicField(propName);
   if (optMethod) {
     const auto *field = optMethod->getField();
+    // For overloaded methods, type is null. Callers must handle this
+    // and perform overload resolution at the call site.
     Type *type = field->type;
 
     if (field->isAccessor()) {
@@ -3274,11 +3371,14 @@ std::pair<Type *, const ClassType::Field *> FlowChecker::lookupPropertyOnClass(
       return {type, field};
     }
 
-    // For non-generic final methods, propagate the Decl from the
-    // method definition key to the call-site property so IRGen
+    // For non-generic, non-overloaded final methods, propagate the Decl
+    // from the method definition key to the call-site property so IRGen
     // can look it up. Generic final methods get their Decls set
     // on the call-site property through specializedMethodDecls_.
-    if (field->finalMethod && !llvh::isa<GenericType>(type->info)) {
+    // Overloaded methods get their Decls set during overload resolution
+    // in the CallExpression visitor.
+    if (field->finalMethod && !field->isOverloaded() &&
+        !llvh::isa<GenericType>(type->info)) {
       auto *methodKey = ESTree::getPropertyIdentifier(field->method->_key);
       if (auto *decl = semContext_.getExpressionDecl(methodKey)) {
         auto *idNode = ESTree::getPropertyIdentifier(propNode);
@@ -3286,9 +3386,9 @@ std::pair<Type *, const ClassType::Field *> FlowChecker::lookupPropertyOnClass(
       }
     }
     assert(
-        (llvh::isa<BaseFunctionType>(type->info) ||
+        (field->isOverloaded() || llvh::isa<BaseFunctionType>(type->info) ||
          llvh::isa<GenericType>(type->info)) &&
-        "methods must be functions or generic");
+        "methods must be functions, generic, or overloaded");
     return {type, field};
   }
   return {nullptr, nullptr};

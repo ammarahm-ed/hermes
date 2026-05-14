@@ -51,6 +51,20 @@ void ESTreeIRGen::genClassDeclaration(ESTree::ClassDeclarationNode *node) {
     const flow::ClassType::Field &field =
         classType->getHomeObjectTypeInfo()->getFields()[idx];
     if (field.isMethod() && field.isPrivate) {
+      if (field.isOverloaded()) {
+        // Overloaded final private method: emit each non-generic overload
+        // as its own closure / Variable. Generic overloads are emitted
+        // through specializations.
+        for (auto &[overloadMethod, overloadType] : field.overloads) {
+          if (llvh::isa<flow::GenericType>(overloadType->info))
+            continue;
+          sema::Decl *decl = semCtx_.getExpressionDecl(
+              ESTree::getPropertyIdentifier(overloadMethod->_key));
+          emitTypedFinalMethodClosureStore(field, overloadMethod, decl);
+        }
+        continue;
+      }
+
       // Skip generic private methods - emitted through specializations.
       if (llvh::isa<flow::GenericType>(field.type->info))
         continue;
@@ -498,7 +512,30 @@ Value *ESTreeIRGen::emitTypedClassAllocation(
       // Final methods don't get a layout slot in the home object.
       // They are accessed through Variables instead.
       if (field.finalMethod) {
-        if (llvh::isa<flow::GenericType>(field.type->info)) {
+        if (field.isOverloaded()) {
+          // Overloaded final method: emit each overload as a separate
+          // closure.
+          if (entry.classType == classType) {
+            // Field was defined in this class (not inherited).
+            // Emit the code here.
+            auto getFinalDecl = [this](ESTree::MethodDefinitionNode *m) {
+              return semCtx_.getExpressionDecl(
+                  ESTree::getPropertyIdentifier(m->_key));
+            };
+            for (auto &[overloadMethod, overloadType] : field.overloads) {
+              if (llvh::isa<flow::GenericType>(overloadType->info)) {
+                // Generic overload — codegen happens via specializations
+                // emitted from the call site (see FlowChecker overload
+                // resolution).
+                continue;
+              }
+              emitTypedFinalMethodClosureStore(
+                  field, overloadMethod, getFinalDecl(overloadMethod));
+            }
+          }
+          return;
+        }
+        if (field.type && llvh::isa<flow::GenericType>(field.type->info)) {
           // Generic final method - no codegen needed here.
           return;
         }

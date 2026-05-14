@@ -530,10 +530,11 @@ class FlowChecker::ExprVisitor {
       auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
       name = Identifier::getFromPointer(id->_name);
     }
-
+    // lookupPropertyOnClass returns null `type` (with non-null `field`) for
+    // overloaded methods; resolution happens at the call site.
     auto [type, field] =
         outer_.lookupPropertyOnClass(classType, name, node->_property);
-    if (!type) {
+    if (!field) {
       // TODO: class declaration location.
       outer_.sm_.error(
           node->_property->getSourceRange(),
@@ -543,7 +544,7 @@ class FlowChecker::ExprVisitor {
     }
 
     // Setter-only access is only legal on the LHS of `=`.
-    if (field && field->isAccessor() && !field->hasGetter()) {
+    if (field->isAccessor() && !field->hasGetter()) {
       auto *assignParent =
           llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
       if (!assignParent || node != assignParent->_left ||
@@ -553,7 +554,16 @@ class FlowChecker::ExprVisitor {
             "ft: cannot read setter-only property");
       }
     }
-
+    // Overloaded methods may only be referenced as a direct call target.
+    if (field->isOverloaded()) {
+      auto *callParent = llvh::dyn_cast<ESTree::CallExpressionNode>(parent);
+      if (!callParent || callParent->_callee != node) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: overloaded method " + name.str() +
+                " cannot be referenced outside a call expression");
+      }
+    }
     return type;
   }
 
@@ -1737,6 +1747,9 @@ class FlowChecker::ExprVisitor {
     // Whether we need to visit the callee. Set to false for generic method
     // calls where we've already set the type.
     bool shouldVisitCallee = true;
+    // Whether overload resolution was already performed (e.g. via explicit
+    // type arguments). Skip the later overloaded method check if true.
+    bool overloadResolved = false;
 
     // Handle generic calls and method calls.
 
@@ -1788,32 +1801,43 @@ class FlowChecker::ExprVisitor {
       }
 
       // Look up the method in the appropriate type.
-      OptValue<ClassType::FieldLookupEntry> optMethod;
+      const ClassType::Field *field = nullptr;
       if (auto *classType = llvh::dyn_cast<ClassType>(objType->info)) {
-        auto *homeObj = classType->getHomeObjectTypeInfo();
-        optMethod = isPrivate ? homeObj->findPrivateField(name)
-                              : homeObj->findPublicField(name);
+        field =
+            outer_.lookupPropertyOnClass(classType, name, memCallee->_property)
+                .second;
       } else if (
           auto *consType =
               llvh::dyn_cast<ClassConstructorType>(objType->info)) {
         auto *classTypeInfo =
             llvh::cast<ClassType>(consType->getClassType()->info);
         if (auto *staticInfo = classTypeInfo->getStaticObjectTypeInfo()) {
-          optMethod = isPrivate ? staticInfo->findPrivateField(name)
-                                : staticInfo->findPublicField(name);
+          auto optMethod = isPrivate ? staticInfo->findPrivateField(name)
+                                     : staticInfo->findPublicField(name);
+          if (optMethod)
+            field = optMethod->getField();
         }
       }
 
-      if (optMethod &&
-          llvh::isa<GenericType>(optMethod->getField()->type->info)) {
-        outer_.resolveCallToGenericMethodSpecialization(
-            node, memCallee, optMethod->getField()->method);
-      } else {
-        // Method is not generic but type arguments were provided.
-        outer_.sm_.error(
-            node->_typeArguments->getSourceRange(),
-            "ft: type arguments provided for non-generic method");
-        return;
+      if (field) {
+        if (field->isOverloaded()) {
+          auto *typeArgsNode =
+              llvh::cast<ESTree::TypeParameterInstantiationNode>(
+                  node->_typeArguments);
+          if (!resolveOverloadedMethodCall(
+                  node, memCallee, field, typeArgsNode))
+            return;
+          shouldVisitArguments = false;
+          overloadResolved = true;
+        } else if (llvh::isa<GenericType>(field->type->info)) {
+          outer_.resolveCallToGenericMethodSpecialization(
+              node, memCallee, field->method);
+        } else {
+          outer_.sm_.error(
+              node->_typeArguments->getSourceRange(),
+              "ft: type arguments provided for non-generic method");
+          return;
+        }
       }
     } else if (node->_typeArguments) {
       // Generics handled above.
@@ -1828,6 +1852,39 @@ class FlowChecker::ExprVisitor {
       visitESTreeNode(*this, node->_callee, node, nullptr);
     }
     Type *calleeType = outer_.getNodeTypeOrAny(node->_callee);
+
+    // Handle overloaded method calls if they haven't been resolved based on
+    // explicit type arguments.
+    // Check before generic inference since some overloads may be generic.
+    if (auto *methodCallee =
+            llvh::dyn_cast<ESTree::MemberExpressionNode>(node->_callee);
+        !overloadResolved && methodCallee && !methodCallee->_computed) {
+      Type *objType = outer_.getNodeTypeOrAny(methodCallee->_object);
+      const flow::ClassType::Field *field = nullptr;
+
+      if (auto *classType = llvh::dyn_cast<flow::ClassType>(objType->info)) {
+        Identifier name;
+        if (auto *pn = llvh::dyn_cast<ESTree::PrivateNameNode>(
+                methodCallee->_property)) {
+          name = outer_.astContext_.getPrivateNameIdentifier(
+              llvh::cast<ESTree::IdentifierNode>(pn->_id)->_name);
+        } else {
+          auto *id =
+              llvh::cast<ESTree::IdentifierNode>(methodCallee->_property);
+          name = Identifier::getFromPointer(id->_name);
+        }
+        field =
+            outer_
+                .lookupPropertyOnClass(classType, name, methodCallee->_property)
+                .second;
+      }
+      if (field && field->isOverloaded()) {
+        if (!resolveOverloadedMethodCall(node, methodCallee, field))
+          return;
+        shouldVisitArguments = false;
+        calleeType = outer_.getNodeTypeOrAny(node->_callee);
+      }
+    }
 
     // Handle generic method inference (no explicit type arguments).
     // After visiting the callee, if the type is GenericType, attempt to
@@ -1997,7 +2054,7 @@ class FlowChecker::ExprVisitor {
     }
 
     outer_.setNodeType(node, returnType);
-    checkArgumentTypes(params, node, node->_arguments, "function");
+    checkCallArgumentTypes(params, node, node->_arguments, "function");
   }
 
   void checkSHBuiltin(
@@ -2116,7 +2173,7 @@ class FlowChecker::ExprVisitor {
       return;
     }
 
-    checkArgumentTypes(
+    checkCallArgumentTypes(
         ftype->getParams(), call, call->_arguments, "function", 2);
     return;
   }
@@ -2535,7 +2592,7 @@ class FlowChecker::ExprVisitor {
         break;
     }
     if (consFType) {
-      checkArgumentTypes(
+      checkCallArgumentTypes(
           llvh::cast<TypedFunctionType>(consFType->info)->getParams(),
           node,
           node->_arguments,
@@ -2578,15 +2635,18 @@ class FlowChecker::ExprVisitor {
     }
   }
 
-  /// Check the types of the supplies arguments, adding checked casts if needed.
+  /// Check the types of the supplied arguments, adding checked casts if
+  /// needed. If \p reportErrors is false, silently check without emitting
+  /// errors or inserting casts.
   /// \param offset the number of arguments to ignore at the front of \p
   ///   arguments. Used for $SHBuiltin.call, which has extra args at the front.
-  bool checkArgumentTypes(
+  bool checkCallArgumentTypes(
       llvh::ArrayRef<TypedFunctionType::Param> params,
       ESTree::Node *callNode,
       ESTree::NodeList &arguments,
       const llvh::Twine &calleeName,
-      uint32_t offset = 0) {
+      uint32_t offset = 0,
+      bool reportErrors = true) {
     size_t numArgs = arguments.size() - offset;
     if (params.size() != numArgs) {
       // Allow fewer arguments when trailing params are optional.
@@ -2594,19 +2654,21 @@ class FlowChecker::ExprVisitor {
         // OK: all remaining params starting from numArgs are optional
         // (the parser enforces optional params come last).
       } else {
-        // Count the number of required parameters.
-        size_t numRequired = params.size();
-        while (numRequired > 0 && params[numRequired - 1].optional)
-          --numRequired;
-        outer_.sm_.error(
-            callNode->getSourceRange(),
-            "ft: " + calleeName + " expects " +
-                (numArgs > params.size()
-                     ? "at most " + llvh::Twine(params.size())
-                     : (numRequired != params.size()
-                            ? "at least " + llvh::Twine(numRequired)
-                            : llvh::Twine(params.size()))) +
-                " arguments, but " + llvh::Twine(numArgs) + " supplied");
+        if (reportErrors) {
+          // Count the number of required parameters.
+          size_t numRequired = params.size();
+          while (numRequired > 0 && params[numRequired - 1].optional)
+            --numRequired;
+          outer_.sm_.error(
+              callNode->getSourceRange(),
+              "ft: " + calleeName + " expects " +
+                  (numArgs > params.size()
+                       ? "at most " + llvh::Twine(params.size())
+                       : (numRequired != params.size()
+                              ? "at least " + llvh::Twine(numRequired)
+                              : llvh::Twine(params.size()))) +
+                  " arguments, but " + llvh::Twine(numArgs) + " supplied");
+        }
         return false;
       }
     }
@@ -2620,8 +2682,10 @@ class FlowChecker::ExprVisitor {
       ESTree::Node *arg = &*it;
 
       if (llvh::isa<ESTree::SpreadElementNode>(arg)) {
-        outer_.sm_.error(
-            arg->getSourceRange(), "ft: argument spread is not supported");
+        if (reportErrors) {
+          outer_.sm_.error(
+              arg->getSourceRange(), "ft: argument spread is not supported");
+        }
         return false;
       }
 
@@ -2631,21 +2695,23 @@ class FlowChecker::ExprVisitor {
       auto [argTypeNarrow, cf] = tryNarrowType(argType, expectedType);
 
       if (!cf.canFlow) {
-        if (param.name.isValid()) {
-          outer_.sm_.error(
-              arg->getSourceRange(),
-              "ft: " + calleeName + " parameter '" + param.name.str() +
-                  "' type mismatch");
-        } else {
-          outer_.sm_.error(
-              arg->getSourceRange(),
-              "ft: " + calleeName + " parameter #" + llvh::Twine(argIndex + 1) +
-                  " type mismatch");
+        if (reportErrors) {
+          if (param.name.isValid()) {
+            outer_.sm_.error(
+                arg->getSourceRange(),
+                "ft: " + calleeName + " parameter '" + param.name.str() +
+                    "' type mismatch");
+          } else {
+            outer_.sm_.error(
+                arg->getSourceRange(),
+                "ft: " + calleeName + " parameter #" +
+                    llvh::Twine(argIndex + 1) + " type mismatch");
+          }
         }
         return false;
       }
       // If a cast is needed, replace the argument with the cast.
-      if (cf.needCheckedCast && outer_.compile_) {
+      if (reportErrors && cf.needCheckedCast && outer_.compile_) {
         // Insert the new node before the current node and erase the current
         // one.
         auto newIt = arguments.insert(
@@ -2655,6 +2721,124 @@ class FlowChecker::ExprVisitor {
       }
     }
 
+    return true;
+  }
+
+  /// Resolve a call to an overloaded method by selecting the matching
+  /// overload and setting the callee type. Does not set the return type
+  /// on the call node — the caller should fall through to the normal
+  /// call checking path for argument type checking and return type.
+  /// On success, the call's arguments have already been visited.
+  /// \param explicitTypeArgs optional explicit type arguments node from the
+  ///   call expression. If non-null, only generic overloads with matching
+  ///   type-parameter count are considered, and the explicit types are used
+  ///   directly instead of inference; non-generic overloads are skipped.
+  /// \return false on error (already reported), true on success.
+  LLVM_NODISCARD bool resolveOverloadedMethodCall(
+      ESTree::CallExpressionNode *node,
+      ESTree::MemberExpressionNode *callee,
+      const ClassType::Field *field,
+      ESTree::TypeParameterInstantiationNode *explicitTypeArgs = nullptr) {
+    assert(field->isOverloaded() && "field must be overloaded");
+
+    Type *objType = outer_.getNodeTypeOrAny(callee->_object);
+
+    // Pre-parse explicit type arguments if provided.
+    llvh::SmallVector<Type *, 2> explicitTypeArgTypes;
+    if (explicitTypeArgs) {
+      for (ESTree::Node &arg : explicitTypeArgs->_params) {
+        explicitTypeArgTypes.push_back(outer_.parseTypeAnnotation(&arg));
+      }
+    }
+
+    // Visit arguments without constraints to determine their types.
+    for (ESTree::Node &arg : node->_arguments) {
+      outer_.visitExpression(&arg, node, nullptr);
+    }
+
+    // Check each overload for type compatibility with the
+    // arguments, selecting the unique match.
+    // If there's two matches, it's an ambiguous callsite.
+    // If there's no matches it doesn't typecheck.
+    Type *matchedType = nullptr;
+    sema::Decl *matchedDecl = nullptr;
+
+    for (const auto &[overloadMethod, originalOverloadType] :
+         field->overloads) {
+      Type *overloadType = originalOverloadType;
+      sema::Decl *overloadDecl = nullptr;
+
+      if (llvh::isa<GenericType>(originalOverloadType->info)) {
+        llvh::SmallVector<Type *, 2> typeArgs;
+        if (explicitTypeArgs) {
+          // Only consider generic overloads whose type-parameter count
+          // matches the number of explicit type arguments.
+          auto *fe = llvh::cast<ESTree::FunctionExpressionNode>(
+              overloadMethod->_value);
+          auto *typeParams = llvh::cast<ESTree::TypeParameterDeclarationNode>(
+              fe->_typeParameters);
+          if (typeParams->_params.size() != explicitTypeArgTypes.size())
+            continue;
+          typeArgs.assign(
+              explicitTypeArgTypes.begin(), explicitTypeArgTypes.end());
+        } else {
+          // Infer type arguments and specialize.
+          auto [didVisitArgs, inferred] =
+              outer_.inferTypeArgumentsForGenericMethodCall(
+                  node, callee, overloadMethod);
+          if (inferred.empty())
+            continue;
+          typeArgs = std::move(inferred);
+        }
+        auto result = outer_.specializeGenericMethodWithParsedTypes(
+            overloadMethod, node->getSourceRange(), typeArgs, objType);
+        if (!result.type)
+          continue;
+        overloadType = result.type;
+        overloadDecl = result.decl;
+      } else {
+        // Non-generic overload: explicit type arguments don't apply.
+        if (explicitTypeArgs)
+          continue;
+        overloadDecl = outer_.semContext_.getExpressionDecl(
+            ESTree::getPropertyIdentifier(overloadMethod->_key));
+      }
+
+      auto *fnType = llvh::dyn_cast<TypedFunctionType>(overloadType->info);
+      if (!fnType)
+        continue;
+
+      // Check arity and argument types (silent — no error reporting).
+      if (!checkCallArgumentTypes(
+              fnType->getParams(),
+              node,
+              node->_arguments,
+              /* calleeName */ "",
+              /* offset */ 0,
+              /* reportErrors */ false))
+        continue;
+
+      if (matchedType) {
+        outer_.sm_.error(
+            node->getSourceRange(),
+            "ft: ambiguous call: multiple overloads match");
+        return false;
+      }
+      matchedType = overloadType;
+      matchedDecl = overloadDecl;
+    }
+
+    if (!matchedType) {
+      outer_.sm_.error(
+          node->getSourceRange(), "ft: no matching overload for call");
+      return false;
+    }
+
+    assert(matchedDecl && "overloaded methods have a Decl (they are final)");
+    outer_.semContext_.setExpressionDecl(
+        ESTree::getPropertyIdentifier(callee->_property), matchedDecl);
+
+    outer_.setNodeType(callee, matchedType);
     return true;
   }
 };

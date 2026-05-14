@@ -9,6 +9,7 @@
 
 #include "ASTEval.h"
 #include "ScopedFunctionPromoter.h"
+#include "hermes/AST/ASTUtils.h"
 #include "hermes/AST/Context.h"
 #include "hermes/Regex/RegexSerialization.h"
 #include "hermes/Sema/SemContext.h"
@@ -2147,6 +2148,10 @@ void SemanticResolver::collectDeclaredPrivateIdentifiers(
     bool isStatic = false;
     bool isGetter = false;
     bool isSetter = false;
+    /// True if the first declaration was a private method decorated with
+    /// @Hermes.overload. Subsequent overloaded methods with the same name
+    /// are accepted; non-overload duplicates remain an error.
+    bool isOverloadedMethod = false;
     /// In the case of a pair of accessors defined with the same name, we should
     /// reuse the same decl to define the declaration & expression decl of the
     /// second accessor. This field stores that original decl for the second
@@ -2183,10 +2188,24 @@ void SemanticResolver::collectDeclaredPrivateIdentifiers(
       auto id = llvh::cast<IdentifierNode>(privateName->_id);
       UniqueString *methKind = method->_kind;
       if (methKind == kw_.identMethod) {
-        if (!privateDeclarations.try_emplace(id->_name, PrivateAccessorInfo{})
-                 .second) {
-          sm_.error(id->getSourceRange(), defaultDupErrMsg);
+        // Private methods decorated with @Hermes.overload may legally have
+        // duplicate names. The FlowChecker validates that all overloads of a
+        // given name are decorated and merges them into a single Field. The
+        // first overload creates the binding; subsequent overloads share it.
+        bool isOverload =
+            typed_ &&
+            hermes::findDecorator(
+                method->_decorators, {kw_.identHermes, kw_.identOverload});
+        auto [iter, inserted] =
+            privateDeclarations.try_emplace(id->_name, PrivateAccessorInfo{});
+        if (!inserted) {
+          if (!isOverload || !iter->second.isOverloadedMethod) {
+            sm_.error(id->getSourceRange(), defaultDupErrMsg);
+          }
+          // Resolve this private name's identifier to the existing decl.
+          resolvePrivateName(id);
         } else {
+          iter->second.isOverloadedMethod = isOverload;
           declarePrivateName(id, Decl::Kind::PrivateMethod, method->_static);
         }
         continue;
@@ -2196,7 +2215,7 @@ void SemanticResolver::collectDeclaredPrivateIdentifiers(
           "unrecognized method kind.");
       bool isSetter = methKind == kw_.identSet;
       PrivateAccessorInfo curInfo{
-          true, method->_static, !isSetter, isSetter, nullptr};
+          true, method->_static, !isSetter, isSetter, false, nullptr};
       auto [iter, success] = privateDeclarations.insert({id->_name, curInfo});
       // If we successfully inserted, there's no possibility for an error.
       if (success) {
