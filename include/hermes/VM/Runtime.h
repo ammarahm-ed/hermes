@@ -2020,6 +2020,14 @@ class NoLeakHandleScope {
   NoLeakHandleScope(NoLeakHandleScope &&) = delete;
   NoLeakHandleScope &operator=(NoLeakHandleScope &&) = delete;
 };
+
+struct NoMutatorScope {
+  explicit NoMutatorScope([[maybe_unused]] vm::Runtime &runtime) {}
+  NoMutatorScope(const NoMutatorScope &) = delete;
+  NoMutatorScope &operator=(const NoMutatorScope &) = delete;
+  NoMutatorScope(NoMutatorScope &&) = delete;
+  NoMutatorScope &operator=(NoMutatorScope &&) = delete;
+};
 #else
 
 /// RAII class to temporarily disallow allocation of something.
@@ -2119,6 +2127,23 @@ class NoLeakHandleScope {
   NoLeakHandleScope &operator=(const NoLeakHandleScope &) = delete;
   NoLeakHandleScope(NoLeakHandleScope &&) = delete;
   NoLeakHandleScope &operator=(NoLeakHandleScope &&) = delete;
+};
+
+/// Asserts no allocation or JS execution when this scope is alive.
+class NoMutatorScope {
+ private:
+  vm::NoAllocScope noAlloc_;
+  vm::NoRJSScope noRJS_;
+
+ public:
+  explicit NoMutatorScope(vm::Runtime &runtime)
+      : noAlloc_(runtime), noRJS_(runtime) {}
+  ~NoMutatorScope() = default;
+
+  NoMutatorScope(const NoMutatorScope &) = delete;
+  NoMutatorScope &operator=(const NoMutatorScope &) = delete;
+  NoMutatorScope(NoMutatorScope &&) = delete;
+  NoMutatorScope &operator=(NoMutatorScope &&) = delete;
 };
 #endif
 

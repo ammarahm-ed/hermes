@@ -267,7 +267,8 @@ class HermesRuntimeImpl final : public HermesRuntime,
         weakHermesValues_(runtimeConfig.getGCConfig().getOccupancyTarget()),
         rt_(::hermes::vm::Runtime::create(runtimeConfig)),
         runtime_(*rt_),
-        vmExperimentFlags_(runtimeConfig.getVMExperimentFlags()) {
+        vmExperimentFlags_(runtimeConfig.getVMExperimentFlags()),
+        mutatorScope{runtime_} {
 #ifdef HERMES_ENABLE_DEBUGGER
     compileFlags_.debug = true;
 #endif
@@ -1367,6 +1368,40 @@ class HermesRuntimeImpl final : public HermesRuntime,
   /// thread to check a posted message.
   IEventLoopControl *eventLoopControl_{nullptr};
 #endif
+
+  /// Tracking status when the current execution enters/exits the mutator from
+  /// JSI.
+  struct MutatorScope {
+    vm::Runtime &rt;
+    /// Tracks how many times we have (potentially) entered mutator. This may be
+    /// useful in heuristics for running certain tasks when entering mutator
+    /// in the future.
+    /// This is allowed to overflow (which will wrap around) since we don't need
+    /// the exact accumulated counter.
+    uint64_t counter{0};
+  };
+
+  /// RAII for managing MutatorScope when entering/exiting the mutator from JSI.
+  class ExecutionScopeRAII {
+   private:
+    MutatorScope &scope_;
+
+   public:
+    explicit ExecutionScopeRAII(MutatorScope &scope) : scope_(scope) {
+      scope_.counter++;
+    }
+
+    ~ExecutionScopeRAII() = default;
+
+    // Non-copyable, non-movable.
+    ExecutionScopeRAII(const ExecutionScopeRAII &) = delete;
+    ExecutionScopeRAII(ExecutionScopeRAII &&) = delete;
+    ExecutionScopeRAII &operator=(const ExecutionScopeRAII &) = delete;
+    ExecutionScopeRAII &operator=(ExecutionScopeRAII &&) = delete;
+  };
+
+  /// ExecutionScope for this Runtime.
+  MutatorScope mutatorScope;
 };
 } // namespace
 
