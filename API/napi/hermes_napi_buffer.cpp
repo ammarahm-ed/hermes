@@ -229,11 +229,11 @@ napi_status NAPI_CDECL node_api_create_buffer_from_arraybuffer(
   RETURN_STATUS_IF_FALSE(
       env, abPhv->isObject() && vmisa<JSArrayBuffer>(*abPhv), napi_invalid_arg);
 
-  auto *ab = vmcast<JSArrayBuffer>(*abPhv);
-
   // Validate bounds.
   RETURN_STATUS_IF_FALSE(
-      env, byte_offset + byte_length <= ab->size(), napi_invalid_arg);
+      env,
+      byte_offset + byte_length <= vmcast<JSArrayBuffer>(*abPhv)->size(),
+      napi_invalid_arg);
 
   GCScope gcScope(runtime);
 
@@ -243,11 +243,13 @@ napi_status NAPI_CDECL node_api_create_buffer_from_arraybuffer(
   LocalsRAII lraii(runtime, &lv);
 
   // Create a Uint8Array view at the specified offset and length.
+  // Re-deref *abPhv after the allocation: it is a NAPI pinned handle, so it
+  // survives GC and yields the post-relocation pointer.
   lv.ta = Uint8Array::create(runtime, Uint8Array::getPrototype(runtime));
   JSTypedArrayBase::setBuffer(
       runtime,
       vmcast<JSTypedArrayBase>(lv.ta.getHermesValue()),
-      ab,
+      vmcast<JSArrayBuffer>(*abPhv),
       static_cast<JSTypedArrayBase::size_type>(byte_offset),
       static_cast<JSTypedArrayBase::size_type>(byte_length),
       1);
