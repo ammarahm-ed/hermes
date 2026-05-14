@@ -115,6 +115,16 @@ Promise.resolve('orig').finally(function() {
         function(e) { print('rejected-override:', e); });
 // CHECK-NEXT: rejected-override: overrideErr
 
+// Regression: onFinally returning an object with `constructor === Promise`
+// but no `.then` method must be wrapped via PromiseResolve(C, x) per spec
+// §27.2.5.3.1 step 4. A previous shortcut treated such objects as
+// already-Promises and called `.then` on them, throwing TypeError.
+Promise.resolve('orig-fake-then').finally(function() {
+  return { constructor: Promise };
+}).then(function(v) { print('fake-constructor:', v); },
+        function(e) { print('fake-constructor-rejected:', e && e.constructor.name); });
+// CHECK-NEXT: fake-constructor: orig-fake-then
+
 var deferred;
 
 HermesInternal.enablePromiseRejectionTracker({
