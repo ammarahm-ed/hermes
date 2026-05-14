@@ -3253,13 +3253,16 @@ std::pair<Type *, const ClassType::Field *> FlowChecker::lookupPropertyOnClass(
     ClassType *classType,
     Identifier propName,
     ESTree::Node *propNode) {
-  auto optField = classType->findPublicField(propName);
+  bool isPrivate = llvh::isa<ESTree::PrivateNameNode>(propNode);
+  auto optField = isPrivate ? classType->findPrivateField(propName)
+                            : classType->findPublicField(propName);
   if (optField)
     return {optField->getField()->type, optField->getField()};
   auto *homeObj = classType->getHomeObjectTypeInfo();
   if (!homeObj)
     return {nullptr, nullptr};
-  auto optMethod = homeObj->findPublicField(propName);
+  auto optMethod = isPrivate ? homeObj->findPrivateField(propName)
+                             : homeObj->findPublicField(propName);
   if (optMethod) {
     const auto *field = optMethod->getField();
     Type *type = field->type;
@@ -3275,10 +3278,10 @@ std::pair<Type *, const ClassType::Field *> FlowChecker::lookupPropertyOnClass(
     // method definition key to the call-site property so IRGen
     // can look it up. Generic final methods get their Decls set
     // on the call-site property through specializedMethodDecls_.
-    if (propNode && field->finalMethod && !llvh::isa<GenericType>(type->info)) {
-      auto *methodKey = llvh::cast<ESTree::IdentifierNode>(field->method->_key);
+    if (field->finalMethod && !llvh::isa<GenericType>(type->info)) {
+      auto *methodKey = ESTree::getPropertyIdentifier(field->method->_key);
       if (auto *decl = semContext_.getExpressionDecl(methodKey)) {
-        auto *idNode = llvh::cast<ESTree::IdentifierNode>(propNode);
+        auto *idNode = ESTree::getPropertyIdentifier(propNode);
         semContext_.setExpressionDecl(idNode, decl);
       }
     }

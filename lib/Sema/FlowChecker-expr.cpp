@@ -474,6 +474,252 @@ class FlowChecker::ExprVisitor {
             : outer_.flowContext_.getAny());
   }
 
+  /// Member access on a ClassType. Handles Array<T> length/push/index as
+  /// special cases of class member access, then dispatches to the public or
+  /// private name lookup.
+  Type *visitMemberClass(
+      ESTree::MemberExpressionNode *node,
+      ESTree::Node *parent,
+      Type *objType,
+      ClassType *classType) {
+    // Array<T>: special-case .length / .push / numeric index. Private name
+    // access on an array falls through to the generic class path below.
+    // TODO: This is a HACK, fix it by making Array<T> more expressive.
+    if (outer_.flowContext_.isArrayClassType(objType) &&
+        (node->_computed ||
+         !llvh::isa<ESTree::PrivateNameNode>(node->_property))) {
+      if (node->_computed) {
+        Type *indexType = outer_.getNodeTypeOrAny(node->_property);
+        if (!llvh::isa<NumberType>(indexType->info) &&
+            !llvh::isa<AnyType>(indexType->info)) {
+          outer_.sm_.error(
+              node->_property->getSourceRange(),
+              "ft: array index must be a number");
+        }
+        return outer_.flowContext_.getArrayElementType(objType);
+      }
+      auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
+      if (id->_name == outer_.kw_.identLength)
+        return outer_.flowContext_.getNumber();
+      if (id->_name == outer_.kw_.identPush) {
+        // TODO: Represent .push as a real function.
+        return outer_.flowContext_.getAny();
+      }
+    }
+
+    if (node->_computed) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: computed access to class instances not supported");
+      return outer_.flowContext_.getAny();
+    }
+
+    // Read the name of the property.
+    Identifier name;
+    if (auto *privateName =
+            llvh::dyn_cast<ESTree::PrivateNameNode>(node->_property)) {
+      name = outer_.astContext_.getPrivateNameIdentifier(
+          llvh::cast<ESTree::IdentifierNode>(privateName->_id)->_name);
+      if (!outer_.classTypeIsEnclosing(classType)) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: private field " + name.str() + " not visible outside class " +
+                classType->getClassNameOrDefault());
+      }
+    } else {
+      auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
+      name = Identifier::getFromPointer(id->_name);
+    }
+
+    auto [type, field] =
+        outer_.lookupPropertyOnClass(classType, name, node->_property);
+    if (!type) {
+      // TODO: class declaration location.
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: property " + name.str() + " not defined in class " +
+              classType->getClassNameOrDefault());
+      return outer_.flowContext_.getAny();
+    }
+
+    // Setter-only access is only legal on the LHS of `=`.
+    if (field && field->isAccessor() && !field->hasGetter()) {
+      auto *assignParent =
+          llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
+      if (!assignParent || node != assignParent->_left ||
+          assignParent->_operator != outer_.kw_.identEqual) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: cannot read setter-only property");
+      }
+    }
+
+    return type;
+  }
+
+  /// Static member access via ClassName.property or ClassName.#property.
+  Type *visitMemberClassConstructor(
+      ESTree::MemberExpressionNode *node,
+      ESTree::Node *parent,
+      ClassConstructorType *consType) {
+    if (node->_computed) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: computed access to class statics not supported");
+      return outer_.flowContext_.getAny();
+    }
+    auto *classTypeInfo = llvh::cast<ClassType>(consType->getClassType()->info);
+    bool isPrivate = false;
+    Identifier name;
+    ESTree::IdentifierNode *propId;
+    if (auto *privateName =
+            llvh::dyn_cast<ESTree::PrivateNameNode>(node->_property)) {
+      isPrivate = true;
+      propId = llvh::cast<ESTree::IdentifierNode>(privateName->_id);
+      name = outer_.astContext_.getPrivateNameIdentifier(propId->_name);
+      if (!outer_.classTypeIsEnclosing(classTypeInfo)) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: private static " + name.str() + " not visible outside class " +
+                classTypeInfo->getClassNameOrDefault());
+      }
+    } else {
+      propId = llvh::cast<ESTree::IdentifierNode>(node->_property);
+      name = Identifier::getFromPointer(propId->_name);
+    }
+    auto *staticInfo = classTypeInfo->getStaticObjectTypeInfo();
+    OptValue<ClassType::FieldLookupEntry> optStaticField;
+    if (staticInfo) {
+      optStaticField = isPrivate ? staticInfo->findPrivateField(name)
+                                 : staticInfo->findPublicField(name);
+    }
+    if (!optStaticField) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          llvh::Twine("ft: static property ") + name.str() +
+              " not defined in class " +
+              classTypeInfo->getClassNameOrDefault());
+      return outer_.flowContext_.getAny();
+    }
+    const auto *field = optStaticField->getField();
+    if (field->isAccessor()) {
+      // Static accessor: result type is the field type.
+      // Do NOT propagate Decl — IRGen handles the call.
+      if (!field->hasGetter()) {
+        auto *assign = llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
+        bool isSimpleAssignTarget = assign && assign->_left == node &&
+            assign->_operator == outer_.kw_.identEqual;
+        if (!isSimpleAssignTarget) {
+          outer_.sm_.error(
+              node->_property->getSourceRange(),
+              "ft: cannot read setter-only property");
+        }
+      }
+      return field->type;
+    }
+    // Propagate the Decl from the definition key to the call-site property
+    // so IRGen can look it up.
+    if (ESTree::IdentifierNode *keyNode = field->staticKeyNode) {
+      if (auto *decl = outer_.semContext_.getExpressionDecl(keyNode))
+        outer_.semContext_.setExpressionDecl(propId, decl);
+    }
+    return field->type;
+  }
+
+  /// Named/computed access on an exact object type.
+  Type *visitMemberExactObject(
+      ESTree::MemberExpressionNode *node,
+      ExactObjectType *exactObjType) {
+    if (node->_computed) {
+      // TODO: determine what this should do for real.
+      // Flow allows this and just returns 'any' (deliberately unsound).
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: computed access to exact object types not supported");
+      return outer_.flowContext_.getAny();
+    }
+    auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
+    auto optFieldIdx =
+        exactObjType->findField(Identifier::getFromPointer(id->_name));
+    if (!optFieldIdx) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: property " + id->_name->str() + " not defined in object");
+      return outer_.flowContext_.getAny();
+    }
+    return exactObjType->getFields()[*optFieldIdx].type;
+  }
+
+  /// Numeric-literal indexed access or .length on a tuple type.
+  Type *visitMemberTuple(
+      ESTree::MemberExpressionNode *node,
+      TupleType *tupleType) {
+    if (node->_computed) {
+      auto *idx = llvh::dyn_cast<ESTree::NumericLiteralNode>(node->_property);
+      if (!idx) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: tuple property access requires an number literal index");
+        return outer_.flowContext_.getAny();
+      }
+      double d = idx->_value;
+      if (d < 0 || d >= tupleType->getTypes().size()) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(), "ft: tuple index out of bounds");
+        return outer_.flowContext_.getAny();
+      }
+      // d is in bounds of the valid integer indices so the cast is safe.
+      if ((uint32_t)d != d) {
+        // ulen can only compare equal to d when d is a valid uint32 integer.
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: tuple index must be a non-negative integer");
+        return outer_.flowContext_.getAny();
+      }
+      return tupleType->getTypes()[(uint32_t)d];
+    }
+    // Named property access to tuple.
+    auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
+    // TODO: We may want to allow calling into array functions with tuples
+    // (providing the union of all elements as the generic type of the
+    // array), but that's not supported yet.
+    if (id->_name == outer_.kw_.identLength) {
+      // Tuple .length is a number.
+      return outer_.flowContext_.getNumber();
+    }
+    outer_.sm_.error(
+        node->_property->getSourceRange(), "ft: unknown tuple property");
+    return outer_.flowContext_.getAny();
+  }
+
+  /// Indexed access, .length, or builtin method access on a string.
+  Type *visitMemberString(ESTree::MemberExpressionNode *node) {
+    if (node->_computed) {
+      Type *indexType = outer_.getNodeTypeOrAny(node->_property);
+      if (!llvh::isa<NumberType>(indexType->info) &&
+          !llvh::isa<AnyType>(indexType->info)) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: string index must be a number");
+      }
+      return outer_.flowContext_.getString();
+    }
+    auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
+    if (id->_name == outer_.kw_.identLength)
+      return outer_.flowContext_.getNumber();
+    if (auto *builtinDecl = outer_.flowContext_.findBuiltinMethod(
+            {TypeKind::String, id->_name, /* isStatic */ false})) {
+      // Found a builtin method - store for CallExpression to use.
+      // The actual type will be determined by CallExpression.
+      // For now, use any.
+      outer_.setBuiltinMethodDecl(node, builtinDecl);
+      return outer_.flowContext_.getAny();
+    }
+    outer_.sm_.error(
+        node->_property->getSourceRange(), "ft: unknown string property");
+    return outer_.flowContext_.getAny();
+  }
+
   void visit(
       ESTree::MemberExpressionNode *node,
       ESTree::Node *parent,
@@ -496,306 +742,18 @@ class FlowChecker::ExprVisitor {
           {.canFlow = true, .needCheckedCast = true});
     }
 
-    if (outer_.flowContext_.isArrayClassType(objType) &&
-        (node->_computed ||
-         !llvh::isa<ESTree::PrivateNameNode>(node->_property))) {
-      if (node->_computed) {
-        resType = outer_.flowContext_.getArrayElementType(objType);
-        Type *indexType = outer_.getNodeTypeOrAny(node->_property);
-        if (!llvh::isa<NumberType>(indexType->info) &&
-            !llvh::isa<AnyType>(indexType->info)) {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: array index must be a number");
-        }
-      } else {
-        auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        if (id->_name == outer_.kw_.identLength) {
-          resType = outer_.flowContext_.getNumber();
-        } else if (id->_name == outer_.kw_.identPush) {
-          // TODO: Represent .push as a real function.
-          resType = outer_.flowContext_.getAny();
-        } else {
-          // Look up the property on the Array<T> class.
-          auto *classInfo = llvh::cast<ClassType>(objType->info);
-          resType =
-              outer_
-                  .lookupPropertyOnClass(
-                      classInfo, Identifier::getFromPointer(id->_name), id)
-                  .first;
-          if (!resType) {
-            outer_.sm_.error(
-                node->_property->getSourceRange(),
-                "ft: property " + id->_name->str() + " not defined on Array");
-          }
-        }
-      }
-    } else if (auto *classType = llvh::dyn_cast<ClassType>(objType->info)) {
-      if (node->_computed) {
-        outer_.sm_.error(
-            node->_property->getSourceRange(),
-            "ft: computed access to class instances not supported");
-      } else if (
-          auto *privateName =
-              llvh::dyn_cast<ESTree::PrivateNameNode>(node->_property)) {
-        // Private field/method access.
-        Identifier name = outer_.astContext_.getPrivateNameIdentifier(
-            llvh::cast<ESTree::IdentifierNode>(privateName->_id)->_name);
-        if (!outer_.classTypeIsEnclosing(classType)) {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: private field " + name.str() +
-                  " not visible outside class " +
-                  classType->getClassNameOrDefault());
-        }
-        auto optField = classType->findPrivateField(name);
-        if (optField) {
-          resType = optField->getField()->type;
-        } else {
-          auto *homeObj = classType->getHomeObjectTypeInfo();
-          OptValue<ClassType::FieldLookupEntry> optMethod;
-          if (homeObj)
-            optMethod = homeObj->findPrivateField(name);
-          if (optMethod) {
-            const auto *field = optMethod->getField();
-            resType = field->type;
-
-            if (field->isAccessor()) {
-              // Accessor: result type is still the field type (getter return
-              // type if it exists).
-              // Do NOT propagate the Decl — IRGen handles the call
-              // via the Field.
-              if (!field->hasGetter()) {
-                // Setter-only: error unless this is the LHS of an assignment
-                // using '='.
-                if (auto *assignParent =
-                        llvh::dyn_cast<ESTree::AssignmentExpressionNode>(
-                            parent);
-                    !assignParent || node != assignParent->_left ||
-                    assignParent->_operator != outer_.kw_.identEqual) {
-                  outer_.sm_.error(
-                      node->_property->getSourceRange(),
-                      "ft: cannot read setter-only property");
-                }
-              }
-            } else {
-              // For non-generic final methods, propagate the Decl from the
-              // method definition key to the call-site property so IRGen
-              // can look it up.
-              // Generic final methods get their Decls set through
-              // specializedMethodDecls_.
-              if (field->finalMethod &&
-                  !llvh::isa<GenericType>(resType->info)) {
-                auto *methodKey =
-                    ESTree::getPropertyIdentifier(field->method->_key);
-                if (auto *decl =
-                        outer_.semContext_.getExpressionDecl(methodKey)) {
-                  auto *propId = ESTree::getPropertyIdentifier(node->_property);
-                  outer_.semContext_.setExpressionDecl(propId, decl);
-                }
-              }
-              assert(
-                  (llvh::isa<BaseFunctionType>(resType->info) ||
-                   llvh::isa<GenericType>(resType->info)) &&
-                  "methods must be functions or generic");
-            }
-          } else {
-            // TODO: class declaration location.
-            outer_.sm_.error(
-                node->_property->getSourceRange(),
-                "ft: property " + name.str() + " not defined in class " +
-                    classType->getClassNameOrDefault());
-          }
-        }
-      } else {
-        // Public field/method access.
-        auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        Identifier name = Identifier::getFromPointer(id->_name);
-        auto [type, field] = outer_.lookupPropertyOnClass(classType, name, id);
-        resType = type;
-        if (!resType) {
-          // TODO: class declaration location.
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: property " + name.str() + " not defined in class " +
-                  classType->getClassNameOrDefault());
-        } else if (field && field->isAccessor() && !field->hasGetter()) {
-          // Setter-only: error unless this is the LHS of a simple
-          // assignment.
-          if (auto *assignParent =
-                  llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
-              !assignParent || node != assignParent->_left ||
-              assignParent->_operator != outer_.kw_.identEqual) {
-            outer_.sm_.error(
-                node->_property->getSourceRange(),
-                "ft: cannot read setter-only property");
-          }
-        }
-      }
+    if (auto *classType = llvh::dyn_cast<ClassType>(objType->info)) {
+      resType = visitMemberClass(node, parent, objType, classType);
     } else if (
         auto *consType = llvh::dyn_cast<ClassConstructorType>(objType->info)) {
-      // Static member access via ClassName.property or ClassName.#property.
-      if (node->_computed) {
-        outer_.sm_.error(
-            node->_property->getSourceRange(),
-            "ft: computed access to class statics not supported");
-        return;
-      }
-      auto *classTypeInfo =
-          llvh::cast<ClassType>(consType->getClassType()->info);
-      bool isPrivate = false;
-      Identifier name;
-      ESTree::IdentifierNode *propId;
-      if (auto *privateName =
-              llvh::dyn_cast<ESTree::PrivateNameNode>(node->_property)) {
-        isPrivate = true;
-        propId = llvh::cast<ESTree::IdentifierNode>(privateName->_id);
-        name = outer_.astContext_.getPrivateNameIdentifier(propId->_name);
-        if (!outer_.classTypeIsEnclosing(classTypeInfo)) {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: private static " + name.str() +
-                  " not visible outside class " +
-                  classTypeInfo->getClassNameOrDefault());
-        }
-      } else {
-        propId = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        name = Identifier::getFromPointer(propId->_name);
-      }
-      bool found = false;
-      if (auto *staticInfo = classTypeInfo->getStaticObjectTypeInfo()) {
-        if (auto optStaticField = isPrivate
-                ? staticInfo->findPrivateField(name)
-                : staticInfo->findPublicField(name)) {
-          const auto *field = optStaticField->getField();
-          found = true;
-          if (field->isAccessor()) {
-            // Static accessor: result type is the field type.
-            // Do NOT propagate Decl — IRGen handles the call.
-            if (!field->hasGetter()) {
-              bool isSimpleAssignTarget = false;
-              if (auto *assign =
-                      llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent))
-                isSimpleAssignTarget =
-                    (assign->_left == node &&
-                     assign->_operator == outer_.kw_.identEqual);
-              if (!isSimpleAssignTarget) {
-                outer_.sm_.error(
-                    node->_property->getSourceRange(),
-                    "ft: cannot read setter-only property");
-              }
-            }
-            resType = field->type;
-          } else {
-            resType = field->type;
-            // Propagate the Decl from the definition key to the
-            // call-site property so IRGen can look it up.
-            if (ESTree::IdentifierNode *keyNode = field->staticKeyNode) {
-              if (auto *decl = outer_.semContext_.getExpressionDecl(keyNode))
-                outer_.semContext_.setExpressionDecl(propId, decl);
-            }
-          }
-        }
-      }
-      if (!found) {
-        outer_.sm_.error(
-            node->_property->getSourceRange(),
-            llvh::Twine("ft: static property ") + name.str() +
-                " not defined in class " +
-                classTypeInfo->getClassNameOrDefault());
-      }
+      resType = visitMemberClassConstructor(node, parent, consType);
     } else if (
         auto *exactObjType = llvh::dyn_cast<ExactObjectType>(objType->info)) {
-      if (node->_computed) {
-        // TODO: determine what this should do for real.
-        // Flow allows this and just returns 'any' (deliberately unsound).
-        outer_.sm_.error(
-            node->_property->getSourceRange(),
-            "ft: computed access to exact object types not supported");
-        resType = outer_.flowContext_.getAny();
-      } else {
-        auto id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        auto optFieldIdx =
-            exactObjType->findField(Identifier::getFromPointer(id->_name));
-        if (optFieldIdx) {
-          const auto &field = exactObjType->getFields()[*optFieldIdx];
-          resType = field.type;
-        } else {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: property " + id->_name->str() + " not defined in object");
-          resType = outer_.flowContext_.getAny();
-        }
-      }
+      resType = visitMemberExactObject(node, exactObjType);
     } else if (auto *tupleType = llvh::dyn_cast<TupleType>(objType->info)) {
-      if (node->_computed) {
-        if (auto *idx =
-                llvh::dyn_cast<ESTree::NumericLiteralNode>(node->_property)) {
-          double d = idx->_value;
-          if (0 <= d && d < tupleType->getTypes().size()) {
-            // d is in bounds of the valid integer indices so the cast is safe.
-            if ((uint32_t)d == d) {
-              // ulen can only compare equal to d when d is a valid uint32
-              // integer.
-              resType = tupleType->getTypes()[(uint32_t)d];
-            } else {
-              outer_.sm_.error(
-                  node->_property->getSourceRange(),
-                  "ft: tuple index must be a non-negative integer");
-            }
-          } else {
-            outer_.sm_.error(
-                node->_property->getSourceRange(),
-                "ft: tuple index out of bounds");
-          }
-        } else {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: tuple property access requires an number literal index");
-        }
-      } else {
-        // Named property access to tuple.
-        auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        // TODO: We may want to allow calling into array functions with tuples
-        // (providing the union of all elements as the generic type of the
-        // array), but that's not supported yet.
-        if (id->_name == outer_.kw_.identLength) {
-          // Tuple .length is a number.
-          resType = outer_.flowContext_.getNumber();
-        } else {
-          outer_.sm_.error(
-              node->_property->getSourceRange(), "ft: unknown tuple property");
-        }
-      }
+      resType = visitMemberTuple(node, tupleType);
     } else if (llvh::isa<StringType>(objType->info)) {
-      if (node->_computed) {
-        resType = outer_.flowContext_.getString();
-        Type *indexType = outer_.getNodeTypeOrAny(node->_property);
-        if (!llvh::isa<NumberType>(indexType->info) &&
-            !llvh::isa<AnyType>(indexType->info)) {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: string index must be a number");
-        }
-      } else {
-        auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-        if (id->_name == outer_.kw_.identLength) {
-          resType = outer_.flowContext_.getNumber();
-        } else if (
-            auto *builtinDecl = outer_.flowContext_.findBuiltinMethod(
-                {TypeKind::String,
-                 id->_name,
-                 /* isStatic */ false})) {
-          // Found a builtin method - store for CallExpression to use.
-          outer_.setBuiltinMethodDecl(node, builtinDecl);
-          // The actual type will be determined by CallExpression.
-          // For now, use any.
-          resType = outer_.flowContext_.getAny();
-        } else {
-          outer_.sm_.error(
-              node->_property->getSourceRange(), "ft: unknown string property");
-        }
-      }
+      resType = visitMemberString(node);
     } else if (!llvh::isa<AnyType>(objType->info)) {
       if (node->_computed) {
         outer_.sm_.error(

@@ -796,14 +796,16 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   Type *getSpecializedArrayClassType(Type *elementType, SMRange errorRange);
 
   /// Look up a named property on a ClassType (fields + home object methods).
-  /// If \p propNode is provided, propagate the Decl from final method
-  /// definitions to the property node for IRGen.
+  /// \p propNode is the property node from the MemberExpression; if it is
+  /// a PrivateNameNode, looks up private fields/methods, otherwise public.
+  /// Propagates the Decl from final method definitions to the property's
+  /// identifier for IRGen.
   /// \return a pair of (type, field) for the found property, or (nullptr,
   /// nullptr) if not found.
   std::pair<Type *, const flow::ClassType::Field *> lookupPropertyOnClass(
       flow::ClassType *classType,
       Identifier propName,
-      ESTree::Node *propNode = nullptr);
+      ESTree::Node *propNode);
 
   /// Resolve a call to a builtin method.
   /// Sets the MemberExpression callee type and registers for IRGen.
