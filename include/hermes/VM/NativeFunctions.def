@@ -155,6 +155,7 @@ NATIVE_FUNCTION(hermesBuiltinThrowReferenceError)
 NATIVE_FUNCTION(hermesBuiltinGetTemplateObject)
 NATIVE_FUNCTION(hermesBuiltinSetFunctionName)
 NATIVE_FUNCTION(hermesBuiltinCheckedTypeCast)
+NATIVE_FUNCTION(hermesBuiltinFastArrayPop)
 
 NATIVE_FUNCTION(hermesInternalGetCallStack)
 NATIVE_FUNCTION(hermesInternalDetachArrayBuffer)

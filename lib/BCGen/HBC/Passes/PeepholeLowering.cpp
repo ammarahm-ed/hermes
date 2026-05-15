@@ -7,6 +7,7 @@
 
 #include "hermes/BCGen/HBC/Passes/PeepholeLowering.h"
 #include "hermes/BCGen/CommonPeepholeLowering.h"
+#include "hermes/FrontEndDefs/Builtins.h"
 #include "hermes/FrontEndDefs/Typeof.h"
 #include "hermes/IR/IR.h"
 #include "hermes/IR/Instrs.h"

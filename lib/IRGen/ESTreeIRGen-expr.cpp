@@ -688,6 +688,21 @@ Value *ESTreeIRGen::genSHBuiltin(
     return Builder.createFastArrayLengthInst(array);
   }
 
+  // %SHBuiltin.fastArrayPop(arr: Array<T>, n: number): T | void;
+  if (builtin->_name == kw_.identFastArrayPop) {
+    if (call->_arguments.size() != 2) {
+      Mod->getContext().getSourceErrorManager().error(
+          call->getSourceRange(),
+          "fastArrayPop requires exactly two arguments");
+      return Builder.getLiteralUndefined();
+    }
+    auto it = call->_arguments.begin();
+    Value *array = genExpression(&*it++);
+    Value *count = genExpression(&*it);
+    return genBuiltinCall(
+        BuiltinMethod::HermesBuiltin_fastArrayPop, {array, count});
+  }
+
   if (builtin->_name == kw_.identModuleFactory) {
     return genSHBuiltinModuleFactory(call);
   }

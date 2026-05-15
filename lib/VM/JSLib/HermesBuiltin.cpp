@@ -11,6 +11,7 @@
 #include "hermes/FrontEndDefs/Typeof.h"
 #include "hermes/Support/Base64vlq.h"
 #include "hermes/VM/Callable.h"
+#include "hermes/VM/FastArray.h"
 #include "hermes/VM/JSArray.h"
 #include "hermes/VM/JSArrayBuffer.h"
 #include "hermes/VM/JSLib.h"
@@ -1027,6 +1028,24 @@ CallResult<HermesValue> hermesBuiltinSetFunctionName(void *, Runtime &runtime) {
   return HermesValue::encodeUndefinedValue();
 }
 
+/// \code
+///   HermesBuiltin.fastArrayPop = function (array, n) {}
+/// \endcode
+/// Pop the last \p n elements from a FastArray, returning the topmost popped
+/// element or undefined if no element was popped. \p n is expected to be a
+/// non-negative integral number; the SHBuiltin caller is responsible for
+/// providing it. Values that don't fit in uint32_t are clamped to UINT32_MAX,
+/// which will then be clamped to the array length by FastArray::pop.
+CallResult<HermesValue> hermesBuiltinFastArrayPop(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  auto arr = Handle<FastArray>::vmcast(args.getArgHandle(0));
+  double nDouble = args.getArg(1).getNumber();
+  uint32_t n = nDouble >= (double)UINT32_MAX
+      ? UINT32_MAX
+      : (nDouble > 0 ? (uint32_t)nDouble : 0);
+  return FastArray::pop(arr, runtime, n);
+}
+
 void createHermesBuiltins(Runtime &runtime) {
   struct : public Locals {
     PinnedValue<NativeFunction> method;
@@ -1125,6 +1144,12 @@ void createHermesBuiltins(Runtime &runtime) {
       P::setFunctionName,
       hermesBuiltinSetFunctionName,
       3);
+
+  defineInternMethod(
+      B::HermesBuiltin_fastArrayPop,
+      P::fastArrayPop,
+      hermesBuiltinFastArrayPop,
+      2);
 
   // Define the 'requireFast' function, which takes a number argument.
   defineInternMethod(

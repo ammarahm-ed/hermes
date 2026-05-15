@@ -2115,7 +2115,46 @@ class FlowChecker::ExprVisitor {
       return;
     }
 
+    if (builtin->_name == outer_.kw_.identFastArrayPop) {
+      checkSHBuiltinFastArrayPop(call);
+      return;
+    }
+
     outer_.sm_.error(call->getSourceRange(), "unknown SH builtin call");
+  }
+
+  /// $SHBuiltin.fastArrayPop(arr: Array<T>, n: number): T | void.
+  void checkSHBuiltinFastArrayPop(ESTree::CallExpressionNode *call) {
+    visitESTreeChildren(*this, call, nullptr);
+    if (call->_arguments.size() != 2) {
+      outer_.sm_.error(
+          call->getSourceRange(),
+          "ft: fastArrayPop requires exactly two arguments");
+      return;
+    }
+    auto it = call->_arguments.begin();
+    ESTree::Node *arrArg = &*it++;
+    ESTree::Node *countArg = &*it;
+    Type *argType = outer_.getNodeTypeOrAny(arrArg);
+    if (!outer_.flowContext_.isArrayClassType(argType)) {
+      outer_.sm_.error(
+          arrArg->getSourceRange(),
+          "ft: fastArrayPop argument must be an array");
+      return;
+    }
+    Type *countType = outer_.getNodeTypeOrAny(countArg);
+    if (!llvh::isa<NumberType>(countType->info) &&
+        !llvh::isa<AnyType>(countType->info)) {
+      outer_.sm_.error(
+          countArg->getSourceRange(),
+          "ft: fastArrayPop count argument must be a number");
+      return;
+    }
+    Type *elemType = outer_.flowContext_.getArrayElementType(argType);
+    Type *voidType = outer_.flowContext_.getVoid();
+    Type *resType = outer_.flowContext_.createType(
+        outer_.flowContext_.maybeCreateUnion({elemType, voidType}));
+    outer_.setNodeType(call, resType);
   }
 
   /// $SHBuiltin.call(fn, this, arg1, ...)

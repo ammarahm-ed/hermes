@@ -157,6 +157,8 @@ PRIVATE_BUILTIN(setFunctionName)
 PRIVATE_BUILTIN(functionPrototypeApply)
 PRIVATE_BUILTIN(functionPrototypeCall)
 
+PRIVATE_BUILTIN(fastArrayPop)
+
 JS_BUILTIN(spawnAsync)
 MARK_FIRST_JS_BUILTIN(spawnAsync)
 JS_BUILTIN(makeAsyncIterator)

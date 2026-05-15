@@ -118,6 +118,32 @@ class FastArray : public JSObject {
     return pushSlow(self, runtime, val);
   }
 
+  /// Pop the last \p n elements from the array and decrease the length by the
+  /// number of elements popped. If \p n exceeds the current length, all
+  /// elements are popped.
+  /// \return the topmost popped element, or undefined if no elements were
+  /// popped (either the array was empty or \p n was zero).
+  static HermesValue pop(Handle<FastArray> self, Runtime &runtime, uint32_t n) {
+    uint32_t sz = self->indexedStorage_.getNonNull(runtime)->size();
+    if (sz == 0 || n == 0)
+      return HermesValue::encodeUndefinedValue();
+
+    uint32_t toPop = std::min(n, sz);
+    uint32_t newSz = sz - toPop;
+
+    // Encode the new length before shrinking, this can allocate.
+    auto newLen = SmallHermesValue::encodeNumberValue(newSz, runtime);
+
+    NoAllocScope noAlloc{runtime};
+    auto *storage = self->indexedStorage_.getNonNull(runtime);
+    // Capture the topmost element about to be popped before resizing.
+    SmallHermesValue lastSHV = storage->at(sz - 1);
+    ArrayStorageSmall::resizeWithinCapacity(storage, runtime.getHeap(), newSz);
+    HermesValue val = lastSHV.unboxToHV(runtime);
+    self->setLength(runtime, newLen);
+    return val;
+  }
+
   static ExecutionStatus
   append(Handle<FastArray> self, Runtime &runtime, Handle<FastArray> other) {
     auto *storage = self->indexedStorage_.getNonNull(runtime);
