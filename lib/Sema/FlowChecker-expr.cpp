@@ -2722,16 +2722,21 @@ class FlowChecker::ExprVisitor {
 
       if (!cf.canFlow) {
         if (reportErrors) {
+          std::string argTypeStr = argType->messageString();
+          std::string expectedTypeStr = expectedType->messageString();
           if (param.name.isValid()) {
             outer_.sm_.error(
                 arg->getSourceRange(),
                 "ft: " + calleeName + " parameter '" + param.name.str() +
-                    "' type mismatch");
+                    "' type mismatch: cannot assign " + argTypeStr + " to " +
+                    expectedTypeStr);
           } else {
             outer_.sm_.error(
                 arg->getSourceRange(),
                 "ft: " + calleeName + " parameter #" +
-                    llvh::Twine(argIndex + 1) + " type mismatch");
+                    llvh::Twine(argIndex + 1) +
+                    " type mismatch: cannot assign " + argTypeStr + " to " +
+                    expectedTypeStr);
           }
         }
         return false;
