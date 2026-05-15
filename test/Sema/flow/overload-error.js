@@ -19,12 +19,6 @@ class B {
   constructor() {}
 }
 
-// @Hermes.overload on a static method.
-class C {
-  @Hermes.final @Hermes.overload
-  static bar(x: number): number { return x; }
-}
-
 // @Hermes.overload on a getter.
 class D {
   @Hermes.final @Hermes.overload
@@ -80,22 +74,19 @@ class IChild extends IParent {
 // CHECK-NEXT:{{.*}}overload-error.js:18:3: error: ft: @Hermes.overload cannot be applied to a constructor
 // CHECK-NEXT:  @Hermes.overload
 // CHECK-NEXT:  ^
-// CHECK-NEXT:{{.*}}overload-error.js:24:3: error: ft: @Hermes.overload cannot be applied to static methods
+// CHECK-NEXT:{{.*}}overload-error.js:24:3: error: ft: @Hermes.overload cannot be applied to getters/setters
 // CHECK-NEXT:  @Hermes.final @Hermes.overload
 // CHECK-NEXT:  ^
 // CHECK-NEXT:{{.*}}overload-error.js:30:3: error: ft: @Hermes.overload cannot be applied to getters/setters
 // CHECK-NEXT:  @Hermes.final @Hermes.overload
 // CHECK-NEXT:  ^
-// CHECK-NEXT:{{.*}}overload-error.js:36:3: error: ft: @Hermes.overload cannot be applied to getters/setters
-// CHECK-NEXT:  @Hermes.final @Hermes.overload
-// CHECK-NEXT:  ^
-// CHECK-NEXT:{{.*}}overload-error.js:45:3: error: ft: all overloads of baz must be decorated with @Hermes.overload
+// CHECK-NEXT:{{.*}}overload-error.js:39:3: error: ft: all overloads of baz must be decorated with @Hermes.overload
 // CHECK-NEXT:  baz(x: string): string { return x; }
 // CHECK-NEXT:  ^
-// CHECK-NEXT:{{.*}}overload-error.js:59:3: error: ft: cannot override final method
+// CHECK-NEXT:{{.*}}overload-error.js:53:3: error: ft: cannot override final method
 // CHECK-NEXT:  foo(x: boolean): boolean { return x; }
 // CHECK-NEXT:  ^~~
-// CHECK-NEXT:{{.*}}overload-error.js:72:3: error: ft: cannot override final method
+// CHECK-NEXT:{{.*}}overload-error.js:66:3: error: ft: cannot override final method
 // CHECK-NEXT:  foo(x: boolean): boolean { return x; }
 // CHECK-NEXT:  ^~~
-// CHECK-NEXT:Emitted 8 errors. exiting.
+// CHECK-NEXT:Emitted 7 errors. exiting.

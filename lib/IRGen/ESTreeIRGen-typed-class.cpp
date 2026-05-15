@@ -134,7 +134,14 @@ void ESTreeIRGen::genClassDeclaration(ESTree::ClassDeclarationNode *node) {
         flowVarType = fieldPtr->getterType;
       else if (method->_kind == kw_.identSet && fieldPtr->setterType)
         flowVarType = fieldPtr->setterType;
-      else
+      else if (fieldPtr->isOverloaded()) {
+        // For overloaded static methods, look up this method's type in the
+        // overloads map (fieldPtr->type is null for overloaded fields).
+        flowVarType = fieldPtr->overloads.lookup(method);
+        assert(flowVarType && "static method must exist in overloads");
+        if (llvh::isa<flow::GenericType>(flowVarType->info))
+          continue;
+      } else
         flowVarType = fieldPtr->type;
       Variable *var = Builder.createVariable(
           curFunction()->curScope()->getVariableScope(),

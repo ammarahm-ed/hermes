@@ -627,6 +627,19 @@ class FlowChecker::ExprVisitor {
       }
       return field->type;
     }
+
+    // Overloaded static methods may only be referenced as a direct call
+    // target.
+    if (field->isOverloaded()) {
+      auto *callParent = llvh::dyn_cast<ESTree::CallExpressionNode>(parent);
+      if (!callParent || callParent->_callee != node) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: overloaded method " + name.str() +
+                " cannot be referenced outside a call expression");
+      }
+    }
+
     // Propagate the Decl from the definition key to the call-site property
     // so IRGen can look it up.
     if (ESTree::IdentifierNode *keyNode = field->staticKeyNode) {
@@ -1862,21 +1875,34 @@ class FlowChecker::ExprVisitor {
       Type *objType = outer_.getNodeTypeOrAny(methodCallee->_object);
       const flow::ClassType::Field *field = nullptr;
 
+      Identifier name;
+      bool isPrivate = false;
+      if (auto *pn = llvh::dyn_cast<ESTree::PrivateNameNode>(
+              methodCallee->_property)) {
+        name = outer_.astContext_.getPrivateNameIdentifier(
+            llvh::cast<ESTree::IdentifierNode>(pn->_id)->_name);
+        isPrivate = true;
+      } else {
+        auto *id = llvh::cast<ESTree::IdentifierNode>(methodCallee->_property);
+        name = Identifier::getFromPointer(id->_name);
+      }
+
       if (auto *classType = llvh::dyn_cast<flow::ClassType>(objType->info)) {
-        Identifier name;
-        if (auto *pn = llvh::dyn_cast<ESTree::PrivateNameNode>(
-                methodCallee->_property)) {
-          name = outer_.astContext_.getPrivateNameIdentifier(
-              llvh::cast<ESTree::IdentifierNode>(pn->_id)->_name);
-        } else {
-          auto *id =
-              llvh::cast<ESTree::IdentifierNode>(methodCallee->_property);
-          name = Identifier::getFromPointer(id->_name);
-        }
         field =
             outer_
                 .lookupPropertyOnClass(classType, name, methodCallee->_property)
                 .second;
+      } else if (
+          auto *consType =
+              llvh::dyn_cast<flow::ClassConstructorType>(objType->info)) {
+        auto *classTypeInfo =
+            llvh::cast<flow::ClassType>(consType->getClassType()->info);
+        if (auto *staticInfo = classTypeInfo->getStaticObjectTypeInfo()) {
+          auto optMethod = isPrivate ? staticInfo->findPrivateField(name)
+                                     : staticInfo->findPublicField(name);
+          if (optMethod)
+            field = optMethod->getField();
+        }
       }
       if (field && field->isOverloaded()) {
         if (!resolveOverloadedMethodCall(node, methodCallee, field))

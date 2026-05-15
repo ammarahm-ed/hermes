@@ -243,7 +243,6 @@ Both public and private methods may be overloaded, and an overload set may mix n
 Restrictions:
 * No overloading constructors/accessors
 * Overloaded methods must be called (`var x = obj.overloadedMethod` is an error)
-* No overloading static methods
 
 ### Other Features
 

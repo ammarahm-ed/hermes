@@ -783,14 +783,6 @@ class FlowChecker::ParseClassType {
         return outer_.flowContext_.getAny();
       }
 
-      // @Hermes.overload is not supported on static methods.
-      if (overloadMethod && method->_static) {
-        outer_.sm_.error(
-            method->getStartLoc(),
-            "ft: @Hermes.overload cannot be applied to static methods");
-        return outer_.flowContext_.getAny();
-      }
-
       // Detect getter/setter kind.
       bool isGetter = (method->_kind == outer_.kw_.identGet);
       bool isSetter = (method->_kind == outer_.kw_.identSet);
