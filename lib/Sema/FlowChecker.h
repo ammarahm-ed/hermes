@@ -622,14 +622,14 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
 
   /// Return true if type \p a can "flow" into type \p b.
   /// TODO: generate message explaining why not.
-  static CanFlowResult canAFlowIntoB(Type *a, Type *b) {
+  CanFlowResult canAFlowIntoB(Type *a, Type *b) {
     assert(a->info && b->info && "types haven't been populated yet");
     return canAFlowIntoB(a->info, b->info);
   }
-  static CanFlowResult canAFlowIntoB(TypeInfo *a, TypeInfo *b);
-  static CanFlowResult canAFlowIntoB(ClassType *a, ClassType *b);
-  static CanFlowResult canAFlowIntoB(TupleType *a, TupleType *b);
-  static CanFlowResult canAFlowIntoB(ExactObjectType *a, ExactObjectType *b);
+  CanFlowResult canAFlowIntoB(TypeInfo *a, TypeInfo *b);
+  CanFlowResult canAFlowIntoB(ClassType *a, ClassType *b);
+  CanFlowResult canAFlowIntoB(TupleType *a, TupleType *b);
+  CanFlowResult canAFlowIntoB(ExactObjectType *a, ExactObjectType *b);
 
   /// How to handle 'this' parameters when checking if function types can flow.
   enum class ThisFlowDirection {
@@ -640,7 +640,7 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   };
 
   /// \param thisFlow how to handle 'this' parameter.
-  static CanFlowResult canAFlowIntoB(
+  CanFlowResult canAFlowIntoB(
       BaseFunctionType *a,
       BaseFunctionType *b,
       ThisFlowDirection thisFlow = ThisFlowDirection::Default);
@@ -651,7 +651,7 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   /// In canAFlowIntoB, having a parameter in \p a that is a subtype of \p b
   /// would fail to typecheck.
   /// \return whether \p a can be a method override for \p b.
-  static bool canAOverrideB(BaseFunctionType *a, BaseFunctionType *b) {
+  bool canAOverrideB(BaseFunctionType *a, BaseFunctionType *b) {
     return canAFlowIntoB(a, b, ThisFlowDirection::MethodOverride).canFlow;
   }
 
@@ -674,7 +674,7 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   /// exprType has been narrowed to resType, then cf.needCheckedCast is true,
   /// and the caller needs to insert the implicit checked cast.
   /// resType may be targetType if the checked cast should cast to targetType.
-  static std::pair<Type *, CanFlowResult> tryNarrowType(
+  std::pair<Type *, CanFlowResult> tryNarrowType(
       Type *exprType,
       Type *targetType);
 

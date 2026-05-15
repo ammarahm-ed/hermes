@@ -821,7 +821,7 @@ class FlowChecker::ExprVisitor {
     visitESTreeNode(*this, expression, node, resTy);
 
     auto *expTy = outer_.getNodeTypeOrAny(expression);
-    auto cf = canAFlowIntoB(expTy->info, resTy->info);
+    auto cf = outer_.canAFlowIntoB(expTy->info, resTy->info);
     if (!cf.canFlow) {
       outer_.sm_.error(
           node->getSourceRange(), "ft: cast from incompatible type");
@@ -876,7 +876,7 @@ class FlowChecker::ExprVisitor {
       }
       // Check that the actual type is compatible with the constraint.
       Type *actualElemTy = outer_.getNodeTypeOrAny(elem);
-      CanFlowResult cf = canAFlowIntoB(actualElemTy, constraintElemTy);
+      CanFlowResult cf = outer_.canAFlowIntoB(actualElemTy, constraintElemTy);
       if (!cf.canFlow) {
         outer_.sm_.error(
             elem->getSourceRange(),
@@ -958,7 +958,7 @@ class FlowChecker::ExprVisitor {
       if (constraintElemTy) {
         // If there's a constraint on the element type, check that each
         // element conforms and insert implicit casts when necessary.
-        CanFlowResult cf = canAFlowIntoB(actualElemTy, constraintElemTy);
+        CanFlowResult cf = outer_.canAFlowIntoB(actualElemTy, constraintElemTy);
         if (!cf.canFlow) {
           outer_.sm_.error(
               elem->getSourceRange(),
@@ -1079,7 +1079,7 @@ class FlowChecker::ExprVisitor {
       Type *valueType = outer_.getNodeTypeOrAny(prop->_value);
 
       if (constraintValueType) {
-        auto cf = canAFlowIntoB(valueType, constraintValueType);
+        auto cf = outer_.canAFlowIntoB(valueType, constraintValueType);
         if (!cf.canFlow) {
           outer_.sm_.error(
               prop->_value->getSourceRange(),
@@ -1623,7 +1623,7 @@ class FlowChecker::ExprVisitor {
       visitESTreeNode(*this, node->_right, node, lt);
       Type *rt = outer_.getNodeTypeOrAny(node->_right);
 
-      auto [rtNarrow, cf] = tryNarrowType(rt, lt);
+      auto [rtNarrow, cf] = outer_.tryNarrowType(rt, lt);
       if (!cf.canFlow) {
         outer_.sm_.error(
             node->getSourceRange(),
@@ -1663,7 +1663,7 @@ class FlowChecker::ExprVisitor {
         res = opResType;
       } else {
         // We are modifying a typed target. The type has to be compatible.
-        CanFlowResult cf = canAFlowIntoB(opResType, lt);
+        CanFlowResult cf = outer_.canAFlowIntoB(opResType, lt);
         if (!cf.canFlow) {
           outer_.sm_.error(
               node->getSourceRange(),
@@ -2047,7 +2047,8 @@ class FlowChecker::ExprVisitor {
           thisArgType = outer_.getNodeTypeOrAny(methodCallee->_object);
         }
 
-        if (!canAFlowIntoB(thisArgType->info, expectedThisType->info).canFlow) {
+        if (!outer_.canAFlowIntoB(thisArgType->info, expectedThisType->info)
+                 .canFlow) {
           outer_.sm_.error(
               methodCallee->getSourceRange(), "ft: 'this' type mismatch");
           return;
@@ -2060,17 +2061,20 @@ class FlowChecker::ExprVisitor {
               "ft: 'super' call outside class");
           return;
         }
-        if (!canAFlowIntoB(
-                 outer_.curClassContext_->classType->info,
-                 expectedThisType->info)
+        if (!outer_
+                 .canAFlowIntoB(
+                     outer_.curClassContext_->classType->info,
+                     expectedThisType->info)
                  .canFlow) {
           outer_.sm_.error(
               node->_callee->getSourceRange(), "ft: 'this' type mismatch");
           return;
         }
       } else {
-        if (!canAFlowIntoB(
-                 outer_.flowContext_.getVoid()->info, expectedThisType->info)
+        if (!outer_
+                 .canAFlowIntoB(
+                     outer_.flowContext_.getVoid()->info,
+                     expectedThisType->info)
                  .canFlow) {
           outer_.sm_.error(
               node->_callee->getSourceRange(), "ft: 'this' type mismatch");
@@ -2233,7 +2237,8 @@ class FlowChecker::ExprVisitor {
         : outer_.flowContext_.getAny();
     ESTree::Node *thisArg = &*it;
     Type *thisArgType = outer_.getNodeTypeOrAny(thisArg);
-    if (!canAFlowIntoB(thisArgType->info, expectedThisType->info).canFlow) {
+    if (!outer_.canAFlowIntoB(thisArgType->info, expectedThisType->info)
+             .canFlow) {
       outer_.sm_.error(thisArg->getSourceRange(), "ft: 'this' type mismatch");
       return;
     }
@@ -2757,7 +2762,7 @@ class FlowChecker::ExprVisitor {
       const TypedFunctionType::Param &param = params[argIndex];
       Type *expectedType = param.type;
       Type *argType = outer_.getNodeTypeOrAny(arg);
-      auto [argTypeNarrow, cf] = tryNarrowType(argType, expectedType);
+      auto [argTypeNarrow, cf] = outer_.tryNarrowType(argType, expectedType);
 
       if (!cf.canFlow) {
         if (reportErrors) {
