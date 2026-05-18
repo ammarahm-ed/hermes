@@ -124,6 +124,7 @@ TestResult executeCompiledTest(
     const NegativeExpectation &negative,
     unsigned timeoutSeconds,
     bool disableHandleSan,
+    bool lazy,
     Clock::time_point startTime) {
   bool expectRuntimeError =
       !negative.phase.empty() && negative.phase == "runtime";
@@ -148,8 +149,9 @@ TestResult executeCompiledTest(
   installConsoleBindings(*env.runtime, ctx);
 
   // Run the bytecode.
+  // Lazy compilation cannot use persistent mode.
   vm::RuntimeModuleFlags rmFlags;
-  rmFlags.persistent = true;
+  rmFlags.persistent = !lazy;
   auto status = env.runtime->runBytecode(
       std::move(bytecode),
       rmFlags,
@@ -307,7 +309,8 @@ void processTestEntry(
         record.negative,
         config.timeoutSeconds,
         disableHandleSan,
-        config.optimize);
+        config.optimize,
+        config.lazy);
   };
 
   TestResult lastResult;
@@ -362,6 +365,7 @@ std::unique_ptr<hbc::BCProvider> compileSource(
     llvh::StringRef sourceURL,
     bool strict,
     bool optimize,
+    bool lazy,
     std::string &errorMsg) {
   auto llvmBuf = llvh::MemoryBuffer::getMemBufferCopy(source, sourceURL);
   auto buf = std::make_unique<OwnedMemoryBuffer>(std::move(llvmBuf));
@@ -374,6 +378,7 @@ std::unique_ptr<hbc::BCProvider> compileSource(
   flags.enableAsyncGenerators = true;
   flags.enableES6BlockScoping = true;
   flags.enableTDZ = true;
+  flags.lazy = lazy;
 
   auto [provider, error] = hbc::BCProviderFromSrc::create(
       std::move(buf),
@@ -421,7 +426,8 @@ TestResult executeTestVariant(
     const NegativeExpectation &negative,
     unsigned timeoutSeconds,
     bool disableHandleSan,
-    bool optimize) {
+    bool optimize,
+    bool lazy) {
   auto startTime = Clock::now();
 
   auto makeResult = [&](ResultCode code, const std::string &msg) {
@@ -442,7 +448,7 @@ TestResult executeTestVariant(
   // Compile the source.
   std::string compileError;
   auto bytecode =
-      compileSource(source, sourceURL, isStrict, optimize, compileError);
+      compileSource(source, sourceURL, isStrict, optimize, lazy, compileError);
 
   if (!bytecode) {
     if (expectCompileError || expectResolutionError) {
@@ -474,6 +480,7 @@ TestResult executeTestVariant(
       negative,
       timeoutSeconds,
       disableHandleSan,
+      lazy,
       startTime);
 }
 
