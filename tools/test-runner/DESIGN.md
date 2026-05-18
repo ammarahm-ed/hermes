@@ -84,6 +84,21 @@ source → BCProviderFromSrc (in-memory) → Runtime::runBytecode
 - JIT is a runtime-only setting — it does not affect compilation flags.
 - `--jit=force` matches the Python runner's `--vm-args='-Xjit=force'` behavior.
 
+### Shermes Compilation
+
+- `--shermes` flag switches from in-process execution to subprocess-based
+  compilation and execution using the Static Hermes (shermes) AOT compiler.
+- Requires `--shermes-binary` to specify the path to the shermes executable.
+- Two-step subprocess approach matching the Python runner:
+  1. Compile: `shermes <source> -o <binary> <COMPILE_ARGS> [-strict] [-O|-O0]`
+  2. Run: `<binary> -Xes6-proxy -Xhermes-internal-test-methods -Xmicrotask-queue`
+- Uses LLVM's `ExecuteAndWait` for subprocess management with per-step timeouts.
+- Timeout vs signal crash is distinguished via the error message string from
+  `ExecuteAndWait` (returns -2 for both cases).
+- Mutually exclusive with `--lazy` and `--jit` (which are in-process-only).
+- Crash isolation is provided naturally by process isolation (no `sigsetjmp`
+  needed).
+
 ### CompileFlags (matching Python's COMPILE_ARGS)
 
 ```cpp
@@ -121,6 +136,7 @@ Test262 = true
 | JIT compilation     | `--vm-args='-Xjit=force'`  | `--jit={off,on,force}`     |
 | staticBuiltins      | Explicitly disabled        | Default (off)              |
 | Bytecode path       | Serialized to `.hbc` file  | In-memory `BCProvider`     |
+| Shermes compilation | `shermes` subprocess       | `--shermes` subprocess     |
 | stdout handling     | Normal (inherited)         | Suppressed during tests    |
 
 ## 5. File Structure

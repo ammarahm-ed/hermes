@@ -89,19 +89,27 @@ class HarnessCache {
   /// \p testSrc - the raw test source (frontmatter already stripped).
   /// \p isStrict - whether to prepend 'use strict';.
   /// \p isAsync - whether the test is an async test (flags: [async]). If
-  ///   true, an injected `$DONE` is appended after the harness includes:
-  ///   on `$DONE(error)` it records `globalThis.asyncTestFailure`, on
-  ///   `$DONE()` it sets `globalThis.asyncTestComplete`. Recording (not
-  ///   throwing) preserves the outcome across the Promise machinery that
-  ///   wraps `.then` callbacks. The future in-process executor reads
-  ///   these globals via JSI after microtask + task drain.
+  ///   true (and \p isShermes is false), an injected `$DONE` is appended
+  ///   after the harness includes: on `$DONE(error)` it records
+  ///   `globalThis.asyncTestFailure`, on `$DONE()` it sets
+  ///   `globalThis.asyncTestComplete`. Recording (not throwing) preserves
+  ///   the outcome across the Promise machinery that wraps `.then`
+  ///   callbacks. The future in-process executor reads these globals via
+  ///   JSI after microtask + task drain.
+  /// \p isShermes - whether the source will run in the shermes subprocess.
+  ///   When true, the injected `$DONE` is suppressed so the upstream
+  ///   `doneprintHandle.js` (still in \p includes for async tests) wins.
+  ///   That definition uses `print()`, which the parent process observes
+  ///   via stdout — the only signal available across the subprocess
+  ///   boundary, since JSI globals don't survive process exit.
   ///
   /// Returns the assembled source string.
   std::string buildSource(
       const std::vector<std::string> &includes,
       llvh::StringRef testSrc,
       bool isStrict,
-      bool isAsync) const {
+      bool isAsync,
+      bool isShermes) const {
     static constexpr llvh::StringLiteral kAsyncSetupSrc =
         "function $DONE(error) {\n"
         "  if (error) {\n"
@@ -118,13 +126,15 @@ class HarnessCache {
         "  }\n"
         "}\n";
 
+    bool injectAsync = isAsync && !isShermes;
+
     std::string result;
 
     // Estimate capacity.
     size_t capacity = testSrc.size();
     if (isStrict)
       capacity += 15; // "'use strict';\n"
-    if (isAsync)
+    if (injectAsync)
       capacity += kAsyncSetupSrc.size();
     for (const auto &inc : includes) {
       if (auto *content = get(inc))
@@ -144,7 +154,7 @@ class HarnessCache {
       }
     }
 
-    if (isAsync)
+    if (injectAsync)
       result += kAsyncSetupSrc.str();
 
     result += testSrc.str();

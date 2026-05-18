@@ -20,7 +20,10 @@
 
 #include "jsi/jsi.h"
 
+#include "llvh/ADT/ScopeExit.h"
+#include "llvh/Support/FileSystem.h"
 #include "llvh/Support/MemoryBuffer.h"
+#include "llvh/Support/Program.h"
 #include "llvh/Support/raw_ostream.h"
 
 #include <thread>
@@ -304,9 +307,22 @@ void processTestEntry(
   // Run variants in order, short-circuiting on first failure (like the Python
   // runner). Push exactly one result per test file.
   auto runVariant = [&](const char *suffix, bool isStrict) -> TestResult {
-    std::string source =
-        harness.buildSource(includes, record.src, isStrict, record.isAsync());
+    std::string source = harness.buildSource(
+        includes, record.src, isStrict, record.isAsync(), config.shermes);
     std::string variantName = entry.fullName + " (" + suffix + ")";
+
+    if (config.shermes) {
+      return executeTestVariantShermes(
+          variantName,
+          source,
+          compileStrict,
+          record.isAsync(),
+          record.negative,
+          config.timeoutSeconds,
+          config.optimize,
+          disableHandleSan,
+          config.shermesBinary);
+    }
 
     return executeTestVariant(
         variantName,
@@ -497,6 +513,244 @@ TestResult executeTestVariant(
       enableJIT,
       forceJIT,
       startTime);
+}
+
+namespace {
+
+/// Result of running a subprocess.
+struct SubprocessResult {
+  int exitCode;
+  std::string stdoutStr;
+  std::string stderrStr;
+  /// True only for genuine timeouts (not signal crashes).
+  bool timedOut;
+  bool execFailed;
+  /// Error message from ExecuteAndWait (signal name on crash, "timed out"
+  /// on timeout).
+  std::string errMsg;
+};
+
+/// Run a program as a subprocess, capturing stdout and stderr.
+/// Uses LLVM's ExecuteAndWait with file redirects for output capture.
+SubprocessResult runProcess(
+    llvh::StringRef program,
+    llvh::ArrayRef<llvh::StringRef> args,
+    unsigned timeoutSeconds) {
+  SubprocessResult result{};
+  result.exitCode = -1;
+  result.timedOut = false;
+  result.execFailed = false;
+
+  // Create temp files for stdout and stderr capture.
+  llvh::SmallString<128> stdoutPath, stderrPath;
+  if (llvh::sys::fs::createTemporaryFile("test-stdout", "txt", stdoutPath)) {
+    result.execFailed = true;
+    result.stderrStr = "Failed to create temp files for output capture";
+    return result;
+  }
+  if (llvh::sys::fs::createTemporaryFile("test-stderr", "txt", stderrPath)) {
+    llvh::sys::fs::remove(stdoutPath);
+    result.execFailed = true;
+    result.stderrStr = "Failed to create temp files for output capture";
+    return result;
+  }
+  auto cleanupRedirects = llvh::make_scope_exit([&] {
+    llvh::sys::fs::remove(stdoutPath);
+    llvh::sys::fs::remove(stderrPath);
+  });
+
+  // Set up redirects: stdin=/dev/null, stdout/stderr to temp files.
+  llvh::Optional<llvh::StringRef> redirects[] = {
+      llvh::StringRef(""), // stdin -> /dev/null
+      llvh::StringRef(stdoutPath), // stdout -> file
+      llvh::StringRef(stderrPath), // stderr -> file
+  };
+
+  std::string errMsg;
+  bool execFailed = false;
+  int rc = llvh::sys::ExecuteAndWait(
+      program,
+      args,
+      /*Env=*/llvh::None,
+      redirects,
+      timeoutSeconds,
+      /*MemoryLimit=*/0,
+      &errMsg,
+      &execFailed);
+
+  result.execFailed = execFailed;
+  result.exitCode = rc;
+  result.errMsg = errMsg;
+  // ExecuteAndWait returns -2 for BOTH timeout and signal termination
+  // (SIGSEGV, SIGABRT, etc.). Distinguish using ErrMsg: LLVM sets it to
+  // "Child timed out" on timeout, and to the signal name (e.g.,
+  // "Segmentation fault") on crash.
+  result.timedOut = (rc == -2 && errMsg.find("timed out") != std::string::npos);
+
+  // Read captured output.
+  if (auto buf = llvh::MemoryBuffer::getFile(stdoutPath))
+    result.stdoutStr = (*buf)->getBuffer().str();
+  if (auto buf = llvh::MemoryBuffer::getFile(stderrPath))
+    result.stderrStr = (*buf)->getBuffer().str();
+
+  return result;
+}
+
+} // namespace
+
+TestResult executeTestVariantShermes(
+    const std::string &testName,
+    const std::string &source,
+    bool isStrict,
+    bool isAsync,
+    const NegativeExpectation &negative,
+    unsigned timeoutSeconds,
+    bool optimize,
+    bool disableHandleSan,
+    const std::string &shermesBinary) {
+  using Clock = std::chrono::steady_clock;
+  auto startTime = Clock::now();
+
+  auto makeResult = [&](ResultCode code, const std::string &msg) {
+    TestResult r;
+    r.testName = testName;
+    r.code = code;
+    r.message = msg;
+    r.duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        Clock::now() - startTime);
+    return r;
+  };
+
+  bool hasNegative = !negative.phase.empty();
+  bool expectCompileError = hasNegative && negative.phase == "parse";
+  bool expectResolutionError = hasNegative && negative.phase == "resolution";
+  bool expectRuntimeError = hasNegative && negative.phase == "runtime";
+
+  // Write preprocessed source to temp file.
+  llvh::SmallString<128> sourcePath;
+  int sourceFD;
+  if (llvh::sys::fs::createTemporaryFile("test", "js", sourceFD, sourcePath)) {
+    return makeResult(ResultCode::Failed, "FAIL: Cannot create temp file");
+  }
+  {
+    llvh::raw_fd_ostream sourceFile(sourceFD, /*shouldClose=*/true);
+    sourceFile << source;
+  }
+
+  // Output binary path.
+  llvh::SmallString<128> binaryPath(sourcePath);
+  binaryPath += ".out";
+
+  // Clean up temp files on all return paths.
+  auto cleanup = llvh::make_scope_exit([&] {
+    llvh::sys::fs::remove(sourcePath);
+    llvh::sys::fs::remove(binaryPath);
+  });
+
+  // Step 1: Compile with shermes.
+  // Matches Python runner: shermes <source> -o <binary> <COMPILE_ARGS>
+  //   [-strict] [-O|-O0]
+  std::vector<std::string> compileArgStorage;
+  compileArgStorage.push_back(shermesBinary);
+  compileArgStorage.push_back(std::string(sourcePath.str()));
+  compileArgStorage.push_back("-o");
+  compileArgStorage.push_back(std::string(binaryPath.str()));
+  // COMPILE_ARGS from Python runner.
+  compileArgStorage.push_back("-test262");
+  compileArgStorage.push_back("-fno-static-builtins");
+  compileArgStorage.push_back("-Xes6-block-scoping");
+  compileArgStorage.push_back("-Xenable-tdz");
+  compileArgStorage.push_back("-Xasync-generators");
+  if (isStrict)
+    compileArgStorage.push_back("-strict");
+  compileArgStorage.push_back(optimize ? "-O" : "-O0");
+
+  std::vector<llvh::StringRef> compileArgs;
+  for (const auto &arg : compileArgStorage)
+    compileArgs.push_back(arg);
+
+  auto compileResult = runProcess(shermesBinary, compileArgs, timeoutSeconds);
+
+  if (compileResult.timedOut) {
+    return makeResult(
+        ResultCode::CompileTimeout, "FAIL: Compilation timed out");
+  }
+
+  if (compileResult.exitCode != 0 || compileResult.execFailed) {
+    if (expectCompileError || expectResolutionError) {
+      return makeResult(ResultCode::Passed, "PASS (expected compile error)");
+    }
+    // Include signal info (errMsg) when the compiler was killed by a signal.
+    std::string detail = compileResult.stderrStr;
+    if (!compileResult.errMsg.empty())
+      detail = compileResult.errMsg + "\n" + detail;
+    return makeResult(
+        ResultCode::CompileFailed, "FAIL: Compilation failed: " + detail);
+  }
+
+  if (expectCompileError || expectResolutionError) {
+    return makeResult(
+        ResultCode::ExecuteFailed,
+        "FAIL: Expected compile error but compilation succeeded");
+  }
+
+  // Step 2: Run the compiled binary.
+  // Matches Python runner: <binary> [-Xes6-proxy]
+  //   [-Xhermes-internal-test-methods] [-Xmicrotask-queue]
+  //   [-gc-sanitize-handles=0]
+  std::vector<std::string> runArgStorage;
+  runArgStorage.push_back(std::string(binaryPath.str()));
+  runArgStorage.push_back("-Xes6-proxy");
+  runArgStorage.push_back("-Xhermes-internal-test-methods");
+  runArgStorage.push_back("-Xmicrotask-queue");
+  if (disableHandleSan)
+    runArgStorage.push_back("-gc-sanitize-handles=0");
+
+  std::vector<llvh::StringRef> runArgs;
+  for (const auto &arg : runArgStorage)
+    runArgs.push_back(arg);
+
+  auto runResult = runProcess(binaryPath.str(), runArgs, timeoutSeconds);
+
+  if (runResult.timedOut) {
+    return makeResult(ResultCode::ExecuteTimeout, "FAIL: Test timed out");
+  }
+
+  // Match Python runner's result evaluation logic for non-lazy mode.
+  if (runResult.exitCode != 0) {
+    if (runResult.exitCode < 0) {
+      // Signal termination or exec failure.
+      std::string detail = "FAIL: Execution terminated";
+      if (!runResult.errMsg.empty())
+        detail += ": " + runResult.errMsg;
+      return makeResult(ResultCode::ExecuteFailed, detail);
+    }
+    if (!expectRuntimeError) {
+      return makeResult(
+          ResultCode::ExecuteFailed,
+          "FAIL: Execution threw unexpected error: " + runResult.stderrStr);
+    }
+    // Expected runtime error, but check async test patterns.
+    if (isAsync &&
+        (runResult.stdoutStr.find("Test262:AsyncTestFailure") !=
+             std::string::npos ||
+         runResult.stdoutStr.find("Test262:AsyncTestComplete") ==
+             std::string::npos)) {
+      return makeResult(
+          ResultCode::ExecuteFailed,
+          "FAIL: Async test failure: " + runResult.stdoutStr);
+    }
+    return makeResult(ResultCode::Passed, "PASS (expected runtime error)");
+  }
+
+  // Exit code 0.
+  if (expectRuntimeError) {
+    return makeResult(
+        ResultCode::ExecuteFailed,
+        "FAIL: Expected runtime error but test passed");
+  }
+
+  return makeResult(ResultCode::Passed, "PASS");
 }
 
 void WorkQueue::push(std::function<void()> task) {

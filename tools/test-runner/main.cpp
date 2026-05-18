@@ -46,8 +46,8 @@ cl::opt<unsigned> NumThreads(
 
 cl::opt<unsigned> Timeout(
     "timeout",
-    cl::desc("Per-test timeout in seconds (default: 30)"),
-    cl::init(30));
+    cl::desc("Per-test timeout in seconds (default: 200)"),
+    cl::init(200));
 
 cl::opt<unsigned> ShowSlowestTests(
     "show-slowest-tests",
@@ -89,6 +89,16 @@ cl::opt<JITMode> JIT(
             JITMode::Force,
             "force",
             "Force JIT compilation of every function")));
+
+cl::opt<bool> Shermes(
+    "shermes",
+    cl::desc("Use shermes subprocess for compilation and execution"),
+    cl::init(false));
+
+cl::opt<std::string> ShermesBinary(
+    "shermes-binary",
+    cl::desc("Path to the shermes executable (required with --shermes)"),
+    cl::init(""));
 
 cl::opt<std::string> TestSuiteDir(
     "test-suite-dir",
@@ -336,8 +346,15 @@ void dumpTestSource(const TestEntry &entry, const HarnessCache &harness) {
       !record.isNoStrict() && !record.isRaw() && !record.isModule();
 
   std::vector<std::string> includes = buildTestIncludes(entry, record);
+  // --dump-source defaults to the in-process flavor. The shermes-mode
+  // assembly only differs in suppressing our injected $DONE; inspecting
+  // it locally is rarely needed.
   llvh::outs() << harness.buildSource(
-                      includes, record.src, runStrict, record.isAsync())
+                      includes,
+                      record.src,
+                      runStrict,
+                      record.isAsync(),
+                      /*isShermes=*/false)
                << "\n";
 }
 } // namespace
@@ -350,6 +367,21 @@ int main(int argc, char **argv) {
       "Hermes test262 runner\n\n"
       "  Runs test262 tests against the Hermes VM.\n"
       "  Accepts individual .js files or directories.\n");
+
+  // Validate --shermes options.
+  if (Shermes && ShermesBinary.empty()) {
+    llvh::errs()
+        << "Error: --shermes-binary is required when --shermes is used.\n";
+    return 1;
+  }
+  if (Shermes && Lazy) {
+    llvh::errs() << "Error: --shermes and --lazy are mutually exclusive.\n";
+    return 1;
+  }
+  if (Shermes && JIT != JITMode::Off) {
+    llvh::errs() << "Error: --shermes and --jit are mutually exclusive.\n";
+    return 1;
+  }
 
   // Discover test files.
   std::vector<TestEntry> allTests = discoverTests(TestPaths);
@@ -412,6 +444,8 @@ int main(int argc, char **argv) {
   execConfig.lazy = Lazy;
   execConfig.enableJIT = JIT != JITMode::Off;
   execConfig.forceJIT = JIT == JITMode::Force;
+  execConfig.shermes = Shermes;
+  execConfig.shermesBinary = ShermesBinary;
 
   std::vector<TestResult> results;
   std::atomic<size_t> featureSkippedCount{0};

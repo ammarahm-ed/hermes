@@ -77,11 +77,13 @@ struct TestResult {
 /// Configuration for test execution.
 struct ExecConfig {
   unsigned numThreads = 1;
-  unsigned timeoutSeconds = 30;
+  unsigned timeoutSeconds = 200;
   bool optimize = false;
   bool lazy = false;
   bool enableJIT = false;
   bool forceJIT = false;
+  bool shermes = false;
+  std::string shermesBinary;
 };
 
 /// Compile JS source to bytecode in-memory.
@@ -128,6 +130,32 @@ TestResult executeTestVariant(
     bool lazy = false,
     bool enableJIT = false,
     bool forceJIT = false);
+
+/// Execute a single test variant using shermes subprocess compilation
+/// and execution (two-step approach matching the Python runner).
+///
+/// Step 1: Compile JS source to a native binary using shermes.
+/// Step 2: Run the native binary and evaluate the result.
+///
+/// \p testName display name for the variant.
+/// \p source preprocessed JavaScript source.
+/// \p isStrict whether to compile in strict mode.
+/// \p isAsync whether this is an async test (check stdout patterns).
+/// \p negative expected failure specification.
+/// \p timeoutSeconds per-step timeout.
+/// \p optimize whether to pass -O (vs -O0) to shermes.
+/// \p disableHandleSan whether to disable GC handle sanitization.
+/// \p shermesBinary path to the shermes executable.
+TestResult executeTestVariantShermes(
+    const std::string &testName,
+    const std::string &source,
+    bool isStrict,
+    bool isAsync,
+    const NegativeExpectation &negative,
+    unsigned timeoutSeconds,
+    bool optimize,
+    bool disableHandleSan,
+    const std::string &shermesBinary);
 
 /// Thread-safe work queue for distributing tests to worker threads.
 class WorkQueue {
