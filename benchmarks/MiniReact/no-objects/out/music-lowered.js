@@ -43,37 +43,6 @@
   function M$sh_microtask$queueMicrotask(callback) {
     M$sh_microtask$INTERNAL$microtaskQueue.push(callback);
   }
-  /* file: packages/sh/fastarray.js */
-  function M$sh_fastarray$join(arr, sep) {
-    let result = '';
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      if (i !== 0) result += sep;
-      result += arr[i];
-    }
-    return result;
-  }
-  function M$sh_fastarray$reduce(arr, fn, initialValue) {
-    let acc = initialValue;
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      acc = fn(acc, arr[i], i);
-    }
-    return acc;
-  }
-  function M$sh_fastarray$map(arr, fn) {
-    const output = [];
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      output.push(fn(arr[i], i));
-    }
-    return output;
-  }
-  function M$sh_fastarray$includes(arr, searchElement) {
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      if (arr[i] === searchElement) {
-        return true;
-      }
-    }
-    return false;
-  }
   /* file: packages/react/index.js */
   function M$react_index$INTERNAL$padString(str, len) {
     let result = '';
@@ -135,7 +104,7 @@
   /**
    * Queue of updates triggered *during* render.
    */
-  const M$react_index$INTERNAL$renderPhaseUpdateQueue = [];
+  let M$react_index$INTERNAL$renderPhaseUpdateQueue = [];
   /**
    * Public API to create a new "root", this is where React attaches rendering to a host element.
    * In our case we don't actually have a real host, and currently only "render" to strings.
@@ -279,7 +248,7 @@
       const root = M$sh_CHECKED_CAST$default(this.root);
       const output = [];
       this.printFiber(root, output, 0);
-      return M$sh_fastarray$join(output, '\n');
+      return output.join('\n');
     };
     _proto2.doWork = function doWork(element) {
       let mustRender = this.root === null;
@@ -386,7 +355,7 @@
                   M$react_invariant$default(update.fiber === fiber, 'setState() during render is currently only supported when updating the component ' + 'being rendered. Setting state from another component is not supported.');
                   hasChanges = update.run() || hasChanges;
                 }
-                M$react_index$INTERNAL$renderPhaseUpdateQueue.length = 0;
+                M$react_index$INTERNAL$renderPhaseUpdateQueue = [];
                 if (!hasChanges) {
                   break;
                 }
@@ -472,7 +441,7 @@
       return fiber;
     };
     _proto2.mountChildren = function mountChildren(children, parentFiber) {
-      if (Array.isArray(children)) {
+      if (globalThis.Array.isArray(children)) {
         let prev = null;
         for (const childElement of M$sh_CHECKED_CAST$default(children)) {
           if (childElement == null) {
@@ -538,7 +507,7 @@
     };
     _proto2.reconcileChildren = function reconcileChildren(parent, children) {
       const prevChild = parent.child;
-      if (Array.isArray(children)) {
+      if (globalThis.Array.isArray(children)) {
         let childrenArray = M$sh_CHECKED_CAST$default(children);
         // Fast-path for empty and single-element arrays
         if (childrenArray.length === 0) {
@@ -805,7 +774,7 @@
   });
   /* file: packages/class-variance-authority/index.js */
   function M$class_variance_authority_index$cva(base, variants) {
-    const baseString = typeof base === 'string' ? M$sh_CHECKED_CAST$default(base) : M$sh_fastarray$join(M$sh_CHECKED_CAST$default(base), ' ');
+    const baseString = typeof base === 'string' ? M$sh_CHECKED_CAST$default(base) : M$sh_CHECKED_CAST$default(base).join(' ');
     return opts => baseString;
   }
   /* file: lib/utils.js */
@@ -882,7 +851,7 @@
    * Primitive
    * -----------------------------------------------------------------------------------------------*/
 
-  const M$radix_ui_react_primitive_index$Primitive = M$sh_fastarray$reduce(M$radix_ui_react_primitive_index$INTERNAL$NODES, (primitive, node, _i) => {
+  const M$radix_ui_react_primitive_index$Primitive = M$radix_ui_react_primitive_index$INTERNAL$NODES.reduce((primitive, node, _i) => {
     const Node = M$react_index$forwardRef((props /* PrimitivePropsWithRef<typeof node> */, forwardedRef) => {
       const {
         asChild,
@@ -1002,7 +971,7 @@
     }, null);
   });
   function M$radix_ui_react_separator_index$INTERNAL$isValidOrientation(orientation) {
-    return M$sh_fastarray$includes(M$radix_ui_react_separator_index$INTERNAL$ORIENTATIONS, orientation);
+    return M$radix_ui_react_separator_index$INTERNAL$ORIENTATIONS.includes(orientation);
   }
   const M$radix_ui_react_separator_index$Root = M$radix_ui_react_separator_index$Separator;
   /* file: registry/new-york/ui/separator.js */
@@ -1214,7 +1183,7 @@
                         className: "relative",
                         children: [null, M$react_index$jsx('div', {
                           className: "flex space-x-4 pb-4",
-                          children: M$sh_fastarray$map(M$albums$listenNowAlbums, (album, _i) => M$react_index$jsx(M$album_artwork$AlbumArtwork, {
+                          children: M$albums$listenNowAlbums.map((album, _i) => M$react_index$jsx(M$album_artwork$AlbumArtwork, {
                             album: album,
                             className: "w-[250px]",
                             aspectRatio: "portrait",
@@ -1237,7 +1206,7 @@
                         className: "relative",
                         children: [null, M$react_index$jsx('div', {
                           className: "flex space-x-4 pb-4",
-                          children: M$sh_fastarray$map(M$albums$madeForYouAlbums, (album, _i) => M$react_index$jsx(M$album_artwork$AlbumArtwork, {
+                          children: M$albums$madeForYouAlbums.map((album, _i) => M$react_index$jsx(M$album_artwork$AlbumArtwork, {
                             album: album,
                             className: "w-[150px]",
                             aspectRatio: "square",

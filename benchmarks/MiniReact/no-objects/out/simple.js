@@ -37,37 +37,6 @@
   function M$sh_microtask$queueMicrotask(callback: () => void): void {
     M$sh_microtask$INTERNAL$microtaskQueue.push(callback);
   }
-  /* file: packages/sh/fastarray.js */
-  function M$sh_fastarray$join(arr: string[], sep: string): string {
-    let result: string = '';
-    for (let i: number = 0, e = arr.length; i < e; ++i) {
-      if (i !== 0) result += sep;
-      result += arr[i];
-    }
-    return result;
-  }
-  function M$sh_fastarray$reduce<TInput, TAcc>(arr: TInput[], fn: (acc: TAcc, item: TInput, index: number) => TAcc, initialValue: TAcc): TAcc {
-    let acc = initialValue;
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      acc = fn(acc, arr[i], i);
-    }
-    return acc;
-  }
-  function M$sh_fastarray$map<TInput, TOutput>(arr: TInput[], fn: (item: TInput, index: number) => TOutput): TOutput[] {
-    const output: TOutput[] = [];
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      output.push(fn(arr[i], i));
-    }
-    return output;
-  }
-  function M$sh_fastarray$includes<T>(arr: T[], searchElement: T): boolean {
-    for (let i = 0, e = arr.length; i < e; ++i) {
-      if (arr[i] === searchElement) {
-        return true;
-      }
-    }
-    return false;
-  }
   /* file: packages/react/index.js */
   function M$react_index$INTERNAL$padString(str: string, len: number): string {
     let result: string = '';
@@ -133,7 +102,7 @@
   /**
    * Queue of updates triggered *during* render.
    */
-  const M$react_index$INTERNAL$renderPhaseUpdateQueue: M$react_index$INTERNAL$Update<mixed>[] = [];
+  let M$react_index$INTERNAL$renderPhaseUpdateQueue: M$react_index$INTERNAL$Update<mixed>[] = [];
   /**
    * Public API to create a new "root", this is where React attaches rendering to a host element.
    * In our case we don't actually have a real host, and currently only "render" to strings.
@@ -191,9 +160,9 @@
       }
     }];
   }
-  const M$react_index$INTERNAL$callbacks = new Map();
+  const M$react_index$INTERNAL$callbacks = new Map<string, any>();
   function M$react_index$callOnClickOrChange(id: string, event: any): void {
-    const callback = M$react_index$INTERNAL$callbacks.get(id);
+    const callback: any = M$react_index$INTERNAL$callbacks.get(id);
     if (callback == null) {
       throw new Error('No callback registered with id: ' + id);
     }
@@ -270,7 +239,7 @@
       const root: M$react_index$INTERNAL$Fiber = M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(this.root);
       const output: string[] = [];
       this.printFiber(root, output, 0);
-      return M$sh_fastarray$join(output, '\n');
+      return output.join('\n');
     }
     doWork(element: M$react_index$React$MixedElement): void {
       let mustRender = this.root === null;
@@ -377,7 +346,7 @@
                   M$react_invariant$default(update.fiber === fiber, 'setState() during render is currently only supported when updating the component ' + 'being rendered. Setting state from another component is not supported.');
                   hasChanges = update.run() || hasChanges;
                 }
-                M$react_index$INTERNAL$renderPhaseUpdateQueue.length = 0;
+                M$react_index$INTERNAL$renderPhaseUpdateQueue = [];
                 if (!hasChanges) {
                   break;
                 }
@@ -463,7 +432,7 @@
       return fiber;
     }
     mountChildren(children: M$react_index$React$Node, parentFiber: M$react_index$INTERNAL$Fiber): void {
-      if (Array.isArray(children)) {
+      if (globalThis.Array.isArray(children)) {
         let prev: M$react_index$INTERNAL$Fiber | null = null;
         for (const childElement of M$sh_CHECKED_CAST$default<any[]>(children)) {
           if (childElement == null) {
@@ -529,7 +498,7 @@
     }
     reconcileChildren(parent: M$react_index$INTERNAL$Fiber, children: M$react_index$React$Node): void {
       const prevChild: M$react_index$INTERNAL$Fiber | null = parent.child;
-      if (Array.isArray(children)) {
+      if (globalThis.Array.isArray(children)) {
         let childrenArray = M$sh_CHECKED_CAST$default<M$react_index$React$MixedElement[]>(children);
         // Fast-path for empty and single-element arrays
         if (childrenArray.length === 0) {
@@ -561,7 +530,7 @@
     reconcileMultipleChildren(parent: M$react_index$INTERNAL$Fiber, children: M$react_index$React$MixedElement[]): void {
       M$react_invariant$default(children.length > 1, 'Expected children to have multiple elements');
       // map existing children by key to make subsequent lookup O(log n)
-      const keyedChildren: any = new Map();
+      const keyedChildren: any = new Map<M$react_index$INTERNAL$Fiber, M$react_index$INTERNAL$Fiber>();
       let current: M$react_index$INTERNAL$Fiber | null = parent.child;
       while (current !== null) {
         if (M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(current).key !== null) {
@@ -720,7 +689,7 @@
     }, null);
   }
   function M$App$INTERNAL$Select(props: M$react_index$Props): M$react_index$React$MixedElement {
-    const children = [];
+    const children: M$react_index$React$MixedElement[] = [];
     for (let i = 0; i < props.options.length; i++) {
       const option = props.options[i];
       children.push(M$react_index$jsx('option', {

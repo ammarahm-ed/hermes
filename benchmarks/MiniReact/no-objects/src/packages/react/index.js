@@ -11,7 +11,6 @@
 import invariant from './invariant';
 import CHECKED_CAST from 'sh/CHECKED_CAST';
 import {queueMicrotask} from 'sh/microtask';
-import {join} from 'sh/fastarray';
 
 function padString(str: string, len: number): string {
   let result: string = '';
@@ -95,7 +94,7 @@ let workInProgressState: State<mixed> | null = null;
 /**
  * Queue of updates triggered *during* render.
  */
-const renderPhaseUpdateQueue: Update<mixed>[] = [];
+let renderPhaseUpdateQueue: Update<mixed>[] = [];
 
 /**
  * Public API to create a new "root", this is where React attaches rendering to a host element.
@@ -167,9 +166,9 @@ export function useState<T>(
   ];
 }
 
-const callbacks = new Map();
+const callbacks = new Map<string, any>();
 export function callOnClickOrChange(id: string, event: any): void {
-  const callback = callbacks.get(id);
+  const callback: any = callbacks.get(id);
   if (callback == null) {
     throw new Error('No callback registered with id: ' + id);
   }
@@ -283,7 +282,7 @@ class Root {
     const root: Fiber = CHECKED_CAST<Fiber>(this.root);
     const output: string[] = [];
     this.printFiber(root, output, 0);
-    return join(output, '\n');
+    return output.join('\n');
   }
 
   doWork(element: React$MixedElement): void {
@@ -410,7 +409,7 @@ class Root {
               );
               hasChanges = update.run() || hasChanges;
             }
-            renderPhaseUpdateQueue.length = 0;
+            renderPhaseUpdateQueue = [];
             if (!hasChanges) {
               break;
             }
@@ -506,7 +505,7 @@ class Root {
   }
 
   mountChildren(children: React$Node, parentFiber: Fiber): void {
-    if (Array.isArray(children)) {
+    if (globalThis.Array.isArray(children)) {
       let prev: Fiber | null = null;
       for (const childElement of CHECKED_CAST<any[]>(children)) {
         if (childElement == null) {
@@ -598,7 +597,7 @@ class Root {
    */
   reconcileChildren(parent: Fiber, children: React$Node): void {
     const prevChild: Fiber | null = parent.child;
-    if (Array.isArray(children)) {
+    if (globalThis.Array.isArray(children)) {
       let childrenArray = CHECKED_CAST<React$MixedElement[]>(children);
       // Fast-path for empty and single-element arrays
       if (childrenArray.length === 0) {
@@ -650,7 +649,7 @@ class Root {
       'Expected children to have multiple elements',
     );
     // map existing children by key to make subsequent lookup O(log n)
-    const keyedChildren: any = new Map();
+    const keyedChildren: any = new Map<Fiber, Fiber>();
     let current: Fiber | null = parent.child;
     while (current !== null) {
       if (CHECKED_CAST<Fiber>(current).key !== null) {
