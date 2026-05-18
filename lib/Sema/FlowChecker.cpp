@@ -2729,13 +2729,19 @@ FlowChecker::CanFlowResult FlowChecker::canAFlowIntoB(
       return {.canFlow = true};
 
     // Check if `a` can flow into at least one of b's arms.
-    // Note that we know that `a` is not `any`, so there is no need for a
-    // checked cast.
-    for (auto *bType : unionB->getTypes())
-      if (canAFlowIntoB(a, bType->info).canFlow)
-        return {.canFlow = true};
-
-    return {};
+    // If we find an arm that does not need a checked cast, we're done.
+    bool foundWithCast = false;
+    for (auto *bType : unionB->getTypes()) {
+      CanFlowResult tmp = canAFlowIntoB(a, bType->info);
+      if (tmp.canFlow) {
+        if (!tmp.needCheckedCast)
+          return {.canFlow = true};
+        foundWithCast = true;
+      }
+    }
+    return foundWithCast
+        ? CanFlowResult{.canFlow = true, .needCheckedCast = true}
+        : CanFlowResult{};
   }
 
   // Tuples are invariant, so if `a` is an tuple, `b` must be an tuple with the
