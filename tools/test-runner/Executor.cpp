@@ -306,7 +306,8 @@ void processTestEntry(
         compileStrict,
         record.negative,
         config.timeoutSeconds,
-        disableHandleSan);
+        disableHandleSan,
+        config.optimize);
   };
 
   TestResult lastResult;
@@ -360,6 +361,7 @@ std::unique_ptr<hbc::BCProvider> compileSource(
     llvh::StringRef source,
     llvh::StringRef sourceURL,
     bool strict,
+    bool optimize,
     std::string &errorMsg) {
   auto llvmBuf = llvh::MemoryBuffer::getMemBufferCopy(source, sourceURL);
   auto buf = std::make_unique<OwnedMemoryBuffer>(std::move(llvmBuf));
@@ -377,7 +379,12 @@ std::unique_ptr<hbc::BCProvider> compileSource(
       std::move(buf),
       sourceURL,
       /*sourceMap=*/"",
-      flags);
+      flags,
+      /*topLevelFunctionName=*/"global",
+      /*diagHandler=*/{},
+      /*diagContext=*/nullptr,
+      optimize ? hbc::fullOptimizationPipeline
+               : std::function<void(Module &)>{});
 
   if (!provider) {
     errorMsg = error;
@@ -413,7 +420,8 @@ TestResult executeTestVariant(
     bool isStrict,
     const NegativeExpectation &negative,
     unsigned timeoutSeconds,
-    bool disableHandleSan) {
+    bool disableHandleSan,
+    bool optimize) {
   auto startTime = Clock::now();
 
   auto makeResult = [&](ResultCode code, const std::string &msg) {
@@ -433,7 +441,8 @@ TestResult executeTestVariant(
 
   // Compile the source.
   std::string compileError;
-  auto bytecode = compileSource(source, sourceURL, isStrict, compileError);
+  auto bytecode =
+      compileSource(source, sourceURL, isStrict, optimize, compileError);
 
   if (!bytecode) {
     if (expectCompileError || expectResolutionError) {
