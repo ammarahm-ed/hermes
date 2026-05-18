@@ -222,7 +222,8 @@ void processTestEntry(
     std::mutex &resultsMutex,
     std::atomic<size_t> &completedCount,
     size_t totalTests,
-    std::atomic<size_t> &featureSkipped) {
+    std::atomic<size_t> &featureSkipped,
+    std::atomic<size_t> &permanentFeatureSkipped) {
   // Read test file.
   auto fileBuf = llvh::MemoryBuffer::getFile(entry.path);
   if (!fileBuf) {
@@ -242,8 +243,11 @@ void processTestEntry(
   // Feature-based skipping.
   if (skiplist) {
     for (const auto &feat : record.features) {
-      if (skiplist->shouldSkipFeature(feat) != SkipReason::NotSkipped) {
+      SkipReason reason = skiplist->shouldSkipFeature(feat);
+      if (reason != SkipReason::NotSkipped) {
         ++featureSkipped;
+        if (reason == SkipReason::PermanentUnsupportedFeature)
+          ++permanentFeatureSkipped;
         ++completedCount;
         return;
       }
@@ -459,7 +463,8 @@ void runAllTests(
     const Skiplist *skiplist,
     const ExecConfig &config,
     std::vector<TestResult> &results,
-    std::atomic<size_t> &featureSkipped) {
+    std::atomic<size_t> &featureSkipped,
+    std::atomic<size_t> &permanentFeatureSkipped) {
   std::mutex resultsMutex;
   std::atomic<size_t> completedCount{0};
   size_t totalTests = tests.size();
@@ -491,7 +496,8 @@ void runAllTests(
                 &resultsMutex,
                 &completedCount,
                 totalTests,
-                &featureSkipped] {
+                &featureSkipped,
+                &permanentFeatureSkipped] {
       processTestEntry(
           entry,
           harness,
@@ -501,7 +507,8 @@ void runAllTests(
           resultsMutex,
           completedCount,
           totalTests,
-          featureSkipped);
+          featureSkipped,
+          permanentFeatureSkipped);
     });
   }
 
