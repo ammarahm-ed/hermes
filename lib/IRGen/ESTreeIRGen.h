@@ -979,6 +979,13 @@ class ESTreeIRGen {
   /// Calls \c fn with \c thisVal and the specified args.
   Value *genSHBuiltinCall(ESTree::CallExpressionNode *call);
 
+  /// Emit a typed `fn.call(thisArg, arg1, arg2, ...)` invocation as a direct
+  /// CallInst, bypassing the property load. \p mem is the
+  /// MemberExpression `fn.call` extracted from \c call->_callee.
+  Value *genTypedFunctionPrototypeCall(
+      ESTree::CallExpressionNode *call,
+      ESTree::MemberExpressionNode *mem);
+
   /// $SHBuiltin.externC({}, function fopen(path: c_ptr, mode: c_ptr): c_ptr)
   /// Import an external C function.
   Value *genSHBuiltinExternC(ESTree::CallExpressionNode *call);

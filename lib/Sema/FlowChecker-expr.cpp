@@ -782,7 +782,14 @@ class FlowChecker::ExprVisitor {
     visitESTreeNode(*this, node->_object, node, nullptr);
     if (node->_computed)
       visitESTreeNode(*this, node->_property, node, nullptr);
+    resolveMemberExpressionType(node, parent);
+  }
 
+  /// Compute and set the type of \p node, assuming its \c _object (and
+  /// \c _property when computed) have already been visited.
+  void resolveMemberExpressionType(
+      ESTree::MemberExpressionNode *node,
+      ESTree::Node *parent) {
     Type *objType = outer_.getNodeTypeOrAny(node->_object);
     Type *resType = outer_.flowContext_.getAny();
 
@@ -1802,12 +1809,41 @@ class FlowChecker::ExprVisitor {
     // Whether we have to visit the arguments or not depends on whether we
     // visited them during generic type argument inference.
     bool shouldVisitArguments = true;
-    // Whether we need to visit the callee. Set to false for generic method
-    // calls where we've already set the type.
+    // Whether we need to visit the callee. Set to false when the callee has
+    // already been visited above.
     bool shouldVisitCallee = true;
     // Whether overload resolution was already performed (e.g. via explicit
     // type arguments). Skip the later overloaded method check if true.
     bool overloadResolved = false;
+
+    // Check for fn.call(thisArg, args...) on a function-typed receiver.
+    if (auto *methodCallee =
+            llvh::dyn_cast<ESTree::MemberExpressionNode>(node->_callee);
+        methodCallee && !methodCallee->_computed &&
+        !llvh::isa<ESTree::SuperNode>(methodCallee->_object)) {
+      if (auto *propId =
+              llvh::dyn_cast<ESTree::IdentifierNode>(methodCallee->_property);
+          propId && propId->_name == outer_.kw_.identCall) {
+        // Visit just the object so we can inspect its type.
+        visitESTreeNode(*this, methodCallee->_object, methodCallee, nullptr);
+        Type *objType = outer_.getNodeTypeOrAny(methodCallee->_object);
+        if (llvh::isa<BaseFunctionType>(objType->info)) {
+          if (node->_typeArguments) {
+            outer_.sm_.error(
+                node->_typeArguments->getSourceRange(),
+                "ft: type arguments not allowed on function.call");
+            return;
+          }
+          checkFunctionPrototypeCall(node, methodCallee->_object, objType);
+          return;
+        }
+        // Receiver isn't a function: finish resolving the member expression
+        // (without re-visiting the object) and let the regular path emit the
+        // appropriate diagnostic.
+        resolveMemberExpressionType(methodCallee, node);
+        shouldVisitCallee = false;
+      }
+    }
 
     // Handle generic calls and method calls.
 
@@ -1839,8 +1875,11 @@ class FlowChecker::ExprVisitor {
                    llvh::dyn_cast<ESTree::MemberExpressionNode>(node->_callee);
                memCallee && node->_typeArguments && !memCallee->_computed) {
       // Handle explicit type arguments on generic method calls.
-      // Visit the object early to determine the class type.
-      visitESTreeNode(*this, memCallee->_object, memCallee, nullptr);
+      // Visit the object early to determine the class type, unless the
+      // callee has already been visited above (in which case its object
+      // has been too).
+      if (shouldVisitCallee)
+        visitESTreeNode(*this, memCallee->_object, memCallee, nullptr);
       shouldVisitCallee = false;
       Type *objType = outer_.getNodeTypeOrAny(memCallee->_object);
 
@@ -2290,6 +2329,83 @@ class FlowChecker::ExprVisitor {
 
     checkCallArgumentTypes(
         ftype->getParams(), call, call->_arguments, "function", 2);
+    return;
+  }
+
+  /// Typecheck \c fn.call(thisArg, args...) on a function-typed receiver.
+  /// Precondition: \p fn has been visited and \p fnType is its resolved
+  /// BaseFunctionType.
+  void checkFunctionPrototypeCall(
+      ESTree::CallExpressionNode *call,
+      ESTree::Node *fn,
+      Type *fnType) {
+    auto it = call->_arguments.begin();
+
+    /// Visit the rest of the arguments without any constraints,
+    /// starting at \c it.
+    auto visitRemainingArgumentsWithoutConstraint =
+        [this, &it, call]() -> void {
+      for (auto e = call->_arguments.end(); it != e; ++it) {
+        ESTree::Node *arg = &*it;
+        visitESTreeNode(*this, arg, call, nullptr);
+      }
+    };
+
+    assert(
+        llvh::isa<BaseFunctionType>(fnType->info) &&
+        "checkFunctionPrototypeCall requires a BaseFunctionType receiver");
+    if (llvh::isa<NativeFunctionType>(fnType->info)) {
+      visitRemainingArgumentsWithoutConstraint();
+      outer_.sm_.error(
+          fn->getSourceRange(),
+          "ft: callee is a native function, cannot use function.call");
+      return;
+    }
+    auto *ftype = llvh::dyn_cast<TypedFunctionType>(fnType->info);
+
+    // If the receiver is an untyped function, we have nothing to check.
+    if (!ftype) {
+      visitRemainingArgumentsWithoutConstraint();
+      outer_.setNodeType(call, outer_.flowContext_.getAny());
+      return;
+    }
+
+    outer_.setNodeType(call, ftype->getReturnType());
+
+    if (it == call->_arguments.end()) {
+      outer_.sm_.error(
+          call->getSourceRange(),
+          "ft: function.call requires a 'this' argument");
+      return;
+    }
+
+    // Visit thisArg with no parameter constraint (it is bound to 'this',
+    // not to a regular parameter).
+    ESTree::Node *thisArg = &*it;
+    visitESTreeNodeNoReplace(*this, thisArg, call, nullptr);
+    ++it;
+
+    // Visit remaining args with constraints from the function's parameters.
+    size_t i = 0;
+    for (auto e = call->_arguments.end(); it != e; ++it) {
+      Type *constraint =
+          i < ftype->getParams().size() ? ftype->getParams()[i].type : nullptr;
+      visitESTreeNodeNoReplace(*this, &*it, call, constraint);
+      ++i;
+    }
+
+    Type *expectedThisType = ftype->getThisParam()
+        ? ftype->getThisParam()
+        : outer_.flowContext_.getAny();
+    Type *thisArgType = outer_.getNodeTypeOrAny(thisArg);
+    if (!outer_.canAFlowIntoB(thisArgType->info, expectedThisType->info)
+             .canFlow) {
+      outer_.sm_.error(thisArg->getSourceRange(), "ft: 'this' type mismatch");
+      return;
+    }
+
+    checkCallArgumentTypes(
+        ftype->getParams(), call, call->_arguments, "function.call", 1);
     return;
   }
 

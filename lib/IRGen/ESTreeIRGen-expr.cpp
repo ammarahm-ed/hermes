@@ -512,6 +512,20 @@ Value *ESTreeIRGen::genCallExpr(ESTree::CallExpressionNode *call) {
           call, llvh::cast<ESTree::IdentifierNode>(Mem->_property));
     }
 
+    // Typed `fn.call(thisArg, args...)` lowers to a direct CallInst, the
+    // same shape that `$SHBuiltin.call` produces. Sema has already verified
+    // the receiver is a function type, so the property `call` is guaranteed
+    // to be Function.prototype.call.
+    if (!Mem->_computed) {
+      if (auto *propId = llvh::dyn_cast<ESTree::IdentifierNode>(Mem->_property);
+          propId && propId->_name == kw_.identCall) {
+        if (llvh::isa<flow::BaseFunctionType>(
+                flowContext_.getNodeTypeOrAny(Mem->_object)->info)) {
+          return genTypedFunctionPrototypeCall(call, Mem);
+        }
+      }
+    }
+
     MemberExpressionResult memResult =
         genMemberExpression(Mem, MemberExpressionOperation::Load);
 
@@ -748,6 +762,29 @@ Value *ESTreeIRGen::genSHBuiltinCall(ESTree::CallExpressionNode *call) {
 
   return Builder.createCallInst(
       callee, /* newTarget */ Builder.getLiteralUndefined(), thisValue, args);
+}
+
+Value *ESTreeIRGen::genTypedFunctionPrototypeCall(
+    ESTree::CallExpressionNode *call,
+    ESTree::MemberExpressionNode *mem) {
+  Value *callee = genExpression(mem->_object);
+  Value *thisValue = Builder.getLiteralUndefined();
+  llvh::SmallVector<Value *, 4> args{};
+  bool sawThis = false;
+  for (ESTree::Node &arg : call->_arguments) {
+    Value *v = genExpression(&arg);
+    if (!sawThis) {
+      thisValue = v;
+      sawThis = true;
+    } else {
+      args.push_back(v);
+    }
+  }
+  return Builder.createCallInst(
+      callee,
+      /* newTarget */ Builder.getLiteralUndefined(),
+      thisValue,
+      args);
 }
 
 Value *ESTreeIRGen::genSHBuiltinExternC(ESTree::CallExpressionNode *call) {
