@@ -717,6 +717,18 @@ Value *ESTreeIRGen::genSHBuiltin(
         BuiltinMethod::HermesBuiltin_fastArrayPop, {array, count});
   }
 
+  // %SHBuiltin.fastArrayLength(arr: Array<T>): number;
+  if (builtin->_name == kw_.identFastArrayLength) {
+    if (call->_arguments.size() != 1) {
+      Mod->getContext().getSourceErrorManager().error(
+          call->getSourceRange(),
+          "fastArrayLength requires exactly one argument");
+      return Builder.getLiteralUndefined();
+    }
+    Value *array = genExpression(&call->_arguments.front());
+    return Builder.createFastArrayLengthInst(array);
+  }
+
   if (builtin->_name == kw_.identModuleFactory) {
     return genSHBuiltinModuleFactory(call);
   }
@@ -1230,7 +1242,7 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitMemberLoad(
 
   // Check if we are loading from a FastArray, and generate the typed IR.
   // This must be checked before the general ClassType case because Array<T>
-  // is a ClassType but needs special handling for computed access and .length.
+  // is a ClassType but needs special handling for computed access.
   // NOTE: This is required for correctness, since a regular property load from
   // a FastArray will simply return undefined if it is out-of-bounds.
   if (flowContext_.isArrayClassType(
@@ -1245,14 +1257,6 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitMemberLoad(
               flowTypeToIRType(flowContext_.getNodeTypeOrAny(mem))),
           nullptr,
           baseValue};
-    }
-
-    // If we are reading the length from a known FastArray, use a
-    // specialised instruction to load it efficiently.
-    auto *ident = llvh::dyn_cast<ESTree::IdentifierNode>(mem->_property);
-    if (!mem->_computed && ident && ident->_name == kw_.identLength) {
-      return MemberExpressionResult{
-          Builder.createFastArrayLengthInst(baseValue), nullptr, baseValue};
     }
   }
 

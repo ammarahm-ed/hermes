@@ -530,8 +530,6 @@ class FlowChecker::ExprVisitor {
         return outer_.flowContext_.getArrayElementType(objType);
       }
       auto *id = llvh::cast<ESTree::IdentifierNode>(node->_property);
-      if (id->_name == outer_.kw_.identLength)
-        return outer_.flowContext_.getNumber();
       if (id->_name == outer_.kw_.identPush) {
         // TODO: Represent .push as a real function.
         return outer_.flowContext_.getAny();
@@ -2302,7 +2300,32 @@ class FlowChecker::ExprVisitor {
       return;
     }
 
+    if (builtin->_name == outer_.kw_.identFastArrayLength) {
+      checkSHBuiltinFastArrayLength(call);
+      return;
+    }
+
     outer_.sm_.error(call->getSourceRange(), "unknown SH builtin call");
+  }
+
+  /// $SHBuiltin.fastArrayLength(arr: Array<T>): number.
+  void checkSHBuiltinFastArrayLength(ESTree::CallExpressionNode *call) {
+    visitESTreeChildren(*this, call, nullptr);
+    if (call->_arguments.size() != 1) {
+      outer_.sm_.error(
+          call->getSourceRange(),
+          "ft: fastArrayLength requires exactly one argument");
+      return;
+    }
+    ESTree::Node *arrArg = &call->_arguments.front();
+    Type *argType = outer_.getNodeTypeOrAny(arrArg);
+    if (!outer_.flowContext_.isArrayClassType(argType)) {
+      outer_.sm_.error(
+          arrArg->getSourceRange(),
+          "ft: fastArrayLength argument must be an array");
+      return;
+    }
+    outer_.setNodeType(call, outer_.flowContext_.getNumber());
   }
 
   /// $SHBuiltin.fastArrayPop(arr: Array<T>, n: number): T | void.
