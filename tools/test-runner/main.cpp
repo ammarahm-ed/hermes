@@ -62,6 +62,11 @@ cl::opt<bool> DumpSource(
 cl::opt<std::string>
     SkiplistPath("skiplist", cl::desc("Path to skiplist.json"), cl::Required);
 
+cl::opt<bool> TestIntl(
+    "test-intl",
+    cl::desc("Include Intl (intl402) tests instead of skipping them"),
+    cl::init(false));
+
 cl::opt<std::string> TestSuiteDir(
     "test-suite-dir",
     cl::desc("Path to test262 suite root"),
@@ -113,15 +118,32 @@ struct FilterResult {
 /// Filter test entries by the skiplist, separating tests to run from skipped.
 FilterResult filterBySkiplist(
     std::vector<TestEntry> &allTests,
-    const Skiplist &skiplist) {
+    const Skiplist &skiplist,
+    bool testIntl,
+    bool lazy) {
   FilterResult result;
   for (auto &entry : allTests) {
     SkipReason reason = skiplist.shouldSkipPath(entry.path);
     if (reason != SkipReason::NotSkipped) {
-      ++result.skippedCount;
-      if (reason == SkipReason::PermanentSkipList)
-        ++result.permanentlySkippedCount;
-      continue;
+      // When --test-intl is set, don't skip intl tests, but still
+      // honor other skip reasons (e.g. platform_skip_list). This
+      // mirrors the Python runner's two-pass design where it checks
+      // skip_list/platform_skip_list first, then intl_tests separately.
+      if (testIntl && reason == SkipReason::IntlTests) {
+        reason = skiplist.shouldSkipPathNonIntl(entry.path);
+      }
+      // Only skip lazy_skip_list tests when --lazy is enabled,
+      // matching the Python runner's conditional:
+      //   if lazy: skip_categories.append(LAZY_SKIP_LIST)
+      if (!lazy && reason == SkipReason::LazySkipList) {
+        reason = SkipReason::NotSkipped;
+      }
+      if (reason != SkipReason::NotSkipped) {
+        ++result.skippedCount;
+        if (reason == SkipReason::PermanentSkipList)
+          ++result.permanentlySkippedCount;
+        continue;
+      }
     }
     result.tests.push_back(std::move(entry));
   }
@@ -349,7 +371,7 @@ int main(int argc, char **argv) {
   }
 
   // Filter tests by skiplist.
-  FilterResult filtered = filterBySkiplist(allTests, skiplist);
+  FilterResult filtered = filterBySkiplist(allTests, skiplist, TestIntl, false);
 
   llvh::outs() << "-- Testing: " << filtered.tests.size() << " tests"
                << ", max " << NumThreads << " concurrent tasks --\n";
