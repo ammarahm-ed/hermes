@@ -2882,6 +2882,13 @@ class FlowChecker::ExprVisitor {
     bool hasRest = !params.empty() && params.back().rest;
     size_t numNonRestParams = hasRest ? params.size() - 1 : params.size();
 
+    // \return whether the param may be omitted at the call site if it is
+    // explicitly optional or if `void` flows into its type.
+    auto paramOmittable = [this](const TypedFunctionType::Param &p) -> bool {
+      return p.optional ||
+          outer_.canAFlowIntoB(outer_.flowContext_.getVoid(), p.type).canFlow;
+    };
+
     // Extract element type for rest param if present.
     Type *restElementType = nullptr;
     if (hasRest) {
@@ -2895,7 +2902,7 @@ class FlowChecker::ExprVisitor {
     if (hasRest) {
       // With rest param, need at least the required non-rest params.
       size_t numRequired = numNonRestParams;
-      while (numRequired > 0 && params[numRequired - 1].optional)
+      while (numRequired > 0 && paramOmittable(params[numRequired - 1]))
         --numRequired;
       if (numArgs < numRequired) {
         if (reportErrors) {
@@ -2907,29 +2914,27 @@ class FlowChecker::ExprVisitor {
         }
         return false;
       }
-    } else if (params.size() != numArgs) {
-      // Allow fewer arguments when trailing params are optional.
-      if (numArgs < params.size() && params[numArgs].optional) {
-        // OK: all remaining params starting from numArgs are optional
-        // (the parser enforces optional params come last).
-      } else {
-        if (reportErrors) {
-          // Count the number of required parameters.
-          size_t numRequired = params.size();
-          while (numRequired > 0 && params[numRequired - 1].optional)
-            --numRequired;
-          outer_.sm_.error(
-              callNode->getSourceRange(),
-              "ft: " + calleeName + " expects " +
-                  (numArgs > params.size()
-                       ? "at most " + llvh::Twine(params.size())
-                       : (numRequired != params.size()
-                              ? "at least " + llvh::Twine(numRequired)
-                              : llvh::Twine(params.size()))) +
-                  " arguments, but " + llvh::Twine(numArgs) + " supplied");
-        }
-        return false;
+    } else if (
+        numArgs > params.size() ||
+        !llvh::all_of(params.drop_front(numArgs), paramOmittable)) {
+      // Reject extra args, or fewer args when some trailing missing param
+      // is not omittable.
+      if (reportErrors) {
+        // Count the number of required parameters.
+        size_t numRequired = params.size();
+        while (numRequired > 0 && paramOmittable(params[numRequired - 1]))
+          --numRequired;
+        outer_.sm_.error(
+            callNode->getSourceRange(),
+            "ft: " + calleeName + " expects " +
+                (numArgs > params.size()
+                     ? "at most " + llvh::Twine(params.size())
+                     : (numRequired != params.size()
+                            ? "at least " + llvh::Twine(numRequired)
+                            : llvh::Twine(params.size()))) +
+                " arguments, but " + llvh::Twine(numArgs) + " supplied");
       }
+      return false;
     }
 
     auto begin = arguments.begin();
