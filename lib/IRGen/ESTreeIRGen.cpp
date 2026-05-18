@@ -782,9 +782,13 @@ void ESTreeIRGen::emitDestructuringArray(
     bool declInit,
     ESTree::ArrayPatternNode *targetPat,
     Value *source) {
-  if (auto *tuple = llvh::dyn_cast<flow::TupleType>(
-          flowContext_.getNodeTypeOrAny(targetPat)->info)) {
+  flow::Type *patType = flowContext_.getNodeTypeOrAny(targetPat);
+  if (auto *tuple = llvh::dyn_cast<flow::TupleType>(patType->info)) {
     emitDestructuringTypedTuple(declInit, targetPat, tuple, source);
+    return;
+  }
+  if (flowContext_.isArrayClassType(patType)) {
+    emitDestructuringTypedArray(declInit, targetPat, patType, source);
     return;
   }
 
@@ -1084,6 +1088,44 @@ void ESTreeIRGen::emitDestructuringTypedTuple(
         flowTypeToIRType(type->getTypes()[i]));
     elemLRef.emitStore(val);
     ++i;
+  }
+}
+
+void ESTreeIRGen::emitDestructuringTypedArray(
+    bool declInit,
+    ESTree::ArrayPatternNode *targetPat,
+    flow::Type *arrayClassType,
+    Value *source) {
+  assert(
+      flowContext_.isArrayClassType(arrayClassType) &&
+      "emitDestructuringTypedArray requires Array<T>");
+  flow::Type *elemType = flowContext_.getArrayElementType(arrayClassType);
+  Type irElemType = flowTypeToIRType(elemType);
+
+  size_t i = 0;
+  for (auto it = targetPat->_elements.begin(), end = targetPat->_elements.end();
+       it != end;
+       ++it, ++i) {
+    ESTree::Node &elem = *it;
+
+    if (llvh::isa<ESTree::EmptyNode>(&elem))
+      continue;
+
+    if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&elem)) {
+      assert(std::next(it) == end && "rest element must be the last element");
+      // Delegate to fastArraySlice, which copies the tail [i, length) into a
+      // fresh FastArray.
+      LReference restLRef = createLRef(rest->_argument, declInit);
+      auto *newArr = genBuiltinCall(
+          BuiltinMethod::HermesBuiltin_fastArraySlice,
+          {source, Builder.getLiteralNumber(i)});
+      restLRef.emitStore(newArr);
+    } else {
+      LReference lref = createLRef(&elem, declInit);
+      Value *val = Builder.createFastArrayLoadInst(
+          source, Builder.getLiteralNumber(i), irElemType);
+      lref.emitStore(val);
+    }
   }
 }
 

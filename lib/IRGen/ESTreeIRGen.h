@@ -1718,6 +1718,17 @@ class ESTreeIRGen {
       flow::TupleType *type,
       Value *source);
 
+  /// Generate code for destructuring assignment to ArrayPattern from a typed
+  /// Array<T> (FastArray). Uses indexed FastArrayLoadInst for prefix elements
+  /// and a CallBuiltinInst to HermesBuiltin.fastArraySlice for the optional
+  /// trailing rest element.
+  /// \p arrayClassType must satisfy flowContext_.isArrayClassType().
+  void emitDestructuringTypedArray(
+      bool declInit,
+      ESTree::ArrayPatternNode *targetPat,
+      flow::Type *arrayClassType,
+      Value *source);
+
   /// A record used by to describe a shared exception handler. Every individual
   /// stores the caught exception in the specified location and branches to the
   /// specified block.

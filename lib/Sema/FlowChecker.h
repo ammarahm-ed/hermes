@@ -506,6 +506,16 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
       TupleType *tuple,
       OnChildCB onChild);
 
+  /// Expand an Array<T> destructuring pattern: every non-rest element gets
+  /// type T, and a trailing RestElement (if any) gets the array type itself.
+  /// \p arrayClassType must satisfy flowContext_.isArrayClassType().
+  /// \return false on error.
+  template <typename OnChildCB>
+  LLVM_NODISCARD bool expandArrayDestructuring(
+      ESTree::ArrayPatternNode *arr,
+      Type *arrayClassType,
+      OnChildCB onChild);
+
   /// Expand an object destructuring pattern: resolve field types and call
   /// \p onChild for each (propertyValue, type) pair.
   /// \return false on error.

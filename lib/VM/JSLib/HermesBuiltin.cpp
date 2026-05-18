@@ -22,6 +22,8 @@
 #include "hermes/VM/StringBuilder.h"
 #include "hermes/VM/StringView.h"
 
+#include <algorithm>
+#include <cmath>
 #include <random>
 
 namespace hermes {
@@ -1092,6 +1094,54 @@ CallResult<HermesValue> hermesBuiltinFastArrayPop(void *, Runtime &runtime) {
   return FastArray::pop(arr, runtime, n);
 }
 
+/// \code
+///   HermesBuiltin.fastArraySlice = function (array, n) {}
+/// \endcode
+/// Return a new FastArray containing the elements of \p array starting at
+/// index \p n (i.e., \c array.slice(n) for FastArrays). The result has the
+/// same prototype as \p array. \p n is expected to be a non-negative
+/// integral number; the IRGen caller is responsible for providing it.
+/// Values that exceed the array length yield an empty array.
+CallResult<HermesValue> hermesBuiltinFastArraySlice(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  struct : public Locals {
+    PinnedValue<FastArray> source;
+    PinnedValue<JSObject> prototype;
+    PinnedValue<FastArray> result;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  lv.source = vmcast<FastArray>(args.getArg(0));
+  double nDouble = args.getArg(1).getNumber();
+  assert(
+      nDouble >= 0 && nDouble == std::floor(nDouble) &&
+      "fastArraySlice: n must be a non-negative integer");
+  uint32_t n = nDouble >= (double)UINT32_MAX ? UINT32_MAX : (uint32_t)nDouble;
+
+  uint32_t srcLen = lv.source->getLengthAsUint32(runtime);
+
+  // Reuse the source's prototype so the result has the same Array<T>
+  // class shape.
+  lv.prototype = lv.source->getParent(runtime);
+
+  // Clamp n to srcLen so FastArray::append's fromIndex is valid even when
+  // the IRGen-supplied index exceeds the source length.
+  uint32_t effN = std::min(n, srcLen);
+  uint32_t resultLen = srcLen - effN;
+
+  auto cr = FastArray::create(runtime, lv.prototype, resultLen);
+  if (LLVM_UNLIKELY(cr == ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+  lv.result.castAndSetHermesValue<FastArray>(*cr);
+
+  if (LLVM_UNLIKELY(
+          FastArray::append(lv.result, runtime, lv.source, effN) ==
+          ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+
+  return lv.result.getHermesValue();
+}
+
 void createHermesBuiltins(Runtime &runtime) {
   struct : public Locals {
     PinnedValue<NativeFunction> method;
@@ -1200,6 +1250,11 @@ void createHermesBuiltins(Runtime &runtime) {
       B::HermesBuiltin_fastArrayPop,
       P::fastArrayPop,
       hermesBuiltinFastArrayPop,
+      2);
+  defineInternMethod(
+      B::HermesBuiltin_fastArraySlice,
+      P::fastArraySlice,
+      hermesBuiltinFastArraySlice,
       2);
 
   // Define the 'requireFast' function, which takes a number argument.

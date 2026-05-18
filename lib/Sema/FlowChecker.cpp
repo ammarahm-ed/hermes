@@ -1826,6 +1826,10 @@ void FlowChecker::assignDestructuringParamTypes(
         setNodeType(arr, t);
         if (!expandTupleDestructuring(arr, tuple, addToWorklist))
           return;
+      } else if (flowContext_.isArrayClassType(t)) {
+        setNodeType(arr, t);
+        if (!expandArrayDestructuring(arr, t, addToWorklist))
+          return;
       } else if (llvh::isa<AnyType>(t->info)) {
         setNodeType(arr, flowContext_.getAny());
         for (ESTree::Node &el : arr->_elements)
@@ -1834,7 +1838,7 @@ void FlowChecker::assignDestructuringParamTypes(
         setNodeType(arr, flowContext_.getAny());
         sm_.error(
             arr->getSourceRange(),
-            "ft: incompatible type for array pattern, expected tuple");
+            "ft: incompatible type for array pattern, expected tuple or array");
       }
     } else if (auto *obj = llvh::dyn_cast<ESTree::ObjectPatternNode>(node)) {
       if (auto *objType = llvh::dyn_cast<ExactObjectType>(t->info)) {
@@ -1869,6 +1873,12 @@ bool FlowChecker::expandTupleDestructuring(
   size_t i = 0;
   bool tooFewTupleElements = false;
   for (ESTree::Node &element : arr->_elements) {
+    if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&element)) {
+      sm_.error(
+          rest->getSourceRange(),
+          "ft: rest element not allowed when destructuring a tuple");
+      return false;
+    }
     if (i >= tuple->getTypes().size()) {
       tooFewTupleElements = true;
       break;
@@ -1883,6 +1893,38 @@ bool FlowChecker::expandTupleDestructuring(
             llvh::Twine(tuple->getTypes().size()) + " elements, found " +
             llvh::Twine(arr->_elements.size()));
     return false;
+  }
+  return true;
+}
+
+template <typename OnChildCB>
+bool FlowChecker::expandArrayDestructuring(
+    ESTree::ArrayPatternNode *arr,
+    Type *arrayClassType,
+    OnChildCB onChild) {
+  assert(
+      flowContext_.isArrayClassType(arrayClassType) &&
+      "expandArrayDestructuring requires Array<T> class type");
+  Type *elementType = flowContext_.getArrayElementType(arrayClassType);
+  for (auto it = arr->_elements.begin(), end = arr->_elements.end(); it != end;
+       ++it) {
+    ESTree::Node &element = *it;
+    if (llvh::isa<ESTree::EmptyNode>(&element))
+      continue;
+    if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&element)) {
+      // Parser guarantees rest is last; assert defensively.
+      assert(std::next(it) == end && "rest element must be the last element");
+      onChild(rest->_argument, arrayClassType);
+      break;
+    }
+    if (llvh::isa<ESTree::AssignmentPatternNode>(&element)) {
+      sm_.error(
+          element.getSourceRange(),
+          "ft: default values are not yet supported "
+          "in typed array destructuring");
+      return false;
+    }
+    onChild(&element, elementType);
   }
   return true;
 }
@@ -2209,6 +2251,13 @@ class FlowChecker::AnnotateScopeDecls {
           outer.setNodeType(arr, t);
           if (!outer.expandTupleDestructuring(arr, tuple, addToWorklist))
             return;
+        } else if (outer.flowContext_.isArrayClassType(t)) {
+          // Array<T> destructuring: each element gets type T, and a trailing
+          // rest element gets type Array<T>. Setting the node type lets IRGen
+          // dispatch to the FastArray-specific destructuring path.
+          outer.setNodeType(arr, t);
+          if (!outer.expandArrayDestructuring(arr, t, addToWorklist))
+            return;
         } else if (llvh::isa<AnyType>(t->info)) {
           outer.setNodeType(arr, outer.flowContext_.getAny());
           // Propagate the 'any' type to all children.
@@ -2225,7 +2274,7 @@ class FlowChecker::AnnotateScopeDecls {
           outer.setNodeType(arr, outer.flowContext_.getAny());
           outer.sm_.error(
               arr->getSourceRange(),
-              "ft: incompatible type for array pattern, expected tuple");
+              "ft: incompatible type for array pattern, expected tuple or array");
           continue;
         }
       } else if (auto *obj = llvh::dyn_cast<ESTree::ObjectPatternNode>(node)) {

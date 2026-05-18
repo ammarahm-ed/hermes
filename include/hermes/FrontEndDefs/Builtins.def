@@ -159,6 +159,7 @@ PRIVATE_BUILTIN(functionPrototypeApply)
 PRIVATE_BUILTIN(functionPrototypeCall)
 
 PRIVATE_BUILTIN(fastArrayPop)
+PRIVATE_BUILTIN(fastArraySlice)
 
 JS_BUILTIN(spawnAsync)
 MARK_FIRST_JS_BUILTIN(spawnAsync)
