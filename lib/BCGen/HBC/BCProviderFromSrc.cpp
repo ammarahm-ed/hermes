@@ -217,8 +217,8 @@ BCProviderFromSrc::create(
   if (!parsed)
     return {nullptr, getErrorString()};
 
-  parsed = llvh::cast<ESTree::ProgramNode>(
-      hermes::transformASTForCompilation(*context, *parsed));
+  parsed = llvh::cast_or_null<ESTree::ProgramNode>(
+      hermes::transformASTForCompilation(*context, /* typed */ false, *parsed));
 
   if (!parsed ||
       !hermes::sema::resolveAST(*context, *semCtx, *parsed, declFileList)) {

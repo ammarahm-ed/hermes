@@ -173,7 +173,8 @@ static void compileLazyFunctionWorker(void *argPtr) {
     return;
   }
 
-  optParsed = hermes::transformASTForCompilation(context, *optParsed);
+  optParsed = hermes::transformASTForCompilation(
+      context, /* typed */ false, *optParsed);
 
   // A non-null home object means the parent function context could reference
   // super.
@@ -339,8 +340,9 @@ static void compileEvalWorker(void *argPtr) {
   std::shared_ptr<sema::SemContext> semCtx = std::make_shared<sema::SemContext>(
       context, provider->shareSemCtx(), lexScope);
 
-  optParsed = llvh::cast<ESTree::ProgramNode>(
-      hermes::transformASTForCompilation(context, *optParsed));
+  optParsed = llvh::cast_or_null<ESTree::ProgramNode>(
+      hermes::transformASTForCompilation(
+          context, /* typed */ false, *optParsed));
 
   // A non-null home object means the parent function context could reference
   // super.

@@ -272,6 +272,16 @@ void FlowChecker::visitNonGenericFunctionDeclaration(
 }
 
 void FlowChecker::visit(ESTree::FunctionDeclarationNode *node) {
+  // Validate any decorations attached via Hermes.decorate(...) calls.
+  // These are stored on the FunctionLikeDecoration rather than as AST
+  // _decorators, so visitESTreeChildren does not reach them.
+  if (auto *funcDeco =
+          ESTree::getDecoration<ESTree::FunctionLikeDecoration>(node)) {
+    for (auto &decorator : funcDeco->decorations) {
+      visit(llvh::cast<ESTree::DecoratorNode>(&decorator), node);
+    }
+  }
+
   sema::Decl *decl = semContext_.getDeclarationDecl(
       llvh::cast<ESTree::IdentifierNode>(node->_id));
   assert(decl && "function declaration must have been resolved");
@@ -1404,6 +1414,13 @@ void FlowChecker::visit(ESTree::DecoratorNode *node, ESTree::Node *parent) {
       sm_.error(
           node->getSourceRange(),
           "ft: @Hermes.overload is only valid on methods");
+      return;
+    }
+  } else if (propID->_name == kw_.identBuiltin) {
+    if (!llvh::isa<ESTree::FunctionDeclarationNode>(parent)) {
+      sm_.error(
+          node->getSourceRange(),
+          "ft: @Hermes.builtin is only valid on function declarations");
       return;
     }
   } else {

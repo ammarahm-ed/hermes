@@ -2105,11 +2105,13 @@ void SemanticResolver::processDeclarations(const ScopeDecls &decls) {
     llvh::SmallVector<ESTree::IdentifierNode *, 4> idents{};
     Decl::Kind kind = extractIdentsFromDecl(decl, idents);
 
-    // In typed mode, ignore function declarations with "builtin" directive.
-    // They're going to be resolved by the FlowChecker.
+    // In typed mode, ignore function declarations marked as builtin (either
+    // via the "builtin" directive or a Hermes.builtin decoration). They're
+    // going to be resolved by the FlowChecker.
     if (typed_) {
       if (auto *funcDecl = llvh::dyn_cast<FunctionDeclarationNode>(decl);
-          funcDecl && hasBuiltinDirective(funcDecl)) {
+          funcDecl &&
+          (hasBuiltinDirective(funcDecl) || hasBuiltinDecoration(funcDecl))) {
         semCtx_.addBuiltinDeclaration(funcDecl);
         Decl *newDecl = semCtx_.newDeclInScope(
             idents.front()->_name, Decl::Kind::TypedBuiltin, curScope_);
@@ -2819,6 +2821,15 @@ bool SemanticResolver::hasBuiltinDirective(
     return directives.builtin;
   }
   return false;
+}
+
+bool SemanticResolver::hasBuiltinDecoration(
+    ESTree::FunctionDeclarationNode *funcDecl) const {
+  auto *deco = ESTree::getDecoration<ESTree::FunctionLikeDecoration>(funcDecl);
+  if (!deco)
+    return false;
+  return findDecorator(
+             deco->decorations, {kw_.identHermes, kw_.identBuiltin}) != nullptr;
 }
 
 /* static */ void SemanticResolver::registerLocalEval(LexicalScope *scope) {

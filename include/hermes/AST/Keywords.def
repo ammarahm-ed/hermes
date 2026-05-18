@@ -73,6 +73,7 @@ HERMES_KEYWORD(Hermes, "Hermes")
 HERMES_KEYWORD(Final, "final")
 HERMES_KEYWORD(Overload, "overload")
 HERMES_KEYWORD(Array, "array")
+HERMES_KEYWORD(Decorate, "decorate")
 
 HERMES_KEYWORD(ModuleFactory, "moduleFactory")
 HERMES_KEYWORD(Export, "export")

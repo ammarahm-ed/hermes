@@ -179,6 +179,20 @@ function foo(a: number | void): number {
 }
 ```
 
+### Decorations on Function Declarations
+
+JS decorator syntax (`@Hermes.foo`) does not apply to function declarations, so the typed language uses a `Hermes.decorate(...)` call to attach decorations:
+
+```
+function charAt(this: string, pos: number): string { return this[pos]; }
+Hermes.decorate(charAt, Hermes.builtin);
+```
+
+* The call must appear as a statement immediately following the `FunctionDeclaration` it decorates.
+* The first argument must be an identifier matching the preceding function's name.
+* The second argument must be the decorator.
+* Exactly two arguments are required.
+
 ## JS Language Features
 
 The typed language is a subset of JavaScript. Most common ES2015+ constructs work, with the notable exceptions listed under "Not yet supported" below.

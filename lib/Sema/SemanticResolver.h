@@ -493,6 +493,11 @@ class SemanticResolver
   /// Check if a function declaration has a "builtin" directive.
   bool hasBuiltinDirective(ESTree::FunctionDeclarationNode *funcDecl) const;
 
+  /// Check if a function declaration has a Hermes.builtin decoration attached
+  /// (set up by the typed-mode AST transform that consumes
+  /// `Hermes.decorate(name, Hermes.builtin)` calls).
+  bool hasBuiltinDecoration(ESTree::FunctionDeclarationNode *funcDecl) const;
+
   /// Mark \p scope and every one of its ancestor scopes as users of local
   /// `eval()`.
   static void registerLocalEval(LexicalScope *scope);

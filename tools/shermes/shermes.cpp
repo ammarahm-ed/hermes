@@ -825,8 +825,9 @@ ESTree::NodePtr parseJS(
   }
 #endif
 
-  parsedAST = llvh::cast<ESTree::ProgramNode>(
-      hermes::transformASTForCompilation(*context, parsedAST));
+  parsedAST = llvh::cast_or_null<ESTree::ProgramNode>(
+      hermes::transformASTForCompilation(
+          *context, /* typed */ flowContext != nullptr, parsedAST));
   if (!parsedAST)
     return nullptr;
 
@@ -841,7 +842,14 @@ ESTree::NodePtr parseJS(
     if (!optPrelude) {
       return nullptr;
     }
-    prelude = optPrelude.getValue();
+    // Apply the same AST transforms (e.g. typed-mode Hermes.decorate
+    // rewriting) to the TypedLib prelude that we applied to user code.
+    auto *transformedPrelude = hermes::transformASTForCompilation(
+        *context, /* typed */ flowContext != nullptr, optPrelude.getValue());
+    if (!transformedPrelude) {
+      return nullptr;
+    }
+    prelude = llvh::cast<ESTree::ProgramNode>(transformedPrelude);
   }
 
   // If we are executing in typed mode and not script, then wrap the program.
