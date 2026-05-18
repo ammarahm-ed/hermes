@@ -440,6 +440,37 @@ class FlowChecker::ExprVisitor {
     // The type is either the type of the identifier or "any".
     Type *type = outer_.flowContext_.findDeclType(decl);
 
+    // In typed functions, 'arguments' is only allowed in 'arguments.length'.
+    if (decl->special == sema::Decl::Special::Arguments) {
+      // Get the function that 'arguments' belongs to to determine its type.
+      sema::FunctionInfo *argumentsOwner = decl->scope->parentFunction;
+      FunctionContext *argumentsContext = outer_.curFunctionContext_;
+      // Walk up the stack to find the function that 'arguments' belongs to.
+      // We won't hit the null context because the FunctionContext must exist.
+      while (argumentsContext->semInfo != argumentsOwner)
+        argumentsContext = argumentsContext->getPreviousContext();
+      Type *funcType = argumentsContext->functionType;
+      // For typed functions, ensure that this is arguments.length.
+      if (funcType && llvh::isa<TypedFunctionType>(funcType->info)) {
+        bool isArgumentsLength = false;
+        if (auto *memberParent =
+                llvh::dyn_cast<ESTree::MemberExpressionNode>(parent);
+            memberParent && memberParent->_object == node &&
+            !memberParent->_computed) {
+          if (auto *propId = llvh::dyn_cast<ESTree::IdentifierNode>(
+                  memberParent->_property);
+              propId && propId->_name == outer_.kw_.identLength) {
+            isArgumentsLength = true;
+          }
+        }
+        if (!isArgumentsLength)
+          outer_.sm_.error(
+              node->getSourceRange(),
+              "ft: 'arguments' is only allowed in 'arguments.length'"
+              " in typed functions");
+      }
+    }
+
     // Generic decls don't have types set because they aren't real values.
     // 'arguments' is implicitly typed as 'any' since it's a runtime object.
     if (!type && !sema::Decl::isKindGlobal(decl->kind) && !decl->generic &&
@@ -754,6 +785,20 @@ class FlowChecker::ExprVisitor {
 
     Type *objType = outer_.getNodeTypeOrAny(node->_object);
     Type *resType = outer_.flowContext_.getAny();
+
+    // 'arguments.length' is always typed as number.
+    if (auto *objId = llvh::dyn_cast<ESTree::IdentifierNode>(node->_object);
+        objId && !node->_computed) {
+      auto *objDecl = outer_.getDecl(objId);
+      if (objDecl && objDecl->special == sema::Decl::Special::Arguments) {
+        if (auto *propId =
+                llvh::dyn_cast<ESTree::IdentifierNode>(node->_property);
+            propId && propId->_name == outer_.kw_.identLength) {
+          outer_.setNodeType(node, outer_.flowContext_.getNumber());
+          return;
+        }
+      }
+    }
 
     // Attempt to narrow object type if it doesn't currently support member
     // access.

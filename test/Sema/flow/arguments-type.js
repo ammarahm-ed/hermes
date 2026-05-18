@@ -7,14 +7,14 @@
 
 // RUN: %shermes -Werror -fno-std-globals -typed -dump-sema %s | %FileCheckOrRegen %s --match-full-lines
 
-// Test that arguments.length can be used in typed functions without warnings.
+// Test that arguments.length is typed as number in typed functions.
 
 function foo(x: number, y: string): void {
-  var len = arguments.length;
+  var len: number = arguments.length;
 }
 
 function bar(): void {
-  var len = arguments.length;
+  var len: number = arguments.length;
 }
 
 function baz(a: number): bool {
@@ -43,11 +43,11 @@ function baz(a: number): bool {
 // CHECK-NEXT:        Scope %s.2
 // CHECK-NEXT:            Decl %d.6 'x' Parameter : number
 // CHECK-NEXT:            Decl %d.7 'y' Parameter : string
-// CHECK-NEXT:            Decl %d.8 'len' Var : any
+// CHECK-NEXT:            Decl %d.8 'len' Var : number
 // CHECK-NEXT:            Decl %d.9 'arguments' Var Arguments
 // CHECK-NEXT:    Func strict
 // CHECK-NEXT:        Scope %s.3
-// CHECK-NEXT:            Decl %d.10 'len' Var : any
+// CHECK-NEXT:            Decl %d.10 'len' Var : number
 // CHECK-NEXT:            Decl %d.11 'arguments' Var Arguments
 // CHECK-NEXT:    Func strict
 // CHECK-NEXT:        Scope %s.4
@@ -64,7 +64,7 @@ function baz(a: number): bool {
 // CHECK-NEXT:            BlockStatement
 // CHECK-NEXT:                VariableDeclaration
 // CHECK-NEXT:                    VariableDeclarator
-// CHECK-NEXT:                        MemberExpression : any
+// CHECK-NEXT:                        MemberExpression : number
 // CHECK-NEXT:                            Id 'arguments' [D:E:%d.9 'arguments'] : any
 // CHECK-NEXT:                            Id 'length'
 // CHECK-NEXT:                        Id 'len' [D:E:%d.8 'len']
@@ -73,7 +73,7 @@ function baz(a: number): bool {
 // CHECK-NEXT:            BlockStatement
 // CHECK-NEXT:                VariableDeclaration
 // CHECK-NEXT:                    VariableDeclarator
-// CHECK-NEXT:                        MemberExpression : any
+// CHECK-NEXT:                        MemberExpression : number
 // CHECK-NEXT:                            Id 'arguments' [D:E:%d.11 'arguments'] : any
 // CHECK-NEXT:                            Id 'length'
 // CHECK-NEXT:                        Id 'len' [D:E:%d.10 'len']
@@ -83,7 +83,7 @@ function baz(a: number): bool {
 // CHECK-NEXT:            BlockStatement
 // CHECK-NEXT:                ReturnStatement
 // CHECK-NEXT:                    BinaryExpression : boolean
-// CHECK-NEXT:                        MemberExpression : any
+// CHECK-NEXT:                        MemberExpression : number
 // CHECK-NEXT:                            Id 'arguments' [D:E:%d.13 'arguments'] : any
 // CHECK-NEXT:                            Id 'length'
 // CHECK-NEXT:                        NumericLiteral : number

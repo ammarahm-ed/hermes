@@ -1022,6 +1022,10 @@ class FlowChecker::FunctionContext {
   /// global function.
   Type *const functionType;
 
+  /// Semantic information for this function. Null for synthetic contexts that
+  /// do not correspond to a function-like AST node.
+  sema::FunctionInfo *const semInfo;
+
   /// The type of the "this" parameter. If nullptr, this is a global function
   /// with an implicit "this" paramater. Depending on the compilation mode,
   /// usages may be invalid.
@@ -1051,6 +1055,7 @@ class FlowChecker::FunctionContext {
                 ? outer.declCollectorMap_.find(declCollectorNode)->second.get()
                 : nullptr),
         functionType(functionType),
+        semInfo(declCollectorNode ? declCollectorNode->getSemInfo() : nullptr),
         thisParamType(thisParamType),
         newTargetType(newTargetType) {
     assert(
