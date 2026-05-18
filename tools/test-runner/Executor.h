@@ -84,6 +84,8 @@ struct ExecConfig {
   bool forceJIT = false;
   bool shermes = false;
   std::string shermesBinary;
+  /// Extra flags to pass to shermes during compilation.
+  std::vector<std::string> shermesExtraFlags;
 };
 
 /// Compile JS source to bytecode in-memory.
@@ -146,6 +148,7 @@ TestResult executeTestVariant(
 /// \p optimize whether to pass -O (vs -O0) to shermes.
 /// \p disableHandleSan whether to disable GC handle sanitization.
 /// \p shermesBinary path to the shermes executable.
+/// \p shermesExtraFlags extra flags to pass to shermes.
 TestResult executeTestVariantShermes(
     const std::string &testName,
     const std::string &source,
@@ -155,7 +158,8 @@ TestResult executeTestVariantShermes(
     unsigned timeoutSeconds,
     bool optimize,
     bool disableHandleSan,
-    const std::string &shermesBinary);
+    const std::string &shermesBinary,
+    const std::vector<std::string> &shermesExtraFlags);
 
 /// Thread-safe work queue for distributing tests to worker threads.
 class WorkQueue {

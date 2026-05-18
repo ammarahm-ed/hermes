@@ -321,7 +321,8 @@ void processTestEntry(
           config.timeoutSeconds,
           config.optimize,
           disableHandleSan,
-          config.shermesBinary);
+          config.shermesBinary,
+          config.shermesExtraFlags);
     }
 
     return executeTestVariant(
@@ -607,7 +608,8 @@ TestResult executeTestVariantShermes(
     unsigned timeoutSeconds,
     bool optimize,
     bool disableHandleSan,
-    const std::string &shermesBinary) {
+    const std::string &shermesBinary,
+    const std::vector<std::string> &shermesExtraFlags) {
   using Clock = std::chrono::steady_clock;
   auto startTime = Clock::now();
 
@@ -664,6 +666,8 @@ TestResult executeTestVariantShermes(
   if (isStrict)
     compileArgStorage.push_back("-strict");
   compileArgStorage.push_back(optimize ? "-O" : "-O0");
+  for (const auto &flag : shermesExtraFlags)
+    compileArgStorage.push_back(flag);
 
   std::vector<llvh::StringRef> compileArgs;
   for (const auto &arg : compileArgStorage)

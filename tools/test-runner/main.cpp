@@ -100,6 +100,10 @@ cl::opt<std::string> ShermesBinary(
     cl::desc("Path to the shermes executable (required with --shermes)"),
     cl::init(""));
 
+cl::list<std::string> ShermesFlags(
+    "shermes-flag",
+    cl::desc("Extra flag to pass to shermes (can be repeated)"));
+
 cl::opt<std::string> TestSuiteDir(
     "test-suite-dir",
     cl::desc("Path to test262 suite root"),
@@ -369,18 +373,20 @@ int main(int argc, char **argv) {
       "  Accepts individual .js files or directories.\n");
 
   // Validate --shermes options.
-  if (Shermes && ShermesBinary.empty()) {
-    llvh::errs()
-        << "Error: --shermes-binary is required when --shermes is used.\n";
-    return 1;
-  }
-  if (Shermes && Lazy) {
-    llvh::errs() << "Error: --shermes and --lazy are mutually exclusive.\n";
-    return 1;
-  }
-  if (Shermes && JIT != JITMode::Off) {
-    llvh::errs() << "Error: --shermes and --jit are mutually exclusive.\n";
-    return 1;
+  if (Shermes) {
+    if (ShermesBinary.empty()) {
+      llvh::errs()
+          << "Error: --shermes-binary is required when --shermes is used.\n";
+      return 1;
+    }
+    if (Lazy) {
+      llvh::errs() << "Error: --shermes and --lazy are mutually exclusive.\n";
+      return 1;
+    }
+    if (JIT != JITMode::Off) {
+      llvh::errs() << "Error: --shermes and --jit are mutually exclusive.\n";
+      return 1;
+    }
   }
 
   // Discover test files.
@@ -446,6 +452,7 @@ int main(int argc, char **argv) {
   execConfig.forceJIT = JIT == JITMode::Force;
   execConfig.shermes = Shermes;
   execConfig.shermesBinary = ShermesBinary;
+  execConfig.shermesExtraFlags.assign(ShermesFlags.begin(), ShermesFlags.end());
 
   std::vector<TestResult> results;
   std::atomic<size_t> featureSkippedCount{0};
