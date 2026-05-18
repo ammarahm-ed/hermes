@@ -966,6 +966,28 @@ static inline bool _sh_ljs_equal_rjs_inline(
 
 SHERMES_EXPORT bool _sh_ljs_strict_equal(SHLegacyValue a, SHLegacyValue b);
 
+/// Inline fast path for strict equality (===).
+/// Handles the common cases inline: same raw bits (identity check for objects,
+/// bools, null, undefined, symbols) and both-number comparison. Falls back to
+/// out-of-line for string/bigint deep compare, different types, and mixed NaN
+/// patterns.
+static inline bool _sh_ljs_strict_equal_inline(
+    SHLegacyValue a,
+    SHLegacyValue b) {
+  // Fast path: raw bits match → equal iff not a NaN.
+  // Covers: same object pointer, same bool, null===null, undefined===undefined,
+  // same symbol, same non-NaN number (same bit pattern).
+  // For NaN, a.f64 == a.f64 is false per IEEE 754.
+  if (a.raw == b.raw)
+    return !_sh_ljs_is_double(a) || a.f64 == a.f64;
+  // Fast path: both are non-NaN numbers → compare as doubles.
+  // Handles +0 === -0 (true) and different numeric values.
+  if (_sh_ljs_are_both_non_nan_numbers(a, b))
+    return a.f64 == b.f64;
+  // Out-of-line: string/bigint deep compare, different types, mixed NaN.
+  return _sh_ljs_strict_equal(a, b);
+}
+
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_add_rjs(SHRuntime *shr, const SHLegacyValue *a, const SHLegacyValue *b);
 

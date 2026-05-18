@@ -1107,7 +1107,8 @@ class InstrGen {
                        inst.getLeftHandSide(), inst.getRightHandSide())) {
           infixRawOp = "!=";
         } else {
-          funcUntypedOp = "!_sh_ljs_strict_equal";
+          funcUntypedOp = options_.smallC ? "!_sh_ljs_strict_equal"
+                                          : "!_sh_ljs_strict_equal_inline";
           passByValue = true;
         }
         boolConv = true;
@@ -1119,7 +1120,8 @@ class InstrGen {
                        inst.getLeftHandSide(), inst.getRightHandSide())) {
           infixRawOp = "==";
         } else {
-          funcUntypedOp = "_sh_ljs_strict_equal";
+          funcUntypedOp = options_.smallC ? "_sh_ljs_strict_equal"
+                                          : "_sh_ljs_strict_equal_inline";
           passByValue = true;
         }
         boolConv = true;
