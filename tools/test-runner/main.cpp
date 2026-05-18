@@ -11,6 +11,8 @@
 #include "Skiplist.h"
 #include "TestDiscovery.h"
 
+#include "hermes/VM/RuntimeFlags.h"
+
 #include "llvh/Support/CommandLine.h"
 #include "llvh/Support/FileSystem.h"
 #include "llvh/Support/InitLLVM.h"
@@ -27,9 +29,20 @@
 #include <vector>
 
 using namespace hermes::testrunner;
-namespace cl = llvh::cl;
+
+// CompilerDriver.h (transitively included via RuntimeFlags.h) declares a
+// real `namespace cl {}`, so we cannot use `namespace cl = llvh::cl;`.
+// Instead, bring llvh::cl contents into the existing cl namespace.
+namespace cl {
+using namespace llvh::cl;
+} // namespace cl
 
 namespace {
+
+/// Instantiate RuntimeFlags to register all VM CLI options (-Xjit,
+/// -gc-sanitize-handles, -Xes6-proxy, -test262, etc.) in the global
+/// llvh::CommandLine state.
+hermes::cli::RuntimeFlags runtimeFlags;
 
 cl::list<std::string> TestPaths(
     cl::Positional,
@@ -76,19 +89,6 @@ cl::opt<bool> Optimize(
     "O",
     cl::desc("Enable optimization passes (default: off)"),
     cl::init(false));
-
-enum class JITMode { Off, On, Force };
-cl::opt<JITMode> JIT(
-    "jit",
-    cl::desc("JIT compilation mode (default: off)"),
-    cl::init(JITMode::Off),
-    cl::values(
-        clEnumValN(JITMode::Off, "off", "JIT is disabled"),
-        clEnumValN(JITMode::On, "on", "JIT is enabled"),
-        clEnumValN(
-            JITMode::Force,
-            "force",
-            "Force JIT compilation of every function")));
 
 cl::opt<bool> Shermes(
     "shermes",
@@ -383,8 +383,8 @@ int main(int argc, char **argv) {
       llvh::errs() << "Error: --shermes and --lazy are mutually exclusive.\n";
       return 1;
     }
-    if (JIT != JITMode::Off) {
-      llvh::errs() << "Error: --shermes and --jit are mutually exclusive.\n";
+    if (runtimeFlags.JIT != hermes::cli::VMOnlyRuntimeFlags::JITMode::Off) {
+      llvh::errs() << "Error: --shermes and -Xjit are mutually exclusive.\n";
       return 1;
     }
   }
@@ -448,11 +448,10 @@ int main(int argc, char **argv) {
   execConfig.timeoutSeconds = Timeout;
   execConfig.optimize = Optimize;
   execConfig.lazy = Lazy;
-  execConfig.enableJIT = JIT != JITMode::Off;
-  execConfig.forceJIT = JIT == JITMode::Force;
   execConfig.shermes = Shermes;
   execConfig.shermesBinary = ShermesBinary;
   execConfig.shermesExtraFlags.assign(ShermesFlags.begin(), ShermesFlags.end());
+  execConfig.runtimeFlags = &runtimeFlags;
 
   std::vector<TestResult> results;
   std::atomic<size_t> featureSkippedCount{0};

@@ -27,6 +27,11 @@
 #include <vector>
 
 namespace hermes {
+
+namespace cli {
+struct RuntimeFlags;
+} // namespace cli
+
 namespace testrunner {
 
 /// Result code for a single test variant.
@@ -80,12 +85,12 @@ struct ExecConfig {
   unsigned timeoutSeconds = 200;
   bool optimize = false;
   bool lazy = false;
-  bool enableJIT = false;
-  bool forceJIT = false;
   bool shermes = false;
   std::string shermesBinary;
   /// Extra flags to pass to shermes during compilation.
   std::vector<std::string> shermesExtraFlags;
+  /// Parsed command line runtime flags (registered via RuntimeFlags.h).
+  const cli::RuntimeFlags *runtimeFlags = nullptr;
 };
 
 /// Compile JS source to bytecode in-memory.
@@ -126,12 +131,8 @@ TestResult executeTestVariant(
     const std::string &sourceURL,
     bool isStrict,
     const NegativeExpectation &negative,
-    unsigned timeoutSeconds,
-    bool disableHandleSan = false,
-    bool optimize = false,
-    bool lazy = false,
-    bool enableJIT = false,
-    bool forceJIT = false);
+    const ExecConfig &config,
+    bool disableHandleSan = false);
 
 /// Execute a single test variant using shermes subprocess compilation
 /// and execution (two-step approach matching the Python runner).

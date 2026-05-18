@@ -15,6 +15,7 @@
 #include "hermes/VM/Callable.h"
 #include "hermes/VM/Domain.h"
 #include "hermes/VM/Runtime.h"
+#include "hermes/VM/RuntimeFlags.h"
 #include "hermes/VM/TimeLimitMonitor.h"
 #include "hermes/hermes.h"
 
@@ -26,7 +27,13 @@
 #include "llvh/Support/Program.h"
 #include "llvh/Support/raw_ostream.h"
 
+#include <cassert>
 #include <thread>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace hermes {
 namespace testrunner {
@@ -53,34 +60,45 @@ std::string captureException(vm::Runtime &runtime) {
 }
 
 /// Create a configured Hermes runtime for test262 execution.
+/// Uses buildRuntimeConfig() from RuntimeFlags to get a base config from
+/// parsed CLI flags, then overlays test262-specific settings.
 /// When \p disableHandleSan is true, GC handle sanitization is disabled
 /// (sanitize rate = 0), matching the Python runner's behavior for
 /// handlesan_skip_list tests.
 TestRuntimeEnv createTestRuntime(
-    unsigned timeoutSeconds,
-    bool disableHandleSan,
-    bool enableJIT,
-    bool forceJIT) {
-  auto gcConfigBuilder = vm::GCConfig::Builder();
+    const ExecConfig &config,
+    bool disableHandleSan) {
+  assert(config.runtimeFlags && "runtimeFlags must be set");
+  auto baseConfig = cli::buildRuntimeConfig(*config.runtimeFlags);
+  using JITMode = cli::VMOnlyRuntimeFlags::JITMode;
+  auto builder =
+      baseConfig
+          .rebuild()
+          // Test262-specific overrides (always true for test runner).
+          .withES6Proxy(true)
+          .withES6BlockScoping(true)
+          .withMicrotaskQueue(true)
+          .withEnableHermesInternal(true)
+          .withEnableHermesInternalTestMethods(true)
+          .withEnableAsyncGenerators(true)
+          .withTest262(true)
+          .withEnableEval(true)
+          .withAsyncBreakCheckInEval(true)
+          // JIT settings (not set by buildRuntimeConfig).
+          .withEnableJIT(config.runtimeFlags->JIT != JITMode::Off)
+          .withForceJIT(config.runtimeFlags->JIT == JITMode::Force)
+          .withJITThreshold(config.runtimeFlags->JITThreshold)
+          .withJITMemoryLimit(config.runtimeFlags->JITMemoryLimit);
   if (disableHandleSan) {
-    gcConfigBuilder.withSanitizeConfig(
-        vm::GCSanitizeConfig::Builder().withSanitizeRate(0.0).build());
+    auto gcConfig =
+        baseConfig.getGCConfig()
+            .rebuild()
+            .withSanitizeConfig(
+                vm::GCSanitizeConfig::Builder().withSanitizeRate(0.0).build())
+            .build();
+    builder.withGCConfig(gcConfig);
   }
-
-  auto runtimeConfig = vm::RuntimeConfig::Builder()
-                           .withGCConfig(gcConfigBuilder.build())
-                           .withES6Proxy(true)
-                           .withES6BlockScoping(true)
-                           .withMicrotaskQueue(true)
-                           .withEnableHermesInternal(true)
-                           .withEnableHermesInternalTestMethods(true)
-                           .withEnableAsyncGenerators(true)
-                           .withTest262(true)
-                           .withEnableEval(true)
-                           .withAsyncBreakCheckInEval(true)
-                           .withEnableJIT(enableJIT)
-                           .withForceJIT(forceJIT)
-                           .build();
+  auto runtimeConfig = builder.build();
 
   auto hermesRuntime = facebook::hermes::makeHermesRuntime(runtimeConfig);
   auto *runtime = static_cast<vm::Runtime *>(
@@ -89,11 +107,11 @@ TestRuntimeEnv createTestRuntime(
           ->getVMRuntimeUnsafe());
 
   std::shared_ptr<vm::TimeLimitMonitor> timeLimitMonitor;
-  if (timeoutSeconds > 0) {
+  if (config.timeoutSeconds > 0) {
     timeLimitMonitor = vm::TimeLimitMonitor::getOrCreate();
     runtime->timeLimitMonitor = timeLimitMonitor;
     timeLimitMonitor->watchRuntime(
-        *runtime, std::chrono::milliseconds(timeoutSeconds * 1000u));
+        *runtime, std::chrono::milliseconds(config.timeoutSeconds * 1000u));
   }
 
   return {std::move(hermesRuntime), runtime, std::move(timeLimitMonitor)};
@@ -129,11 +147,8 @@ TestResult executeCompiledTest(
     std::unique_ptr<hbc::BCProvider> bytecode,
     const std::string &sourceURL,
     const NegativeExpectation &negative,
-    unsigned timeoutSeconds,
+    const ExecConfig &config,
     bool disableHandleSan,
-    bool lazy,
-    bool enableJIT,
-    bool forceJIT,
     Clock::time_point startTime) {
   bool expectRuntimeError =
       !negative.phase.empty() && negative.phase == "runtime";
@@ -149,8 +164,7 @@ TestResult executeCompiledTest(
     return r;
   };
 
-  auto env =
-      createTestRuntime(timeoutSeconds, disableHandleSan, enableJIT, forceJIT);
+  auto env = createTestRuntime(config, disableHandleSan);
 
   // Install console bindings (including $262, alert, setTimeout, etc.).
   vm::GCScope scope(*env.runtime);
@@ -161,7 +175,7 @@ TestResult executeCompiledTest(
   // Run the bytecode.
   // Lazy compilation cannot use persistent mode.
   vm::RuntimeModuleFlags rmFlags;
-  rmFlags.persistent = !lazy;
+  rmFlags.persistent = !config.lazy;
   auto status = env.runtime->runBytecode(
       std::move(bytecode),
       rmFlags,
@@ -331,12 +345,8 @@ void processTestEntry(
         entry.path,
         compileStrict,
         record.negative,
-        config.timeoutSeconds,
-        disableHandleSan,
-        config.optimize,
-        config.lazy,
-        config.enableJIT,
-        config.forceJIT);
+        config,
+        disableHandleSan);
   };
 
   TestResult lastResult;
@@ -450,12 +460,8 @@ TestResult executeTestVariant(
     const std::string &sourceURL,
     bool isStrict,
     const NegativeExpectation &negative,
-    unsigned timeoutSeconds,
-    bool disableHandleSan,
-    bool optimize,
-    bool lazy,
-    bool enableJIT,
-    bool forceJIT) {
+    const ExecConfig &config,
+    bool disableHandleSan) {
   auto startTime = Clock::now();
 
   auto makeResult = [&](ResultCode code, const std::string &msg) {
@@ -477,8 +483,8 @@ TestResult executeTestVariant(
   // Note: enableJIT/forceJIT are runtime-only settings and don't affect
   // compilation — they are passed through to createTestRuntime instead.
   std::string compileError;
-  auto bytecode =
-      compileSource(source, sourceURL, isStrict, optimize, lazy, compileError);
+  auto bytecode = compileSource(
+      source, sourceURL, isStrict, config.optimize, config.lazy, compileError);
 
   if (!bytecode) {
     if (expectCompileError || expectResolutionError) {
@@ -495,9 +501,9 @@ TestResult executeTestVariant(
   }
 
   // Check if compilation already exceeded the timeout budget.
-  if (timeoutSeconds > 0) {
+  if (config.timeoutSeconds > 0) {
     auto elapsed = Clock::now() - startTime;
-    if (elapsed >= std::chrono::seconds(timeoutSeconds)) {
+    if (elapsed >= std::chrono::seconds(config.timeoutSeconds)) {
       return makeResult(
           ResultCode::CompileTimeout, "FAIL: Compilation timed out");
     }
@@ -508,11 +514,8 @@ TestResult executeTestVariant(
       std::move(bytecode),
       sourceURL,
       negative,
-      timeoutSeconds,
+      config,
       disableHandleSan,
-      lazy,
-      enableJIT,
-      forceJIT,
       startTime);
 }
 
@@ -792,6 +795,22 @@ void runAllTests(
   size_t totalTests = tests.size();
   std::atomic<unsigned> lastPrintedPct{0};
 
+  // Suppress stderr for the duration of test execution. GCBase prints
+  // a handle sanitization warning on every runtime init when built with
+  // -DHERMESVM_SANITIZE_HANDLES=ON, which is very noisy (one per test).
+  // Stdout is left untouched so reportProgress() continues to work.
+  // TODO: consider also redirecting stdout if there are other noise
+  // outputs. Use dup() to save stdout before redirecting, and pass the
+  // saved fd via raw_fd_ostream to all outs() callers in runAllTests.
+#ifndef _WIN32
+  int savedStderr = dup(STDERR_FILENO);
+  int devNull = open("/dev/null", O_WRONLY);
+  if (devNull >= 0) {
+    dup2(devNull, STDERR_FILENO);
+    close(devNull);
+  }
+#endif
+
   llvh::outs() << "Testing: 0 ..";
   llvh::outs().flush();
 
@@ -840,6 +859,13 @@ void runAllTests(
   for (auto &w : workers) {
     w.join();
   }
+
+#ifndef _WIN32
+  if (savedStderr >= 0) {
+    dup2(savedStderr, STDERR_FILENO);
+    close(savedStderr);
+  }
+#endif
 
   llvh::outs() << " \n";
 }
