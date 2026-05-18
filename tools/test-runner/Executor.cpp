@@ -275,9 +275,9 @@ bool drainTaskQueue(
 /// Run compiled bytecode in a fresh runtime and evaluate the result
 /// against negative expectations.
 TestResult executeCompiledTest(
-    const std::string &testName,
+    llvh::StringRef testName,
     std::unique_ptr<hbc::BCProvider> bytecode,
-    const std::string &sourceURL,
+    llvh::StringRef sourceURL,
     bool isAsync,
     const NegativeExpectation &negative,
     const ExecConfig &config,
@@ -403,19 +403,19 @@ void processTestEntry(
     const HarnessCache &harness,
     const Skiplist *skiplist,
     const ExecConfig &config,
-    std::vector<TestResult> &results,
-    std::mutex &resultsMutex,
+    TestResult &slot,
     std::atomic<size_t> &featureSkipped,
     std::atomic<size_t> &permanentFeatureSkipped) {
+  // The slot is default-constructed (code = Skipped); each exit path below
+  // assigns the appropriate code explicitly so intent is clear at the call
+  // site rather than relying on the default.
+  slot.testName = entry.fullName;
+
   // Read test file.
   auto fileBuf = llvh::MemoryBuffer::getFile(entry.path);
   if (!fileBuf) {
-    TestResult r;
-    r.testName = entry.fullName;
-    r.code = ResultCode::Failed;
-    r.message = "FAIL: Cannot read file";
-    std::lock_guard<std::mutex> lock(resultsMutex);
-    results.push_back(std::move(r));
+    slot.code = ResultCode::Failed;
+    slot.message = "FAIL: Cannot read file";
     return;
   }
 
@@ -428,8 +428,12 @@ void processTestEntry(
       SkipReason reason = skiplist->shouldSkipFeature(feat);
       if (reason != SkipReason::NotSkipped) {
         ++featureSkipped;
-        if (reason == SkipReason::PermanentUnsupportedFeature)
+        if (reason == SkipReason::PermanentUnsupportedFeature) {
           ++permanentFeatureSkipped;
+          slot.code = ResultCode::PermanentlySkipped;
+        } else {
+          slot.code = ResultCode::Skipped;
+        }
         return;
       }
     }
@@ -438,6 +442,7 @@ void processTestEntry(
   // Skip module tests — Hermes doesn't support ES module execution.
   if (record.isModule()) {
     ++featureSkipped;
+    slot.code = ResultCode::Skipped;
     return;
   }
 
@@ -446,6 +451,7 @@ void processTestEntry(
   for (const auto &inc : record.includes) {
     if (inc == "testIntl.js") {
       ++featureSkipped;
+      slot.code = ResultCode::Skipped;
       return;
     }
   }
@@ -474,15 +480,16 @@ void processTestEntry(
   bool compileStrict = runStrict;
 
   // Run variants in order, short-circuiting on first failure (like the Python
-  // runner). Push exactly one result per test file.
-  auto runVariant = [&](const char *suffix, bool isStrict) -> TestResult {
+  // runner). Push exactly one result per test file. The variant identity
+  // (default/strict/raw) is intentionally not encoded in the test name —
+  // matching the Python runner.
+  auto runVariant = [&](bool isStrict) -> TestResult {
     std::string source = harness.buildSource(
         includes, record.src, isStrict, record.isAsync(), config.shermes);
-    std::string variantName = entry.fullName + " (" + suffix + ")";
 
     if (config.shermes) {
       return executeTestVariantShermes(
-          variantName,
+          entry.fullName,
           source,
           compileStrict,
           record.isAsync(),
@@ -495,7 +502,7 @@ void processTestEntry(
     }
 
     return executeTestVariant(
-        variantName,
+        entry.fullName,
         source,
         entry.path,
         compileStrict,
@@ -507,25 +514,21 @@ void processTestEntry(
 
   TestResult lastResult;
   if (runRaw) {
-    lastResult = runVariant("raw", false);
+    lastResult = runVariant(false);
   } else {
     if (runNonStrict) {
-      lastResult = runVariant("default", false);
+      lastResult = runVariant(false);
       if (lastResult.code != ResultCode::Passed) {
-        std::lock_guard<std::mutex> lock(resultsMutex);
-        results.push_back(std::move(lastResult));
+        slot = std::move(lastResult);
         return;
       }
     }
     if (runStrict) {
-      lastResult = runVariant("strict", true);
+      lastResult = runVariant(true);
     }
   }
 
-  {
-    std::lock_guard<std::mutex> lock(resultsMutex);
-    results.push_back(std::move(lastResult));
-  }
+  slot = std::move(lastResult);
 }
 
 /// Background reporter that polls a completion counter on a fixed interval and
@@ -658,9 +661,9 @@ std::vector<std::string> buildTestIncludes(
 }
 
 TestResult executeTestVariant(
-    const std::string &testName,
-    const std::string &source,
-    const std::string &sourceURL,
+    llvh::StringRef testName,
+    llvh::StringRef source,
+    llvh::StringRef sourceURL,
     bool isStrict,
     bool isAsync,
     const NegativeExpectation &negative,
@@ -837,8 +840,8 @@ SubprocessResult runProcess(
 } // namespace
 
 TestResult executeTestVariantShermes(
-    const std::string &testName,
-    const std::string &source,
+    llvh::StringRef testName,
+    llvh::StringRef source,
     bool isStrict,
     bool isAsync,
     const NegativeExpectation &negative,
@@ -1027,8 +1030,12 @@ void runAllTests(
     std::vector<TestResult> &results,
     std::atomic<size_t> &featureSkipped,
     std::atomic<size_t> &permanentFeatureSkipped) {
-  std::mutex resultsMutex;
   std::atomic<size_t> completedCount{0};
+
+  // Pre-size results so each worker can write to a unique index without
+  // locking. Default-constructed slots are ResultCode::Skipped — see
+  // processTestEntry, which overwrites the slot on every exit path.
+  results.resize(tests.size());
 
   // Suppress stderr for the duration of test execution. GCBase prints
   // a handle sanitization warning on every runtime init when built with
@@ -1078,23 +1085,22 @@ void runAllTests(
     // thread, and prints the trailing " \n".
     ProgressReporter reporter(completedCount, tests.size());
 
-    for (const auto &entry : tests) {
-      queue.push([&entry,
+    for (size_t i = 0; i < tests.size(); ++i) {
+      queue.push([i,
+                  &tests,
                   &harness,
                   skiplist,
                   &config,
                   &results,
-                  &resultsMutex,
                   &completedCount,
                   &featureSkipped,
                   &permanentFeatureSkipped] {
         processTestEntry(
-            entry,
+            tests[i],
             harness,
             skiplist,
             config,
-            results,
-            resultsMutex,
+            results[i],
             featureSkipped,
             permanentFeatureSkipped);
         ++completedCount;

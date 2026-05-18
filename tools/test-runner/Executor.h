@@ -70,10 +70,15 @@ inline const char *resultCodeName(ResultCode code) {
 }
 
 /// Result of running a single test variant (strict or non-strict).
+/// Default-constructed slots represent skipped tests; runAllTests pre-sizes
+/// the results vector so workers can write to a unique index without locking.
 struct TestResult {
-  /// Full test name including variant suffix.
-  std::string testName;
-  ResultCode code;
+  /// Non-owning reference to the test name. Borrowed from the corresponding
+  /// `TestEntry::fullName` in the `tests` vector passed to `runAllTests`,
+  /// which outlives `results`. Matches the Python runner's naming — no
+  /// variant suffix.
+  llvh::StringRef testName;
+  ResultCode code = ResultCode::Skipped;
   std::string message;
   /// Duration of this variant's execution.
   std::chrono::microseconds duration{0};
@@ -126,9 +131,9 @@ std::vector<std::string> buildTestIncludes(
 /// for this test (sanitize rate set to 0), matching the Python runner's
 /// behavior for handlesan_skip_list tests.
 TestResult executeTestVariant(
-    const std::string &testName,
-    const std::string &source,
-    const std::string &sourceURL,
+    llvh::StringRef testName,
+    llvh::StringRef source,
+    llvh::StringRef sourceURL,
     bool isStrict,
     bool isAsync,
     const NegativeExpectation &negative,
@@ -141,7 +146,8 @@ TestResult executeTestVariant(
 /// Step 1: Compile JS source to a native binary using shermes.
 /// Step 2: Run the native binary and evaluate the result.
 ///
-/// \p testName display name for the variant.
+/// \p testName display name for the test (non-owning, must outlive the
+///    returned TestResult).
 /// \p source preprocessed JavaScript source.
 /// \p isStrict whether to compile in strict mode.
 /// \p isAsync whether this is an async test (check stdout patterns).
@@ -152,8 +158,8 @@ TestResult executeTestVariant(
 /// \p shermesBinary path to the shermes executable.
 /// \p shermesExtraFlags extra flags to pass to shermes.
 TestResult executeTestVariantShermes(
-    const std::string &testName,
-    const std::string &source,
+    llvh::StringRef testName,
+    llvh::StringRef source,
     bool isStrict,
     bool isAsync,
     const NegativeExpectation &negative,

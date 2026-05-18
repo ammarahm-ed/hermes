@@ -243,8 +243,14 @@ void printSlowestTests(const std::vector<TestResult> &results, unsigned count) {
 
   std::vector<const TestResult *> sorted;
   sorted.reserve(results.size());
-  for (const auto &r : results)
+  for (const auto &r : results) {
+    // Skip slots are pre-allocated but never executed; exclude them so
+    // they don't pad the list when count exceeds the executed-test count.
+    if (r.code == ResultCode::Skipped ||
+        r.code == ResultCode::PermanentlySkipped)
+      continue;
     sorted.push_back(&r);
+  }
   std::sort(sorted.begin(), sorted.end(), [](const auto *a, const auto *b) {
     return a->duration > b->duration;
   });
