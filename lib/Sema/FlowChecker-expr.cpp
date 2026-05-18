@@ -2718,7 +2718,35 @@ class FlowChecker::ExprVisitor {
       uint32_t offset = 0,
       bool reportErrors = true) {
     size_t numArgs = arguments.size() - offset;
-    if (params.size() != numArgs) {
+    bool hasRest = !params.empty() && params.back().rest;
+    size_t numNonRestParams = hasRest ? params.size() - 1 : params.size();
+
+    // Extract element type for rest param if present.
+    Type *restElementType = nullptr;
+    if (hasRest) {
+      Type *restParamType = params.back().type;
+      if (outer_.flowContext_.isArrayClassType(restParamType)) {
+        restElementType =
+            outer_.flowContext_.getArrayElementType(restParamType);
+      }
+    }
+
+    if (hasRest) {
+      // With rest param, need at least the required non-rest params.
+      size_t numRequired = numNonRestParams;
+      while (numRequired > 0 && params[numRequired - 1].optional)
+        --numRequired;
+      if (numArgs < numRequired) {
+        if (reportErrors) {
+          outer_.sm_.error(
+              callNode->getSourceRange(),
+              "ft: " + calleeName + " expects at least " +
+                  llvh::Twine(numRequired) + " arguments, but " +
+                  llvh::Twine(numArgs) + " supplied");
+        }
+        return false;
+      }
+    } else if (params.size() != numArgs) {
       // Allow fewer arguments when trailing params are optional.
       if (numArgs < params.size() && params[numArgs].optional) {
         // OK: all remaining params starting from numArgs are optional
@@ -2759,8 +2787,16 @@ class FlowChecker::ExprVisitor {
         return false;
       }
 
-      const TypedFunctionType::Param &param = params[argIndex];
-      Type *expectedType = param.type;
+      Type *expectedType;
+      if (argIndex < numNonRestParams) {
+        expectedType = params[argIndex].type;
+      } else if (restElementType) {
+        expectedType = restElementType;
+      } else {
+        // Rest param without Array<T> type, skip checking.
+        continue;
+      }
+
       Type *argType = outer_.getNodeTypeOrAny(arg);
       auto [argTypeNarrow, cf] = outer_.tryNarrowType(argType, expectedType);
 
@@ -2768,10 +2804,11 @@ class FlowChecker::ExprVisitor {
         if (reportErrors) {
           std::string argTypeStr = argType->messageString();
           std::string expectedTypeStr = expectedType->messageString();
-          if (param.name.isValid()) {
+          if (argIndex < numNonRestParams && params[argIndex].name.isValid()) {
             outer_.sm_.error(
                 arg->getSourceRange(),
-                "ft: " + calleeName + " parameter '" + param.name.str() +
+                "ft: " + calleeName + " parameter '" +
+                    params[argIndex].name.str() +
                     "' type mismatch: cannot assign " + argTypeStr + " to " +
                     expectedTypeStr);
           } else {
@@ -2787,8 +2824,8 @@ class FlowChecker::ExprVisitor {
       }
       // If a cast is needed, replace the argument with the cast.
       if (reportErrors && cf.needCheckedCast && outer_.compile_) {
-        // Insert the new node before the current node and erase the current
-        // one.
+        // Insert the new node before the current node and erase the
+        // current one.
         auto newIt = arguments.insert(
             it, *outer_.implicitCheckedCast(arg, argTypeNarrow, cf));
         arguments.erase(it);

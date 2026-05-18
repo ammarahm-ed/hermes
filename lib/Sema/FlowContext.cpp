@@ -624,6 +624,10 @@ int TypedFunctionType::_compareImpl(
           other->params_.begin(),
           other->params_.end(),
           [&state](const Param &pa, const Param &pb) {
+            if (auto t = cmpHelperBool(pa.optional, pb.optional))
+              return t;
+            if (auto t = cmpHelperBool(pa.rest, pb.rest))
+              return t;
             return pa.type->info->compare(pb.type->info, state);
           })) {
     return tmp;
@@ -644,6 +648,10 @@ bool TypedFunctionType::_equalsImpl(
   if (params_.size() != other->params_.size())
     return false;
   for (size_t i = 0, e = params_.size(); i < e; ++i) {
+    if (params_[i].optional != other->params_[i].optional)
+      return false;
+    if (params_[i].rest != other->params_[i].rest)
+      return false;
     if (!params_[i].type->info->equals(other->params_[i].type->info, state))
       return false;
   }
@@ -654,12 +662,16 @@ bool TypedFunctionType::_equalsImpl(
 
 /// Calculate the type-specific hash.
 unsigned TypedFunctionType::_hashImpl() const {
-  return (unsigned)llvh::hash_combine(
+  unsigned h = (unsigned)llvh::hash_combine(
       (unsigned)TypeKind::TypedFunction,
       isAsync(),
       isGenerator(),
       thisParam_ != nullptr,
       params_.size());
+  for (const auto &p : params_) {
+    h = llvh::hash_combine(h, p.optional, p.rest);
+  }
+  return h;
 }
 
 int NativeFunctionType::_compareImpl(

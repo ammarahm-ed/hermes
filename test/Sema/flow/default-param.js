@@ -27,10 +27,11 @@ function flowOptional(): void {
 // Auto-generated content below. Please do not modify manually.
 
 // CHECK:%untyped_function.1 = untyped_function()
-// CHECK-NEXT:%function.2 = function(x: number): void
-// CHECK-NEXT:%function.3 = function(x: number): number
+// CHECK-NEXT:%function.2 = function(x?: number): void
+// CHECK-NEXT:%function.3 = function(x?: number): number
 // CHECK-NEXT:%function.4 = function(): void
-// CHECK-NEXT:%function.5 = function(a: number, b: number): void
+// CHECK-NEXT:%function.5 = function(a: number): void
+// CHECK-NEXT:%function.6 = function(a: number, b?: number): void
 
 // CHECK:SemContext
 // CHECK-NEXT:Func strict
@@ -59,11 +60,11 @@ function flowOptional(): void {
 // CHECK-NEXT:            Scope %s.7
 // CHECK-NEXT:    Func strict
 // CHECK-NEXT:        Scope %s.8
-// CHECK-NEXT:            Decl %d.11 'f' Let : %function.2
+// CHECK-NEXT:            Decl %d.11 'f' Let : %function.5
 // CHECK-NEXT:            Decl %d.12 'arguments' Var Arguments
 // CHECK-NEXT:    Func strict
 // CHECK-NEXT:        Scope %s.9
-// CHECK-NEXT:            Decl %d.13 'f' Let : %function.5
+// CHECK-NEXT:            Decl %d.13 'f' Let : %function.6
 // CHECK-NEXT:            Decl %d.14 'arguments' Var Arguments
 // CHECK-NEXT:        Func strict
 // CHECK-NEXT:            Scope %s.10
@@ -102,7 +103,7 @@ function flowOptional(): void {
 // CHECK-NEXT:            BlockStatement
 // CHECK-NEXT:                VariableDeclaration
 // CHECK-NEXT:                    VariableDeclarator
-// CHECK-NEXT:                        FunctionExpression : %function.5
+// CHECK-NEXT:                        FunctionExpression : %function.6
 // CHECK-NEXT:                            Id 'a' [D:E:%d.15 'a']
 // CHECK-NEXT:                            AssignmentPattern
 // CHECK-NEXT:                                Id 'b' [D:E:%d.16 'b']

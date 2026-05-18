@@ -21,6 +21,11 @@
 /// 2. Resolve the aliases, checking for self-references.
 /// 3. Complete all forward declared types. They can now refer to the newly
 /// declared local types.
+/// 4. Run a post-processing validation pass over the resolved
+/// types to catch errors that are hard to detect during resolution. For
+/// example, verifies that any function-type rest parameter has type
+/// Array, since the element type isn't known until all forward-declared
+/// types have been completed.
 ///
 /// Generic type aliases are registered along with the other generics,
 /// but they don't require an AST node to be cloned during specialization
@@ -181,8 +186,8 @@ class FlowChecker::FindLoopingTypes {
     if (type->getThisParam()) {
       result |= isTypeLooping(type->getThisParam());
     }
-    for (const auto &[name, paramType, optional] : type->getParams()) {
-      result |= isTypeLooping(paramType);
+    for (const auto &param : type->getParams()) {
+      result |= isTypeLooping(param.type);
     }
     return result;
   }
@@ -190,8 +195,8 @@ class FlowChecker::FindLoopingTypes {
   bool isLooping(Type *, NativeFunctionType *type) {
     bool result = false;
     result |= isTypeLooping(type->getReturnType());
-    for (const auto &[name, paramType, optional] : type->getParams()) {
-      result |= isTypeLooping(paramType);
+    for (const auto &param : type->getParams()) {
+      result |= isTypeLooping(param.type);
     }
     return result;
   }
@@ -229,6 +234,10 @@ class FlowChecker::DeclareScopeTypes {
   /// Keep track of all union types, so they can be canonicalized.
   llvh::SmallSetVector<Type *, 4> forwardUnions{};
 
+  /// Function types with rest params, to validate rest type is Array<T>
+  /// after generic resolution.
+  llvh::SmallVector<Type *, 2> funcTypesWithRest{};
+
   /// The generic specializations to be parsed after the class body is parsed.
   /// These have to be deferred here instead of in DeclareScopeTypes because
   /// we have to not defer parsing the superClass, e.g.
@@ -252,6 +261,7 @@ class FlowChecker::DeclareScopeTypes {
     if (!completeForwardDeclarations())
       return;
     parseDeferredGenericClasses();
+    validateTypes();
   }
 
   /// Run DeclareScopeTypes starting from a single generic type annotation.
@@ -271,6 +281,7 @@ class FlowChecker::DeclareScopeTypes {
     if (!declareScopeTypes.completeForwardDeclarations())
       return outer.flowContext_.getAny();
     declareScopeTypes.parseDeferredGenericClasses();
+    declareScopeTypes.validateTypes();
     return type;
   }
 
@@ -632,10 +643,13 @@ class FlowChecker::DeclareScopeTypes {
 
     if (auto *func =
             llvh::dyn_cast<ESTree::FunctionTypeAnnotationNode>(annotation)) {
-      return outer.processFunctionTypeAnnotation(
+      Type *result = outer.processFunctionTypeAnnotation(
           func, [this, &visited, depth](ESTree::Node *annotation) {
             return resolveTypeAnnotation(annotation, visited, depth);
           });
+      if (func->_rest)
+        funcTypesWithRest.push_back(result);
+      return result;
     }
 
     // The specified AST node represents a nominal type, so return the type.
@@ -856,8 +870,8 @@ class FlowChecker::DeclareScopeTypes {
       completeForwardType(ftype->getReturnType(), visited);
       if (ftype->getThisParam())
         completeForwardType(ftype->getThisParam(), visited);
-      for (auto &[name, type, optional] : ftype->getParams())
-        completeForwardType(type, visited);
+      for (auto &param : ftype->getParams())
+        completeForwardType(param.type, visited);
     }
 
     LLVM_DEBUG(
@@ -1059,10 +1073,19 @@ class FlowChecker::DeclareScopeTypes {
     // If this is an Array<T> specialization, register it so that
     // isArrayClassType works during body typechecking.
     // Uses getSpecializedArrayClassType which handles registration.
+    // Also register the placeholder type so isArrayClassType works for
+    // types created during scope-types resolution (e.g. rest param types
+    // in function type annotations).
     if (typeDecl->genericClassDecl == outer.arrayClassDecl_ &&
         generic.typeArgTypes.size() == 1) {
       outer.getSpecializedArrayClassType(
           generic.typeArgTypes[0], generic.annotation->getSourceRange());
+      // Also register the placeholder `type` created during scope-types.
+      // getSpecializedArrayClassType registers the canonical classType from
+      // the specialized Decl, but `type` is a different Type* (the forward
+      // generic placeholder). isArrayClassType checks by pointer, so both
+      // must be registered.
+      outer.flowContext_.registerArrayClassType(type, generic.typeArgTypes[0]);
     }
   }
 
@@ -1206,6 +1229,28 @@ class FlowChecker::DeclareScopeTypes {
 
     outer.bindingTable_.activateScope(savedScope);
     deferredParseGenerics.clear();
+  }
+
+  /// Run a post-processing validation step to check certain errors that are
+  /// hard to find during resolution.
+  void validateTypes() {
+    /// Ensure that rest params have valid types.
+    for (Type *funcType : funcTypesWithRest) {
+      auto *typedFunc = llvh::cast<TypedFunctionType>(funcType->info);
+      auto params = typedFunc->getParams();
+      if (params.empty() || !params.back().rest)
+        continue;
+      if (params.back().type &&
+          !outer.flowContext_.isArrayClassType(params.back().type)) {
+        auto *funcNode =
+            llvh::cast<ESTree::FunctionTypeAnnotationNode>(funcType->node);
+        auto *restParam =
+            llvh::cast<ESTree::FunctionTypeParamNode>(funcNode->_rest);
+        outer.sm_.error(
+            restParam->_typeAnnotation->getSourceRange(),
+            "ft: rest parameter type must be Array<T>");
+      }
+    }
   }
 };
 

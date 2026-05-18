@@ -471,6 +471,52 @@ CallResult<HermesValue> hermesBuiltinCopyDataProperties(
 }
 
 /// \code
+///   HermesBuiltin.copyRestArgsFast = function (from) {}
+/// \endcode
+/// Same as copyRestArgs, but produces a FastArray. Used by typed-mode rest
+/// parameters declared as Array<T>, where the consuming code expects a
+/// FastArray rather than an ordinary JSArray.
+CallResult<HermesValue> hermesBuiltinCopyRestArgsFast(
+    void *,
+    Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  struct : public Locals {
+    PinnedValue<FastArray> array;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+
+  auto frames = runtime.getStackFrames();
+  auto it = frames.begin();
+  ++it;
+  if (LLVM_UNLIKELY(it == frames.end()))
+    return HermesValue::encodeUndefinedValue();
+
+  if (!args.getArg(0).isNumber())
+    return HermesValue::encodeUndefinedValue();
+  uint32_t from = truncateToUInt32(args.getArg(0).getNumber());
+
+  uint32_t argCount = it->getArgCount();
+  uint32_t length = from <= argCount ? argCount - from : 0;
+
+  auto cr = FastArray::create(runtime, length);
+  if (LLVM_UNLIKELY(cr == ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+  lv.array.castAndSetHermesValue<FastArray>(*cr);
+
+  for (uint32_t i = 0; i != length; ++i) {
+    GCScopeMarkerRAII marker{runtime};
+    auto valHandle = runtime.makeHandle(it->getArgRef(from));
+    if (LLVM_UNLIKELY(
+            FastArray::push(lv.array, runtime, valHandle) ==
+            ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
+    ++from;
+  }
+
+  return lv.array.getHermesValue();
+}
+
+/// \code
 ///   HermesBuiltin.copyRestArgs = function (from) {}
 /// \endcode
 /// Copy the callers parameters starting from index \c from (where the first
@@ -1107,6 +1153,11 @@ void createHermesBuiltins(Runtime &runtime) {
       B::HermesBuiltin_copyRestArgs,
       P::copyRestArgs,
       hermesBuiltinCopyRestArgs,
+      1);
+  defineInternMethod(
+      B::HermesBuiltin_copyRestArgsFast,
+      P::copyRestArgsFast,
+      hermesBuiltinCopyRestArgsFast,
       1);
   defineInternMethod(
       B::HermesBuiltin_arraySpread,

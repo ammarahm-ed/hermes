@@ -1694,6 +1694,23 @@ void FlowChecker::visitFunctionLike(
           assign->_right = implicitCheckedCast(assign->_right, paramType, cf);
         }
       }
+    } else if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&param)) {
+      // Rest parameter: assign the type from the function type params.
+      auto *typedFn = llvh::dyn_cast<TypedFunctionType>(
+          curFunctionContext_->functionType->info);
+      Type *paramType;
+      if (typedFn && i < typedFn->getParams().size()) {
+        paramType = typedFn->getParams()[i].type;
+      } else {
+        paramType = flowContext_.getAny();
+      }
+      ++i;
+
+      if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(rest->_argument)) {
+        sema::Decl *decl = getDecl(id);
+        assert(decl && "unresolved parameter");
+        declTypes_.try_emplace(decl, paramType);
+      }
     } else if (
         llvh::isa<ESTree::ObjectPatternNode>(&param) ||
         llvh::isa<ESTree::ArrayPatternNode>(&param)) {
@@ -2409,6 +2426,28 @@ Type *FlowChecker::parseFunctionType(
             "ft: typing of pattern parameters not implemented, :any assumed");
         paramsList.push_back({Identifier(), flowContext_.getAny(), true});
       }
+    } else if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&n)) {
+      if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(rest->_argument)) {
+        Type *annotType = parseOptionalTypeAnnotation(id->_typeAnnotation);
+        if (id->_typeAnnotation && !flowContext_.isArrayClassType(annotType)) {
+          sm_.error(
+              id->_typeAnnotation->getSourceRange(),
+              "ft: rest parameter type must be Array<T>");
+        }
+        paramsList.push_back(
+            {Identifier::getFromPointer(id->_name),
+             annotType,
+             /*optional=*/false,
+             /*rest=*/true});
+        isTyped |= (id->_typeAnnotation != nullptr);
+      } else {
+        sm_.warning(
+            n.getSourceRange(),
+            "ft: typing of rest pattern parameters not implemented,"
+            " :any assumed");
+        paramsList.push_back(
+            {Identifier(), flowContext_.getAny(), false, /*rest=*/true});
+      }
     } else if (auto *annot = ESTree::getPatternTypeAnnotation(&n)) {
       // Destructuring param without default value, with type annotation.
       isTyped = true;
@@ -2633,10 +2672,25 @@ Type *FlowChecker::parseGenericTypeAnnotation(
 
 Type *FlowChecker::parseFunctionTypeAnnotation(
     ESTree::FunctionTypeAnnotationNode *node) {
-  return processFunctionTypeAnnotation(
+  Type *result = processFunctionTypeAnnotation(
       node, [this](ESTree::Node *annotation) -> Type * {
         return parseTypeAnnotation(annotation);
       });
+  // Validate rest param is Array<T>.
+  if (node->_rest) {
+    auto *restParam = llvh::cast<ESTree::FunctionTypeParamNode>(node->_rest);
+    if (restParam->_typeAnnotation) {
+      auto *typedFunc = llvh::cast<TypedFunctionType>(result->info);
+      auto params = typedFunc->getParams();
+      if (!params.empty() && params.back().rest &&
+          !flowContext_.isArrayClassType(params.back().type)) {
+        sm_.error(
+            restParam->_typeAnnotation->getSourceRange(),
+            "ft: rest parameter type must be Array<T>");
+      }
+    }
+  }
+  return result;
 }
 
 FlowChecker::CanFlowResult FlowChecker::canAFlowIntoB(
@@ -2841,28 +2895,92 @@ FlowChecker::CanFlowResult FlowChecker::canAFlowIntoB(
   bool needCheckedCast = false;
 
   {
-    if (aType->getParams().size() < bType->getParams().size()) {
-      // It's valid to flow from a function with fewer parameters to one with
-      // more, but we need a checked cast.
+    // Compare using non-rest param counts.
+    bool aHasRest =
+        !aType->getParams().empty() && aType->getParams().back().rest;
+    bool bHasRest =
+        !bType->getParams().empty() && bType->getParams().back().rest;
+    size_t aNonRest =
+        aHasRest ? aType->getParams().size() - 1 : aType->getParams().size();
+    size_t bNonRest =
+        bHasRest ? bType->getParams().size() - 1 : bType->getParams().size();
+
+    auto restElemOrNull = [this](TypedFunctionType *t) -> Type * {
+      assert(
+          !t->getParams().empty() && t->getParams().back().rest &&
+          "restElemOrNull called on function without rest param");
+      Type *restType = t->getParams().back().type;
+      return flowContext_.isArrayClassType(restType)
+          ? flowContext_.getArrayElementType(restType)
+          : nullptr;
+    };
+
+    if (aNonRest < bNonRest) {
+      // It's valid to flow from a function with fewer parameters to one
+      // with more, but we need a checked cast.
       needCheckedCast = true;
-    } else if (aType->getParams().size() > bType->getParams().size()) {
+      // If a has a rest param, b's extra fixed params get passed into a's
+      // rest array, so each must flow into a's rest element type.
+      if (aHasRest) {
+        Type *aElem = restElemOrNull(aType);
+        if (!aElem) {
+          return {};
+        }
+        for (size_t i = aNonRest; i < bNonRest; ++i) {
+          CanFlowResult flowRes =
+              canAFlowIntoB(bType->getParams()[i].type, aElem);
+          if (!flowRes.canFlow || flowRes.needCheckedCast)
+            return {};
+        }
+      }
+    } else if (aNonRest > bNonRest) {
       // Removing optional parameters is always valid.
-      // Insert a checked cast in case IRGen needs it, but it'll likely be
-      // optimized out.
-      const auto &extraParam = aType->getParams()[bType->getParams().size()];
+      const auto &extraParam = aType->getParams()[bNonRest];
+      assert(
+          !extraParam.rest &&
+          "extra param at bNonRest index should never be a rest param");
       if (!extraParam.optional) {
         return {};
       }
       needCheckedCast = true;
+      // If b has a rest param, calls through b can supply values for a's
+      // extra (optional) fixed params, so b's rest element must flow into
+      // each of those fixed param types.
+      if (bHasRest) {
+        Type *bElem = restElemOrNull(bType);
+        if (!bElem) {
+          return {};
+        }
+        for (size_t i = bNonRest; i < aNonRest; ++i) {
+          CanFlowResult flowRes =
+              canAFlowIntoB(bElem, aType->getParams()[i].type);
+          if (!flowRes.canFlow || flowRes.needCheckedCast)
+            return {};
+        }
+      }
     }
 
-    size_t minParamCount =
-        std::min(aType->getParams().size(), bType->getParams().size());
-
+    size_t minParamCount = std::min(aNonRest, bNonRest);
     for (size_t i = 0; i < minParamCount; ++i) {
       Type *paramA = aType->getParams()[i].type;
       Type *paramB = bType->getParams()[i].type;
       CanFlowResult flowRes = canAFlowIntoB(paramB, paramA);
+      if (!flowRes.canFlow || flowRes.needCheckedCast)
+        return {};
+    }
+
+    if (aHasRest != bHasRest) {
+      // Adding rest params is like adding other params.
+      // Removing rest params is like removing optional params.
+      // Both require checked casts.
+      needCheckedCast = true;
+    } else if (aHasRest && bHasRest) {
+      // Both have rest: compare element types contravariantly.
+      Type *aElem = restElemOrNull(aType);
+      Type *bElem = restElemOrNull(bType);
+      if (!aElem || !bElem)
+        return {};
+      CanFlowResult flowRes = canAFlowIntoB(bElem, aElem);
       if (!flowRes.canFlow || flowRes.needCheckedCast)
         return {};
     }

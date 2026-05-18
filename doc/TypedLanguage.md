@@ -253,13 +253,13 @@ Restrictions:
 * Classes with static members, private fields and methods (`#name`),
   inheritance, `super` calls, and `super.method()` access.
 * Getters and setters on classes (must be marked `@Hermes.final`).
+* Rest parameters in function declarations and function types
+  (`function f(...args)`).
 
 ### Not supported (yet)
 
 * Spread arguments in calls (`f(...args)`).
 * Rest elements in destructuring (`{a, ...rest}`, `[a, ...rest]`).
-* Rest parameters in function declarations and function types
-  (`function f(...args)`).
 * Spread elements in tuple literals.
 * `async` methods and generator methods.
 * Computed property names in class definitions.

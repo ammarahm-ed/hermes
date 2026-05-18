@@ -40,7 +40,7 @@ function assignFewerToMore(): void {
 // Auto-generated content below. Please do not modify manually.
 
 // CHECK:%untyped_function.1 = untyped_function()
-// CHECK-NEXT:%function.2 = function(x: number, y: number): void
+// CHECK-NEXT:%function.2 = function(x: number, y?: number): void
 // CHECK-NEXT:%function.3 = function(): void
 // CHECK-NEXT:%function.4 = function(x: number): void
 // CHECK-NEXT:%function.5 = function(cb: %function.4): void

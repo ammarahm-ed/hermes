@@ -33,7 +33,7 @@ baz('hello', a => '');
 // CHECK:%untyped_function.1 = untyped_function()
 // CHECK-NEXT:%function.2 = function(x: string): string
 // CHECK-NEXT:%function.3 = function(f: %function.2, x: string): void
-// CHECK-NEXT:%function.4 = function(x: void): void
+// CHECK-NEXT:%function.4 = function(x?: void): void
 // CHECK-NEXT:%function.5 = function(x: string, f: %function.2): void
 
 // CHECK:SemContext

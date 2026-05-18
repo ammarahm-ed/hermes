@@ -212,7 +212,9 @@ static std::pair<bool, size_t> canBeInlined(Function *F) {
           return {false, 0};
         case ValueKind::CallBuiltinInstKind:
           if (cast<CallBuiltinInst>(&I)->getBuiltinIndex() ==
-              BuiltinMethod::HermesBuiltin_copyRestArgs) {
+                  BuiltinMethod::HermesBuiltin_copyRestArgs ||
+              cast<CallBuiltinInst>(&I)->getBuiltinIndex() ==
+                  BuiltinMethod::HermesBuiltin_copyRestArgsFast) {
             LLVM_DEBUG(
                 llvh::dbgs()
                 << "Cannot inline function '" << F->getInternalNameStr()

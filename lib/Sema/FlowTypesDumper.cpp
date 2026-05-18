@@ -99,8 +99,12 @@ void FlowTypesDumper::printTypeDescription(
         if (!first)
           os << ", ";
         first = false;
+        if (param.rest)
+          os << "...";
         if (param.name.isValid()) {
           os << param.name;
+          if (param.optional)
+            os << '?';
           os << ": ";
         }
         printTypeRef(os, param.type);
@@ -118,8 +122,13 @@ void FlowTypesDumper::printTypeDescription(
         if (!first)
           os << ", ";
         first = false;
-        if (param.name.isValid())
+        if (param.rest)
+          os << "...";
+        if (param.name.isValid()) {
           os << param.name;
+          if (param.optional)
+            os << '?';
+        }
         os << ": ";
         printTypeRef(os, param.type);
       }

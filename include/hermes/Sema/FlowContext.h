@@ -555,6 +555,10 @@ class TypedFunctionType : public BaseFunctionType {
     Type *type;
     /// Whether the parameter was declared as optional.
     bool optional;
+    /// Whether this is a rest parameter (...args).
+    /// Rest parameter MUST be the last parameter in params_.
+    /// There is at most one rest parameter.
+    bool rest = false;
   };
 
  private:

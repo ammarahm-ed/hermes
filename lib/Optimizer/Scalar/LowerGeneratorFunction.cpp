@@ -319,13 +319,14 @@ void LowerToStateMachine::moveLocalsToOuter() {
       }
 
       if (auto *CBI = llvh::dyn_cast<CallBuiltinInst>(&I)) {
-        // copyRestArgs references the local register stack of the inner
-        // function, to scan and copy the parameters. However, we have
-        // transferred the parameters of the inner function to the outer
-        // function. So we should also transfer copyRestArgs to the outer
-        // function.
-        if (CBI->getBuiltinIndex() ==
-            BuiltinMethod::HermesBuiltin_copyRestArgs) {
+        // copyRestArgs (and its FastArray-returning variant) references the
+        // local register stack of the inner function, to scan and copy the
+        // parameters. However, we have transferred the parameters of the
+        // inner function to the outer function. So we should also transfer
+        // the call to the outer function.
+        BuiltinMethod::Enum bi = CBI->getBuiltinIndex();
+        if (bi == BuiltinMethod::HermesBuiltin_copyRestArgs ||
+            bi == BuiltinMethod::HermesBuiltin_copyRestArgsFast) {
           Variable *outerRestArgs = builder_.createVariable(
               getParentOuterScope_->getVariableScope(),
               CBI->getName(),
@@ -336,7 +337,7 @@ void LowerToStateMachine::moveLocalsToOuter() {
               builder_.createLoadFrameInst(getParentOuterScope_, outerRestArgs);
           CBI->replaceAllUsesWith(replacement);
           auto *outerCBI = beforeCGI.createCallBuiltinInst(
-              BuiltinMethod::HermesBuiltin_copyRestArgs,
+              bi,
               beforeCGI.getLiteralNumber(
                   llvh::cast<LiteralNumber>(CBI->getArgument(1))->getValue()));
           beforeCGI.createStoreFrameInst(

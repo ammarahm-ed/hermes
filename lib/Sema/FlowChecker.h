@@ -1128,7 +1128,7 @@ template <typename AnnotationCB>
 Type *FlowChecker::processFunctionTypeAnnotation(
     ESTree::FunctionTypeAnnotationNode *node,
     AnnotationCB cb) {
-  if (node->_rest || node->_typeParameters) {
+  if (node->_typeParameters) {
     sm_.error(node->getSourceRange(), "unsupported function type params");
   }
 
@@ -1163,6 +1163,21 @@ Type *FlowChecker::processFunctionTypeAnnotation(
                (llvh::Twine("?param_") + llvh::Twine(idx)).str()),
            flowContext_.getAny(),
            false});
+    }
+  }
+
+  // Handle the rest parameter if present.
+  if (node->_rest) {
+    auto *restParam = llvh::cast<ESTree::FunctionTypeParamNode>(node->_rest);
+    if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(restParam->_name)) {
+      paramsList.push_back(
+          {Identifier::getFromPointer(id->_name),
+           restParam->_typeAnnotation ? cb(restParam->_typeAnnotation)
+                                      : nullptr,
+           /*optional=*/false,
+           /*rest=*/true});
+    } else {
+      sm_.error(restParam->getSourceRange(), "unsupported rest param");
     }
   }
 

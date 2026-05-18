@@ -1137,10 +1137,18 @@ void ESTreeIRGen::emitParameters(ESTree::FunctionLikeNode *funcNode) {
     ++paramIndex;
 
     if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(param)) {
+      // For typed rest params declared as Array<T>, use the FastArray-
+      // returning variant so subsequent FastArray ops work on the result.
+      BuiltinMethod::Enum builtin = BuiltinMethod::HermesBuiltin_copyRestArgs;
+      if (auto *ftype = llvh::dyn_cast<flow::TypedFunctionType>(
+              flowContext_.getNodeTypeOrAny(funcNode)->info);
+          ftype && paramIndex < ftype->getParams().size() &&
+          flowContext_.isArrayClassType(ftype->getParams()[paramIndex].type)) {
+        builtin = BuiltinMethod::HermesBuiltin_copyRestArgsFast;
+      }
       createLRef(rest->_argument, true)
-          .emitStore(genBuiltinCall(
-              BuiltinMethod::HermesBuiltin_copyRestArgs,
-              Builder.getLiteralNumber(paramIndex)));
+          .emitStore(
+              genBuiltinCall(builtin, Builder.getLiteralNumber(paramIndex)));
       break;
     }
 

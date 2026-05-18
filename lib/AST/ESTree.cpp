@@ -295,6 +295,9 @@ Node *getPatternTypeAnnotation(Node *node) {
       return cast<ObjectPatternNode>(node)->_typeAnnotation;
     case NodeKind::ArrayPattern:
       return cast<ArrayPatternNode>(node)->_typeAnnotation;
+    case NodeKind::RestElement:
+      // Rest elements annotation is on the inner argument.
+      return nullptr;
     default:
       break;
   }
