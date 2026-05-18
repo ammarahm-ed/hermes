@@ -117,6 +117,20 @@ TestRuntimeEnv createTestRuntime(
   return {std::move(hermesRuntime), runtime, std::move(timeLimitMonitor)};
 }
 
+/// Drain the microtask queue, returning EXCEPTION on the first thrown
+/// exception (the thrown value is left on the runtime for the caller to
+/// capture). Unlike `microtask::performCheckpoint`, which prints exceptions
+/// to stderr and continues draining — useful for a REPL but wrong for a test
+/// runner that needs to observe failures originating in Promise.then
+/// callbacks and other microtask contexts.
+vm::ExecutionStatus drainMicrotasks(vm::Runtime &runtime) {
+  runtime.clearKeptObjects();
+  runtime.cleanUpFinalizationCallbacks();
+  if (!runtime.hasMicrotaskQueue())
+    return vm::ExecutionStatus::RETURNED;
+  return runtime.drainJobs();
+}
+
 /// Drain the setTimeout task queue, executing each callback and its
 /// microtasks. Returns true and sets exceptionMsg if an exception was thrown.
 bool drainTaskQueue(
@@ -135,7 +149,10 @@ bool drainTaskQueue(
       exceptionMsg = captureException(runtime);
       return true;
     }
-    microtask::performCheckpoint(runtime);
+    if (drainMicrotasks(runtime) == vm::ExecutionStatus::EXCEPTION) {
+      exceptionMsg = captureException(runtime);
+      return true;
+    }
   }
   return false;
 }
@@ -146,6 +163,7 @@ TestResult executeCompiledTest(
     const std::string &testName,
     std::unique_ptr<hbc::BCProvider> bytecode,
     const std::string &sourceURL,
+    bool isAsync,
     const NegativeExpectation &negative,
     const ExecConfig &config,
     bool disableHandleSan,
@@ -172,7 +190,7 @@ TestResult executeCompiledTest(
   ctx.enableTestMethods_ = true;
   installConsoleBindings(*env.runtime, ctx);
 
-  // Run the bytecode.
+  // Run the test bytecode.
   // Lazy compilation cannot use persistent mode.
   vm::RuntimeModuleFlags rmFlags;
   rmFlags.persistent = !config.lazy;
@@ -200,8 +218,10 @@ TestResult executeCompiledTest(
 
   // Drain microtask queue and task queue while still under timeout protection.
   if (!threwException) {
-    microtask::performCheckpoint(*env.runtime);
-    if (drainTaskQueue(*env.runtime, ctx, exceptionMsg)) {
+    if (drainMicrotasks(*env.runtime) == vm::ExecutionStatus::EXCEPTION) {
+      exceptionMsg = captureException(*env.runtime);
+      threwException = true;
+    } else if (drainTaskQueue(*env.runtime, ctx, exceptionMsg)) {
       threwException = true;
     }
   }
@@ -216,6 +236,26 @@ TestResult executeCompiledTest(
       exceptionMsg.find("Javascript execution has timed out") !=
           std::string::npos) {
     return makeResult(ResultCode::ExecuteTimeout, "FAIL: Test timed out");
+  }
+
+  // For async tests, our injected $DONE records its outcome to a global
+  // instead of throwing — which lets the failure survive even when
+  // called inside a Promise.then callback (whose throw would be wrapped
+  // into a rejected promise by Promise machinery). After drain, check:
+  //   - asyncTestFailure  → $DONE was called with an error
+  //   - asyncTestComplete → $DONE() was called with no error
+  //   - neither           → $DONE was never called
+  if (isAsync && !threwException) {
+    auto global = env.jsiRuntime->global();
+    if (global.hasProperty(*env.jsiRuntime, "asyncTestFailure")) {
+      exceptionMsg = global.getProperty(*env.jsiRuntime, "asyncTestFailure")
+                         .asString(*env.jsiRuntime)
+                         .utf8(*env.jsiRuntime);
+      threwException = true;
+    } else if (!global.hasProperty(*env.jsiRuntime, "asyncTestComplete")) {
+      exceptionMsg = "Test262:AsyncTestFailure: $DONE not called";
+      threwException = true;
+    }
   }
 
   // Evaluate result based on expectations.
@@ -344,6 +384,7 @@ void processTestEntry(
         source,
         entry.path,
         compileStrict,
+        record.isAsync(),
         record.negative,
         config,
         disableHandleSan);
@@ -459,6 +500,7 @@ TestResult executeTestVariant(
     const std::string &source,
     const std::string &sourceURL,
     bool isStrict,
+    bool isAsync,
     const NegativeExpectation &negative,
     const ExecConfig &config,
     bool disableHandleSan) {
@@ -513,6 +555,7 @@ TestResult executeTestVariant(
       testName,
       std::move(bytecode),
       sourceURL,
+      isAsync,
       negative,
       config,
       disableHandleSan,
@@ -737,20 +780,23 @@ TestResult executeTestVariantShermes(
           ResultCode::ExecuteFailed,
           "FAIL: Execution threw unexpected error: " + runResult.stderrStr);
     }
-    // Expected runtime error, but check async test patterns.
-    if (isAsync &&
-        (runResult.stdoutStr.find("Test262:AsyncTestFailure") !=
-             std::string::npos ||
-         runResult.stdoutStr.find("Test262:AsyncTestComplete") ==
-             std::string::npos)) {
-      return makeResult(
-          ResultCode::ExecuteFailed,
-          "FAIL: Async test failure: " + runResult.stdoutStr);
-    }
     return makeResult(ResultCode::Passed, "PASS (expected runtime error)");
   }
 
-  // Exit code 0.
+  // Exit code 0. For async tests, doneprintHandle.js's $DONE writes
+  // "Test262:AsyncTestComplete" on success and "Test262:AsyncTestFailure:"
+  // on failure — both without throwing, so the subprocess exits cleanly
+  // either way. Stdout is the only signal the parent has.
+  if (isAsync &&
+      (runResult.stdoutStr.find("Test262:AsyncTestFailure") !=
+           std::string::npos ||
+       runResult.stdoutStr.find("Test262:AsyncTestComplete") ==
+           std::string::npos)) {
+    return makeResult(
+        ResultCode::ExecuteFailed,
+        "FAIL: Async test failure: " + runResult.stdoutStr);
+  }
+
   if (expectRuntimeError) {
     return makeResult(
         ResultCode::ExecuteFailed,

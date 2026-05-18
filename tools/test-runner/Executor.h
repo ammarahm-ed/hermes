@@ -130,6 +130,7 @@ TestResult executeTestVariant(
     const std::string &source,
     const std::string &sourceURL,
     bool isStrict,
+    bool isAsync,
     const NegativeExpectation &negative,
     const ExecConfig &config,
     bool disableHandleSan = false);
