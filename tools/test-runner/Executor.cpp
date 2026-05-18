@@ -32,7 +32,10 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
+#include <csetjmp>
+#include <csignal>
 #endif
 
 namespace hermes {
@@ -41,6 +44,118 @@ namespace testrunner {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+#ifndef _WIN32
+
+/// Size of the alternate signal stack per worker thread.
+constexpr size_t kAltStackSize = 64 * 1024;
+
+/// Thread-local state for the per-test crash guard.
+/// sigsetjmp/siglongjmp recovers from SIGSEGV/SIGABRT/SIGBUS during
+/// in-process bytecode execution, converting crashes to test failures.
+struct CrashGuardState {
+  sigjmp_buf jmpBuf;
+  /// Whether the guard is active. The handler only jumps when set.
+  volatile sig_atomic_t active = 0;
+  /// The signal number that triggered the crash.
+  volatile sig_atomic_t caughtSignal = 0;
+  /// Alternate signal stack memory (needed to handle stack overflows).
+  void *altStackMem = nullptr;
+};
+
+thread_local CrashGuardState tCrashGuard;
+
+const char *crashSignalName(int sig) {
+  switch (sig) {
+    case SIGSEGV:
+      return "Segmentation fault";
+    case SIGABRT:
+      return "Aborted";
+    case SIGBUS:
+      return "Bus error";
+    case SIGFPE:
+      return "Floating point exception";
+    case SIGILL:
+      return "Illegal instruction";
+    default:
+      return "Unknown signal";
+  }
+}
+
+void crashSignalHandler(int sig) {
+  if (tCrashGuard.active) {
+    tCrashGuard.caughtSignal = sig;
+    siglongjmp(tCrashGuard.jmpBuf, 1);
+  }
+  // Not in a guarded region — restore default and re-raise.
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+/// Install process-wide signal handlers for crash recovery.
+/// Called exactly once in runAllTests() before spawning worker threads.
+void installCrashHandlers() {
+  struct sigaction sa{};
+  sa.sa_handler = crashSignalHandler;
+  sa.sa_flags = SA_ONSTACK;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, nullptr);
+  sigaction(SIGABRT, &sa, nullptr);
+  sigaction(SIGBUS, &sa, nullptr);
+  sigaction(SIGFPE, &sa, nullptr);
+  sigaction(SIGILL, &sa, nullptr);
+}
+
+/// Set up an alternate signal stack for the calling thread, unless one is
+/// already in place. Sanitizer runtimes (ASan/TSan/MSan) install a per-thread
+/// alt stack via sanitizer_common's SetAlternateSignalStack at thread init —
+/// when present, we reuse it (it's typically larger than ours anyway) and
+/// avoid touching the kernel's record at all.
+///
+/// When we DO install our own, the memory must be obtained via mmap, not
+/// malloc. Sanitizer runtimes call UnsetAlternateSignalStack on every thread
+/// exit, which queries the kernel for the current alt stack and unconditionally
+/// calls munmap on the reported ss_sp. macOS retains the kernel's ss_sp record
+/// even after sigaltstack(SS_DISABLE), so the sanitizer sees our pointer and
+/// tries to munmap it — which succeeds for mmap memory but fails with EINVAL
+/// for malloc memory, tripping the sanitizer's internal CHECK and aborting
+/// the process via SIGTRAP.
+void setupThreadAltStack() {
+  stack_t cur{};
+  if (sigaltstack(nullptr, &cur) == 0 && !(cur.ss_flags & SS_DISABLE)) {
+    return;
+  }
+  void *mem = mmap(
+      nullptr,
+      kAltStackSize,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE | MAP_ANON,
+      -1,
+      0);
+  if (mem == MAP_FAILED)
+    return;
+  tCrashGuard.altStackMem = mem;
+  stack_t ss{};
+  ss.ss_sp = mem;
+  ss.ss_size = kAltStackSize;
+  ss.ss_flags = 0;
+  sigaltstack(&ss, nullptr);
+}
+
+/// Tear down the alternate signal stack for the calling thread, but only
+/// if we installed it ourselves. If we reused an existing alt stack
+/// (altStackMem is null), leave it alone for its owner to clean up.
+void teardownThreadAltStack() {
+  if (tCrashGuard.altStackMem) {
+    stack_t ss{};
+    ss.ss_flags = SS_DISABLE;
+    sigaltstack(&ss, nullptr);
+    munmap(tCrashGuard.altStackMem, kAltStackSize);
+    tCrashGuard.altStackMem = nullptr;
+  }
+}
+
+#endif // !_WIN32
 
 /// Holds the runtime environment created for a single test execution.
 struct TestRuntimeEnv {
@@ -551,7 +666,30 @@ TestResult executeTestVariant(
     }
   }
 
-  return executeCompiledTest(
+#ifndef _WIN32
+  // Crash guard: catch SIGSEGV/SIGABRT/SIGBUS during bytecode execution
+  // and convert to a test failure. On crash, the Hermes runtime and all
+  // its state are leaked — destructors cannot run safely after siglongjmp.
+  // The TimeLimitMonitor is also leaked — unwatchRuntime() is never called,
+  // so its background thread retains a reference to the dead runtime. This
+  // is harmless: the runtime memory is still allocated (leaked, not freed),
+  // so any write from the monitor is a no-op on valid memory.
+  // Note: after a crash, the worker thread continues with subsequent tests.
+  // If the crash corrupted global heap metadata, later allocations on this
+  // thread may fail, but the second crash will fall through to SIG_DFL
+  // (active is 0) and terminate the process.
+  tCrashGuard.caughtSignal = 0;
+  if (sigsetjmp(tCrashGuard.jmpBuf, 1) != 0) {
+    tCrashGuard.active = 0;
+    int sig = tCrashGuard.caughtSignal;
+    return makeResult(
+        ResultCode::ExecuteFailed,
+        std::string("FAIL: Execution crashed (") + crashSignalName(sig) + ")");
+  }
+  tCrashGuard.active = 1;
+#endif
+
+  auto result = executeCompiledTest(
       testName,
       std::move(bytecode),
       sourceURL,
@@ -560,6 +698,12 @@ TestResult executeTestVariant(
       config,
       disableHandleSan,
       startTime);
+
+#ifndef _WIN32
+  tCrashGuard.active = 0;
+#endif
+
+  return result;
 }
 
 namespace {
@@ -867,12 +1011,22 @@ void runAllTests(
   if (numWorkers == 0)
     numWorkers = 1;
 
+#ifndef _WIN32
+  installCrashHandlers();
+#endif
+
   for (unsigned i = 0; i < numWorkers; ++i) {
     workers.emplace_back([&] {
+#ifndef _WIN32
+      setupThreadAltStack();
+#endif
       std::function<void()> task;
       while (queue.pop(task)) {
         task();
       }
+#ifndef _WIN32
+      teardownThreadAltStack();
+#endif
     });
   }
 

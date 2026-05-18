@@ -99,6 +99,55 @@ source → BCProviderFromSrc (in-memory) → Runtime::runBytecode
 - Crash isolation is provided naturally by process isolation (no `sigsetjmp`
   needed).
 
+### Crash Isolation (in-process execution)
+
+Subprocess mode gets crash isolation for free; the in-process path doesn't —
+a `SIGSEGV`/`SIGABRT`/`SIGBUS`/`SIGFPE`/`SIGILL` raised inside
+`Runtime::runBytecode()` would otherwise kill the entire runner. A
+`sigsetjmp`/`siglongjmp`-based guard converts those into per-test failures
+and keeps the worker alive for subsequent tests.
+
+- **Signal handlers** are installed once globally in `runAllTests()` before
+  workers spawn (POSIX-only, gated on `#ifndef _WIN32`).
+- **Per-thread state** lives in `thread_local CrashGuardState tCrashGuard`
+  (`sigjmp_buf`, an `active` flag, the captured signal). Worker code wraps
+  each test's `executeCompiledTest()` call with `sigsetjmp` + setting
+  `active = 1`; on `siglongjmp`, the guard reports
+  `FAIL: Execution crashed (<signal name>)` and the worker continues.
+- **Crashes outside the guarded region** (e.g., during compilation) fall
+  through to `SIG_DFL` and re-raise — only execution is recoverable.
+- **Intentional leaks on crash**: the Hermes runtime, its `TimeLimitMonitor`
+  watch entry, and any allocations on the test's stack frame are leaked.
+  C++ destructors cannot run safely after `siglongjmp`, and forcing them
+  risks corrupting GC state. The leaked monitor entry is harmless because
+  the runtime memory is leaked (not freed), so any later background-thread
+  write lands on still-valid memory. If a crash corrupts global heap
+  metadata, a subsequent crash on the same worker will not re-enter the
+  guard (`active` is 0) and will terminate the process via `SIG_DFL`.
+
+#### Alternate signal stack
+
+Stack-overflow `SIGSEGV` cannot be handled on the regular thread stack, so
+each worker is associated with a `sigaltstack`-registered alternate stack
+(handlers use `SA_ONSTACK`). Two subtleties on macOS + sanitizers:
+
+- **Reuse, don't replace, an existing alt stack.** Sanitizer runtimes
+  (`sanitizer_common::SetAlternateSignalStack`, used by ASan/TSan/MSan)
+  install a per-thread alt stack at thread init (~`SIGSTKSZ * 4`).
+  `setupThreadAltStack()` queries the kernel and skips its own setup if
+  one is already in place — only allocating when none exists.
+- **`mmap`, not `malloc`, when we do allocate.** Sanitizer runtimes call
+  `UnsetAlternateSignalStack` at thread exit, which queries the kernel for
+  `ss_sp` and unconditionally `munmap`s it. macOS retains the kernel's
+  `ss_sp` even after `sigaltstack(SS_DISABLE)`, so the sanitizer sees
+  whatever pointer we installed — `munmap` of `mmap` memory is a benign
+  no-op (works even after we've already unmapped it), but `munmap` of
+  `malloc` memory fails with `EINVAL`, tripping the sanitizer's internal
+  `CHECK` and aborting the process via `SIGTRAP`.
+- `teardownThreadAltStack()` only acts when we own the alt stack
+  (`tCrashGuard.altStackMem != nullptr`); for reused stacks we leave the
+  owner's cleanup alone.
+
 ### CompileFlags (matching Python's COMPILE_ARGS)
 
 ```cpp
@@ -138,6 +187,7 @@ Test262 = true
 | Bytecode path       | Serialized to `.hbc` file  | In-memory `BCProvider`     |
 | Shermes compilation | `shermes` subprocess       | `--shermes` subprocess     |
 | stdout handling     | Normal (inherited)         | Suppressed during tests    |
+| Crash isolation     | Process boundary           | `sigsetjmp` guard (in-proc)|
 
 ## 5. File Structure
 
