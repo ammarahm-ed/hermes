@@ -528,27 +528,74 @@ void processTestEntry(
   }
 }
 
-/// Print percentage-based progress: "10.. 20.. 30.." etc.
-void reportProgress(
-    std::atomic<size_t> &completedCount,
-    size_t totalTests,
-    std::atomic<unsigned> &lastPrintedPct) {
-  size_t done = ++completedCount;
-  if (totalTests > 0) {
-    unsigned pct = (unsigned)(done * 100 / totalTests);
-    unsigned milestone = (pct / 10) * 10;
-    if (milestone > 0) {
-      unsigned expected = milestone - 10;
-      if (lastPrintedPct.compare_exchange_strong(expected, milestone)) {
-        if (milestone == 100)
-          llvh::outs() << " done.";
-        else
-          llvh::outs() << " " << milestone << "..";
-        llvh::outs().flush();
-      }
+/// Background reporter that polls a completion counter on a fixed interval and
+/// prints the same percentage-based progress that the previous reportProgress()
+/// emitted: "Testing: 0 .. 10.. 20.. ... 90.. done.\n". Owns a single thread
+/// so workers stay off the I/O path entirely. Construction prints the prefix,
+/// destruction signals stop, joins, and emits the trailing newline.
+class ProgressReporter {
+ public:
+  ProgressReporter(
+      const std::atomic<size_t> &counter,
+      size_t total,
+      std::chrono::milliseconds interval = std::chrono::milliseconds(200))
+      : counter_(counter), total_(total), interval_(interval) {
+    llvh::outs() << "Testing: 0 ..";
+    llvh::outs().flush();
+    thread_ = std::thread([this] { run(); });
+  }
+
+  ~ProgressReporter() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_one();
+    thread_.join();
+    llvh::outs() << " \n";
+  }
+
+  ProgressReporter(const ProgressReporter &) = delete;
+  ProgressReporter &operator=(const ProgressReporter &) = delete;
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!stop_) {
+      cv_.wait_for(lock, interval_, [this] { return stop_; });
+      // catchUp() reads/writes only this thread's lastPrintedPct_, so no
+      // additional synchronization is needed beyond the loop's own mutex.
+      catchUp();
     }
   }
-}
+
+  /// Print every 10% milestone between lastPrintedPct_ and the current
+  /// percentage. Single-writer to lastPrintedPct_ (the reporter thread).
+  void catchUp() {
+    if (total_ == 0)
+      return;
+    size_t done = counter_.load(std::memory_order_relaxed);
+    unsigned pct = (unsigned)(done * 100 / total_);
+    unsigned milestone = (pct / 10) * 10;
+    while (lastPrintedPct_ < milestone) {
+      lastPrintedPct_ += 10;
+      if (lastPrintedPct_ == 100)
+        llvh::outs() << " done.";
+      else
+        llvh::outs() << " " << lastPrintedPct_ << "..";
+    }
+    llvh::outs().flush();
+  }
+
+  const std::atomic<size_t> &counter_;
+  size_t total_;
+  std::chrono::milliseconds interval_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+  unsigned lastPrintedPct_ = 0;
+  std::thread thread_;
+};
 
 } // namespace
 
@@ -982,13 +1029,11 @@ void runAllTests(
     std::atomic<size_t> &permanentFeatureSkipped) {
   std::mutex resultsMutex;
   std::atomic<size_t> completedCount{0};
-  size_t totalTests = tests.size();
-  std::atomic<unsigned> lastPrintedPct{0};
 
   // Suppress stderr for the duration of test execution. GCBase prints
   // a handle sanitization warning on every runtime init when built with
   // -DHERMESVM_SANITIZE_HANDLES=ON, which is very noisy (one per test).
-  // Stdout is left untouched so reportProgress() continues to work.
+  // Stdout is left untouched so ProgressReporter continues to work.
   // TODO: consider also redirecting stdout if there are other noise
   // outputs. Use dup() to save stdout before redirecting, and pass the
   // saved fd via raw_fd_ostream to all outs() callers in runAllTests.
@@ -1000,9 +1045,6 @@ void runAllTests(
     close(devNull);
   }
 #endif
-
-  llvh::outs() << "Testing: 0 ..";
-  llvh::outs().flush();
 
   WorkQueue queue;
   std::vector<std::thread> workers;
@@ -1030,34 +1072,39 @@ void runAllTests(
     });
   }
 
-  for (const auto &entry : tests) {
-    queue.push([&entry,
-                &harness,
-                skiplist,
-                &config,
-                &results,
-                &resultsMutex,
-                &completedCount,
-                totalTests,
-                &featureSkipped,
-                &permanentFeatureSkipped,
-                &lastPrintedPct] {
-      processTestEntry(
-          entry,
-          harness,
-          skiplist,
-          config,
-          results,
-          resultsMutex,
-          featureSkipped,
-          permanentFeatureSkipped);
-      reportProgress(completedCount, totalTests, lastPrintedPct);
-    });
-  }
+  {
+    // Reporter lifetime brackets the work-dispatch window. Construction
+    // prints "Testing: 0 .."; destruction signals stop, joins the polling
+    // thread, and prints the trailing " \n".
+    ProgressReporter reporter(completedCount, tests.size());
 
-  queue.finish();
-  for (auto &w : workers) {
-    w.join();
+    for (const auto &entry : tests) {
+      queue.push([&entry,
+                  &harness,
+                  skiplist,
+                  &config,
+                  &results,
+                  &resultsMutex,
+                  &completedCount,
+                  &featureSkipped,
+                  &permanentFeatureSkipped] {
+        processTestEntry(
+            entry,
+            harness,
+            skiplist,
+            config,
+            results,
+            resultsMutex,
+            featureSkipped,
+            permanentFeatureSkipped);
+        ++completedCount;
+      });
+    }
+
+    queue.finish();
+    for (auto &w : workers) {
+      w.join();
+    }
   }
 
 #ifndef _WIN32
@@ -1066,8 +1113,6 @@ void runAllTests(
     close(savedStderr);
   }
 #endif
-
-  llvh::outs() << " \n";
 }
 
 } // namespace testrunner
