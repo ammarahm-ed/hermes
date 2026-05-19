@@ -1263,6 +1263,37 @@ class InstrGen {
       genStringConstWriteIC(LS, inst.getStoredValue()) << ");\n";
       return;
     }
+    // If the prop is an index-like constant, use put_by_index directly.
+    if (auto *litNum = llvh::dyn_cast<LiteralNumber>(inst.getProperty())) {
+      if (auto idxOpt = doubleToArrayIndex(litNum->getValue())) {
+        if (strictMode)
+          os_ << "_sh_ljs_put_by_index_strict_rjs";
+        else
+          os_ << "_sh_ljs_put_by_index_loose_rjs";
+        os_ << "(shr,&";
+        generateRegister(*inst.getObject());
+        os_ << ", " << *idxOpt << "u, &";
+        generateRegister(*inst.getStoredValue());
+        os_ << ");\n";
+        return;
+      }
+    }
+    // If the key is known to be a number, use the optimized numeric path
+    // which tries sh_tryfast_f64_to_u32 inline before falling back.
+    else if (inst.getProperty()->getType().isNumberType()) {
+      if (strictMode)
+        os_ << "_sh_ljs_put_by_val_numeric_strict_rjs";
+      else
+        os_ << "_sh_ljs_put_by_val_numeric_loose_rjs";
+      os_ << "(shr,&";
+      generateRegister(*inst.getObject());
+      os_ << ", ";
+      generateRegister(*inst.getProperty());
+      os_ << ", &";
+      generateRegister(*inst.getStoredValue());
+      os_ << ");\n";
+      return;
+    }
 
     if (strictMode)
       os_ << "_sh_ljs_put_by_val_strict_rjs";

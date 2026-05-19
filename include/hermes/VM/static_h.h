@@ -645,6 +645,54 @@ SHERMES_EXPORT void _sh_ljs_put_by_val_with_receiver_rjs(
     SHLegacyValue *receiver,
     bool isStrict);
 
+/// Put a property given a valid array index \p key.
+SHERMES_EXPORT void _sh_ljs_put_by_index_loose_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    uint32_t key,
+    SHLegacyValue *value);
+SHERMES_EXPORT void _sh_ljs_put_by_index_strict_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    uint32_t key,
+    SHLegacyValue *value);
+
+/// Optimized put-by-val when the key is known to be a number at compile time.
+/// The key is passed by value (not pointer) because numbers are immediate
+/// values that do not require GC rooting. Tries sh_tryfast_f64_to_u32 inline,
+/// then calls _sh_ljs_put_by_index on success, or falls back to the generic
+/// put-by-val path.
+static inline void _sh_ljs_put_by_val_numeric_loose_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHLegacyValue key,
+    SHLegacyValue *value) {
+  assert(_sh_ljs_is_double(key) && "key must be a number");
+  uint32_t index;
+  // Reject 0xFFFFFFFF: valid uint32 but not a valid array index.
+  if (SH_LIKELY(
+          sh_tryfast_f64_to_u32(key.f64, index) && index != 0xFFFFFFFFu)) {
+    _sh_ljs_put_by_index_loose_rjs(shr, target, index, value);
+    return;
+  }
+  _sh_ljs_put_by_val_loose_rjs(shr, target, &key, value);
+}
+static inline void _sh_ljs_put_by_val_numeric_strict_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHLegacyValue key,
+    SHLegacyValue *value) {
+  assert(_sh_ljs_is_double(key) && "key must be a number");
+  uint32_t index;
+  // Reject 0xFFFFFFFF: valid uint32 but not a valid array index.
+  if (SH_LIKELY(
+          sh_tryfast_f64_to_u32(key.f64, index) && index != 0xFFFFFFFFu)) {
+    _sh_ljs_put_by_index_strict_rjs(shr, target, index, value);
+    return;
+  }
+  _sh_ljs_put_by_val_strict_rjs(shr, target, &key, value);
+}
+
 /// Load a property from direct storage.
 SHERMES_EXPORT SHLegacyValue
 _sh_prload_direct(SHRuntime *shr, SHLegacyValue source, uint32_t propIndex);
