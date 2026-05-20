@@ -1,7 +1,7 @@
 # Phase 1 Implementation Steps
 
 Phase 1 replaces the 2-byte bitmask `Type` with a 4-byte opaque index into
-`IRTypeContext`, maintaining API compatibility for the vast majority of
+`TypeContext`, maintaining API compatibility for the vast majority of
 call sites. A small number of call sites require targeted changes — see
 "Known Call-Site Migrations" below.
 
@@ -71,9 +71,9 @@ in P1-S8:
 
 ---
 
-## P1-S1: IRTypeContext skeleton with well-known types
+## P1-S1: TypeContext skeleton with well-known types
 
-**Short description:** Create `IRTypeContext` with `TypeKind` enum,
+**Short description:** Create `TypeContext` with `TypeKind` enum,
 `TypeEntry` struct, well-known ID constants, and constructor that
 pre-allocates all well-known type entries (primitives and common unions).
 
@@ -82,10 +82,10 @@ pre-allocates all well-known type entries (primitives and common unions).
 **Details:**
 
 New files:
-- `include/hermes/IR/IRTypeContext.h`
-- `lib/IR/IRTypeContext.cpp`
+- `include/hermes/IR/TypeContext.h`
+- `lib/IR/TypeContext.cpp`
 
-Add `IR/IRTypeContext.cpp` to the `hermesFrontend` source list in
+Add `IR/TypeContext.cpp` to the `hermesFrontend` source list in
 `lib/CMakeLists.txt`.
 
 Define:
@@ -96,7 +96,7 @@ Define:
 - `struct FunctionParam`, `struct ExactObjectField` — side array element
   types (defined but unused in Phase 1).
 - Well-known ID constants (`kNoTypeId` through `kFirstDynamicId`).
-- `class IRTypeContext`:
+- `class TypeContext`:
   - `std::vector<TypeEntry> entries_` — type table.
   - `std::vector<uint32_t> typeArrays_` — stores union arm IDs (using raw
     `uint32_t` since `Type` is still a bitmask at this point; changed to
@@ -115,9 +115,9 @@ P1-S8 when the `Type` class is rewritten.
 
 **Completion criteria:**
 - Builds successfully.
-- New unit test file `unittests/IR/IRTypeContextTest.cpp` (added to
+- New unit test file `unittests/IR/TypeContextTest.cpp` (added to
   `unittests/IR/CMakeLists.txt`):
-  - Constructs an `IRTypeContext`.
+  - Constructs an `TypeContext`.
   - Verifies `getKind(kNumberId) == TypeKind::Number` (and other
     primitives).
   - Verifies `getKind(kAnyTypeId) == TypeKind::Union`.
@@ -127,16 +127,16 @@ P1-S8 when the `Type` class is rewritten.
 
 ---
 
-## P1-S2: Type queries on IRTypeContext
+## P1-S2: Type queries on TypeContext
 
 **Short description:** Add `canBeX()`, `isPrimitive()`, `isNonPtr()`, and
-related predicate methods to `IRTypeContext`.
+related predicate methods to `TypeContext`.
 
 **Dependencies:** P1-S1.
 
 **Details:**
 
-Add methods to `IRTypeContext` (all take `uint32_t id`):
+Add methods to `TypeContext` (all take `uint32_t id`):
 - `canBeNumber`, `canBeString`, `canBeObject`, `canBeNull`,
   `canBeUndefined`, `canBeEmpty`, `canBeUninit`, `canBeBigInt`,
   `canBeBoolean`, `canBeSymbol`.
@@ -149,7 +149,7 @@ back to kind-based checks. For unions, iterate arms and check recursively
 
 **Completion criteria:**
 - Builds successfully.
-- Unit tests in `IRTypeContextTest.cpp`:
+- Unit tests in `TypeContextTest.cpp`:
   - `canBeNumber(kNumberId)` is true.
   - `canBeNumber(kStringId)` is false.
   - `canBeNumber(kAnyTypeId)` is true (AnyType is a union containing
@@ -168,14 +168,14 @@ back to kind-based checks. For unions, iterate arms and check recursively
 ## P1-S3: Type operations with interning
 
 **Short description:** Add `unionTy`, `intersectTy`, `subtractTy`,
-`isSubsetOf`, and `areDisjoint` to `IRTypeContext`. Add the intern table
+`isSubsetOf`, and `areDisjoint` to `TypeContext`. Add the intern table
 for deduplicating dynamically created union types.
 
 **Dependencies:** P1-S2.
 
 **Details:**
 
-Add to `IRTypeContext`:
+Add to `TypeContext`:
 - `llvh::DenseMap<TypeEntryKey, uint32_t> internTable_` — maps structural
   keys to type IDs. Pre-populated for well-known types in the constructor.
 - `struct TypeEntryKey` — hashable/comparable key derived from a
@@ -199,7 +199,7 @@ etc.) are dead code paths that return conservative results or assert.
 
 **Completion criteria:**
 - Builds successfully.
-- Unit tests in `IRTypeContextTest.cpp`:
+- Unit tests in `TypeContextTest.cpp`:
   - `unionTy(kNumberId, kStringId)` returns a union; querying its arms
     gives {kNumberId, kStringId} (sorted).
   - `unionTy(kNumberId, kNumberId)` returns `kNumberId` (identity).
@@ -222,13 +222,13 @@ etc.) are dead code paths that return conservative results or assert.
 ## P1-S4: Utility methods
 
 **Short description:** Add `countKinds`, type formatting, and union arm
-iteration helpers to `IRTypeContext`.
+iteration helpers to `TypeContext`.
 
 **Dependencies:** P1-S3.
 
 **Details:**
 
-Add to `IRTypeContext`:
+Add to `TypeContext`:
 - `unsigned countKinds(uint32_t id)` — returns 0 for NoType, arm count
   for Union, 1 otherwise. Replacement for `Type::countTypes()`.
 - `TypeKind getFirstKind(uint32_t id)` — returns the TypeKind for
@@ -255,35 +255,35 @@ Add to `IRTypeContext`:
 
 ## P1-S5: Thread-local context and RAII guard
 
-**Short description:** Add `IRTypeContext::current()` thread-local accessor
-and `IRTypeContextRAII` RAII guard.
+**Short description:** Add `TypeContext::current()` thread-local accessor
+and `TypeContextRAII` RAII guard.
 
 **Dependencies:** P1-S1.
 
 **Details:**
 
-Add to `IRTypeContext`:
-- `static thread_local IRTypeContext *current_` — private.
-- `static IRTypeContext &current()` — asserts `current_ != nullptr`,
+Add to `TypeContext`:
+- `static thread_local TypeContext *current_` — private.
+- `static TypeContext &current()` — asserts `current_ != nullptr`,
   returns `*current_`.
 
-New class `IRTypeContextRAII`:
-- Constructor takes `IRTypeContext &`, saves `current_`, sets new current.
+New class `TypeContextRAII`:
+- Constructor takes `TypeContext &`, saves `current_`, sets new current.
 - Destructor restores previous `current_`.
 - Non-copyable, non-movable.
 
 **Completion criteria:**
 - Builds successfully.
 - Unit tests:
-  - Install guard with context A: `IRTypeContext::current()` returns A.
+  - Install guard with context A: `TypeContext::current()` returns A.
   - Nested guards: inner guard returns inner context, after destruction
     outer context is restored.
 
 ---
 
-## P1-S6: Wire IRTypeContext into Module
+## P1-S6: Wire TypeContext into Module
 
-**Short description:** Add `IRTypeContext` member to `Module` and the
+**Short description:** Add `TypeContext` member to `Module` and the
 necessary header includes.
 
 **Dependencies:** P1-S1.
@@ -291,14 +291,14 @@ necessary header includes.
 **Details:**
 
 In `include/hermes/IR/IR.h`:
-- Forward-declare `class IRTypeContext;` near the top (before `Type`).
-- Include `hermes/IR/IRTypeContext.h` after the `Type` class definition
+- Forward-declare `class TypeContext;` near the top (before `Type`).
+- Include `hermes/IR/TypeContext.h` after the `Type` class definition
   and before the `Module` class definition.
-- Add `IRTypeContext typeContext_;` private member to `Module`.
-- Add `IRTypeContext &getTypeContext() { return typeContext_; }` public
+- Add `TypeContext typeContext_;` private member to `Module`.
+- Add `TypeContext &getTypeContext() { return typeContext_; }` public
   accessor.
 
-The `IRTypeContext` constructor runs automatically when `Module` is
+The `TypeContext` constructor runs automatically when `Module` is
 constructed. No semantic change — nothing uses `typeContext_` yet.
 
 **Completion criteria:**
@@ -309,14 +309,14 @@ constructed. No semantic change — nothing uses `typeContext_` yet.
 
 ## P1-S7: Install RAII guards at compilation entry points
 
-**Short description:** Install `IRTypeContextRAII` at all known `Module`
+**Short description:** Install `TypeContextRAII` at all known `Module`
 creation sites so the thread-local context is set during compilation.
 
 **Dependencies:** P1-S5, P1-S6.
 
 **Details:**
 
-Install `IRTypeContextRAII` immediately after `Module` creation in every
+Install `TypeContextRAII` immediately after `Module` creation in every
 site that creates a `Module` and performs type operations on it:
 1. `lib/BCGen/HBC/BCProviderFromSrc.cpp` — in `BCProviderFromSrc::create`,
    after the `std::make_shared<Module>(context)` call (~line 233).
@@ -333,7 +333,7 @@ The guard must be in a scope that encompasses all subsequent type operations
 on the Module (IR construction, optimization passes, codegen). In all
 cases, the existing scope after Module creation covers this.
 
-No semantic change — `IRTypeContext::current()` is now set during
+No semantic change — `TypeContext::current()` is now set during
 compilation, but nothing calls it yet.
 
 **Completion criteria:**
@@ -344,7 +344,7 @@ compilation, but nothing calls it yet.
 
 ## P1-S7.5: Add RAII guards to unit tests (preparation)
 
-**Short description:** Add `IRTypeContext` and `IRTypeContextRAII` setup
+**Short description:** Add `TypeContext` and `TypeContextRAII` setup
 to all test fixtures that use `Type` operations, in preparation for the
 Type rewrite. While `Type` is still bitmask-based, the guards are no-ops.
 
@@ -353,8 +353,8 @@ Type rewrite. While `Type` is still bitmask-based, the guards are no-ops.
 **Details:**
 
 Grep for `Type::` across all test files to find every test that uses
-`Type` operations. For each, add an `IRTypeContext` instance and
-`IRTypeContextRAII` guard to the test fixture (constructor or `SetUp()`).
+`Type` operations. For each, add an `TypeContext` instance and
+`TypeContextRAII` guard to the test fixture (constructor or `SetUp()`).
 
 Known test files:
 - `unittests/IR/BuilderTest.cpp` — uses `Type::unionTy()`, `canBeX()`,
@@ -377,7 +377,7 @@ for P1-S8 so that the Type rewrite doesn't need to touch test files.
 ## P1-S8: Rewrite Type class
 
 **Short description:** Replace `Type`'s `uint16_t bitmask_` with
-`uint32_t id_`, delegate all methods to `IRTypeContext::current()`, and
+`uint32_t id_`, delegate all methods to `TypeContext::current()`, and
 replace the `TypeKind` enum.
 
 **Dependencies:** P1-S4, P1-S7.5 (all prior steps).
@@ -409,43 +409,43 @@ Replace with new `Type` class:
 - `hash()` returns `llvh::hash_value(id_)`.
 - `Profile()` uses `ID.AddInteger(id_)`.
 - All type operations (`unionTy`, `intersectTy`, `subtractTy`) delegate
-  to `IRTypeContext::current()`.
+  to `TypeContext::current()`.
 - All type queries (`canBeNumber()`, `isPrimitive()`, etc.) delegate to
-  `IRTypeContext::current()`.
+  `TypeContext::current()`.
 - `isNoType()` and `isAnyType()` can compare directly against well-known
   IDs without context lookup.
-- `countTypes()` delegates to `IRTypeContext::current().countKinds()`.
+- `countTypes()` delegates to `TypeContext::current().countKinds()`.
 - `getFirstTypeKind()` delegates to
-  `IRTypeContext::current().getFirstKind()`.
-- `print()` delegates to `IRTypeContext::current().format()`.
+  `TypeContext::current().getFirstKind()`.
+- `print()` delegates to `TypeContext::current().format()`.
 - `Type::iterator` reimplemented: dereference yields a single-kind `Type`
   (not `TypeKind`) to preserve the existing API contract. For non-union
   types, yields the type itself as the single element. For unions,
-  iterates arms via `IRTypeContext::current().getUnionArms()`, wrapping
+  iterates arms via `TypeContext::current().getUnionArms()`, wrapping
   each arm ID as a `Type`.
 
-**In `IRTypeContext.h` / `IRTypeContext.cpp`:**
+**In `TypeContext.h` / `TypeContext.cpp`:**
 
 Change all public method signatures from `uint32_t` to `Type`. Internally
 extract `id_` via friend access. This is mechanical.
 
 Change `typeArrays_` from `std::vector<uint32_t>` to `std::vector<Type>`.
 
-**Header layering:** `Type` methods that call `IRTypeContext::current()`
+**Header layering:** `Type` methods that call `TypeContext::current()`
 are defined out-of-line in `IR.cpp` (not inline in `IR.h`). This avoids
-include-order coupling between `IR.h` and `IRTypeContext.h`. Only methods
+include-order coupling between `IR.h` and `TypeContext.h`. Only methods
 that don't need the context (e.g., `isNoType()`, `operator==`, static
 well-known constructors) remain inline/constexpr in `IR.h`.
 
 **In `lib/IR/IR.cpp`:**
 
 Remove old `Type::print()` implementation (~lines 1040-1080). Replace with
-delegation to `IRTypeContext::current().format()`.
+delegation to `TypeContext::current().format()`.
 
 **Old `TypeKind` callers:**
 
 The old `TypeKind` enum (plain `enum` in `hermes` namespace) is replaced by
-the new `enum class TypeKind` in `IRTypeContext.h`. Callers that reference
+the new `enum class TypeKind` in `TypeContext.h`. Callers that reference
 `TypeKind::Number` etc. continue to work (same qualified names). Callers
 that relied on implicit integer conversion (e.g., `1 << TypeKind::Number`
 for bitmask construction) no longer exist — the bitmask is gone.
@@ -456,7 +456,7 @@ fixes.
 **Note:** Unit test RAII guards are already in place from P1-S7.5.
 P1-S8 should not need to modify test files (other than updating
 `getUnionArms()` return type from `ArrayRef<uint32_t>` to
-`ArrayRef<Type>` in `IRTypeContextTest.cpp`).
+`ArrayRef<Type>` in `TypeContextTest.cpp`).
 
 **Note:** `IR.h:707` has a pre-edited comment saying "Type is 4 bytes"
 while `sizeof(Type)` is currently 2. This becomes correct after P1-S8;
@@ -476,11 +476,11 @@ Static constructors (all remain `static constexpr`):
   `createFunctionCode()`.
 - `createNullOrUndef()` (new, for InstSimplify.cpp migration).
 
-Static operations (delegate to `IRTypeContext::current()`):
+Static operations (delegate to `TypeContext::current()`):
 - `unionTy(Type, Type)`, `intersectTy(Type, Type)`,
   `subtractTy(Type, Type)`.
 
-Instance predicates (delegate to `IRTypeContext::current()`):
+Instance predicates (delegate to `TypeContext::current()`):
 - `isSubsetOf(Type)`, `canBeType(Type)`, `isProperSubsetOf(Type)`.
 - `canBeString()`, `canBeBigInt()`, `canBeSymbol()`, `canBeNumber()`,
   `canBeObject()`, `canBeBoolean()`, `canBeEmpty()`, `canBeUninit()`,
@@ -495,7 +495,7 @@ Instance type checks (compare against well-known IDs, no context needed):
   `isBigIntType()`, `isSymbolType()`, `isEnvironmentType()`,
   `isPrivateNameType()`, `isFunctionCodeType()`.
 
-Utilities (delegate to `IRTypeContext::current()`):
+Utilities (delegate to `TypeContext::current()`):
 - `countTypes()`, `getFirstTypeKind()`.
 - `print(raw_ostream &)`.
 - `Type::iterator` (dereferences to `Type`).
@@ -506,7 +506,7 @@ Identity / hashing (no context needed):
 **Completion criteria:**
 - Full build succeeds.
 - `check-hermes` passes — all existing tests produce identical results.
-- Call-site changes limited to: `Type`, `IRTypeContext`, `IR.cpp`, unit
+- Call-site changes limited to: `Type`, `TypeContext`, `IR.cpp`, unit
   test fixtures, and the known migrations listed in "Known Call-Site
   Migrations" above (InstSimplify.cpp, SH.cpp, and any other
   `LAST_TYPE` / nested-enum users).

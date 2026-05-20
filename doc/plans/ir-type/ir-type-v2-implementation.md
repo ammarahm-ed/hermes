@@ -28,13 +28,13 @@ static_assert(sizeof(Type) == 2);
 
 ```cpp
 class Type {
-  uint32_t id_;  // Index into IRTypeContext type table
+  uint32_t id_;  // Index into TypeContext type table
 };
 static_assert(sizeof(Type) == 4);
 ```
 
 `Type` is a pure opaque handle. It carries no type information itself — all
-type data lives in the `IRTypeContext` type table, indexed by `id_`. Two
+type data lives in the `TypeContext` type table, indexed by `id_`. Two
 types are equal iff their `id_` values are equal.
 
 The size increase from 2 to 4 bytes fits within the existing `Value` layout
@@ -42,12 +42,12 @@ constraint (`sizeof(valueType) <= 4`, enforced at `IR.h:737`).
 
 ### Well-Known Type IDs
 
-The `IRTypeContext` constructor pre-allocates entries for all primitive types
+The `TypeContext` constructor pre-allocates entries for all primitive types
 and commonly used unions. These have fixed `id_` values:
 
 ```cpp
-// Pre-allocated type IDs (assigned by IRTypeContext constructor).
-// These are constants, valid for any IRTypeContext instance.
+// Pre-allocated type IDs (assigned by TypeContext constructor).
+// These are constants, valid for any TypeContext instance.
 static constexpr uint32_t kNoTypeId        = 0;
 static constexpr uint32_t kEmptyId         = 1;
 static constexpr uint32_t kUninitId        = 2;
@@ -209,7 +209,7 @@ struct TypeEntry {
 
 ### Side Arrays
 
-Variable-length data is stored in side arrays within `IRTypeContext`,
+Variable-length data is stored in side arrays within `TypeContext`,
 referenced by (offset, count) pairs in the `TypeEntry`:
 
 | Side array | Element type | Used by |
@@ -241,7 +241,7 @@ use explicit construction or a tagged-union helper.
 
 ---
 
-## 3. IRTypeContext
+## 3. TypeContext
 
 ### Responsibilities
 
@@ -252,35 +252,35 @@ use explicit construction or a tagged-union helper.
 
 ### Ownership
 
-One `IRTypeContext` per `Module`:
+One `TypeContext` per `Module`:
 
 ```cpp
 class Module : public Value {
   // ...
-  IRTypeContext typeContext_;
+  TypeContext typeContext_;
   // ...
 public:
-  IRTypeContext &getTypeContext() { return typeContext_; }
+  TypeContext &getTypeContext() { return typeContext_; }
 };
 ```
 
-**Header dependency**: `Type` is defined in `IR.h`. `IRTypeContext` uses
-`Type` and is defined in `IRTypeContext.h`. `Module` (in `IR.h`) embeds
-`IRTypeContext` by value. The include order is:
-1. `IR.h` forward-declares `class IRTypeContext;`
+**Header dependency**: `Type` is defined in `IR.h`. `TypeContext` uses
+`Type` and is defined in `TypeContext.h`. `Module` (in `IR.h`) embeds
+`TypeContext` by value. The include order is:
+1. `IR.h` forward-declares `class TypeContext;`
 2. `IR.h` defines `Type` (before `Module`).
-3. `IR.h` defines `Module` with `IRTypeContext typeContext_;` — this
-   requires the full definition, so `IR.h` includes `IRTypeContext.h`
+3. `IR.h` defines `Module` with `TypeContext typeContext_;` — this
+   requires the full definition, so `IR.h` includes `TypeContext.h`
    above the `Module` class definition (after `Type` is defined).
-4. `IRTypeContext.h` includes only the `Type` definition (not `Module`).
+4. `TypeContext.h` includes only the `Type` definition (not `Module`).
 
 ### Storage Layout
 
 ```cpp
-class IRTypeContext {
+class TypeContext {
  public:
   // --- Phase 1: thread-local "current" context ---
-  static IRTypeContext &current();
+  static TypeContext &current();
 
   // --- Type operations ---
   Type unionTy(Type A, Type B);
@@ -325,7 +325,7 @@ class IRTypeContext {
   bool isSubclass(Type a, Type b) const;
 
  private:
-  static thread_local IRTypeContext *current_;
+  static thread_local TypeContext *current_;
 
   // Type table. Index 0 = NoType. Pre-allocated entries for primitives.
   std::vector<TypeEntry> entries_;
@@ -342,10 +342,10 @@ class IRTypeContext {
 
 ### Construction
 
-The `IRTypeContext` constructor pre-allocates all well-known types:
+The `TypeContext` constructor pre-allocates all well-known types:
 
 ```cpp
-IRTypeContext::IRTypeContext() {
+TypeContext::TypeContext() {
   // Index 0: NoType
   entries_.push_back({TypeKind::NoType, {}});
   // Index 1: Empty
@@ -383,13 +383,13 @@ No deep recursive hashing is needed because sub-types are indices.
 
 ## 4. Type Operations
 
-All type operations are methods on `IRTypeContext`. They look up the
+All type operations are methods on `TypeContext`. They look up the
 `TypeEntry` for each operand and dispatch based on `TypeKind`.
 
 ### unionTy(A, B)
 
 ```cpp
-Type IRTypeContext::unionTy(Type A, Type B) {
+Type TypeContext::unionTy(Type A, Type B) {
   if (A == B) return A;
   if (isNoType(A)) return B;
   if (isNoType(B)) return A;
@@ -416,7 +416,7 @@ Special cases for object refinements:
 ### intersectTy(A, B)
 
 ```cpp
-Type IRTypeContext::intersectTy(Type A, Type B) {
+Type TypeContext::intersectTy(Type A, Type B) {
   if (A == B) return A;
   if (isSubsetOf(A, B)) return A;
   if (isSubsetOf(B, A)) return B;
@@ -439,7 +439,7 @@ in `intersectTy` before `intersectImpl` is reached.
 ### subtractTy(A, B)
 
 ```cpp
-Type IRTypeContext::subtractTy(Type A, Type B) {
+Type TypeContext::subtractTy(Type A, Type B) {
   if (isSubsetOf(A, B)) return createNoType();
   if (areDisjoint(A, B)) return A;
   return subtractImpl(A, B);
@@ -455,7 +455,7 @@ Type IRTypeContext::subtractTy(Type A, Type B) {
 ### isSubsetOf(A, B)
 
 ```cpp
-bool IRTypeContext::isSubsetOf(Type A, Type B) {
+bool TypeContext::isSubsetOf(Type A, Type B) {
   if (A == B) return true;
   if (isNoType(A)) return true;
 
@@ -495,7 +495,7 @@ bool IRTypeContext::isSubsetOf(Type A, Type B) {
 Direct kind-based check without materializing an intersection:
 
 ```cpp
-bool IRTypeContext::areDisjoint(Type A, Type B) {
+bool TypeContext::areDisjoint(Type A, Type B) {
   if (A == B) return isNoType(A);
 
   TypeKind ak = getKind(A);
@@ -575,7 +575,7 @@ class Type {
   }
 
   // --- Context-dependent operations (Phase 1: use thread-local) ---
-  // These delegate to IRTypeContext::current().
+  // These delegate to TypeContext::current().
 
   static Type unionTy(Type A, Type B);
   static Type intersectTy(Type A, Type B);
@@ -606,19 +606,19 @@ class Type {
   bool isAnyEmptyUninitType() const;
 
   // Reimplemented on top of the new representation (delegate to
-  // IRTypeContext::current()):
+  // TypeContext::current()):
   //
   // countTypes(): returns 0 for NoType, arm count for Union, 1 otherwise.
   // getFirstTypeKind(): returns the TypeKind from the table entry
   //   (or first arm's kind for Union).
   // Type::iterator: iterates over union arms (or yields the single kind
-  //   for non-union types). Delegates to IRTypeContext::getUnionArms()
+  //   for non-union types). Delegates to TypeContext::getUnionArms()
   //   for unions.
 
   void print(llvh::raw_ostream &OS) const;
   void Profile(llvh::FoldingSetNodeID &ID) const { ID.AddInteger(id_); }
 
-  friend class IRTypeContext;
+  friend class TypeContext;
 };
 ```
 
@@ -629,12 +629,12 @@ All context-dependent methods delegate to the thread-local context:
 ```cpp
 // Static operations:
 Type Type::unionTy(Type A, Type B) {
-  return IRTypeContext::current().unionTy(A, B);
+  return TypeContext::current().unionTy(A, B);
 }
 
 // Instance queries:
 bool Type::canBeNumber() const {
-  return IRTypeContext::current().canBeNumber(*this);
+  return TypeContext::current().canBeNumber(*this);
 }
 
 bool Type::isNoType() const {
@@ -646,10 +646,10 @@ Note: some queries like `isNoType()` and `isAnyType()` can remain constexpr
 by comparing against well-known IDs. Others like `canBeNumber()` must consult
 the context because a Union containing Number should also return true.
 
-### canBeX() Implementation in IRTypeContext
+### canBeX() Implementation in TypeContext
 
 ```cpp
-bool IRTypeContext::canBeNumber(Type t) const {
+bool TypeContext::canBeNumber(Type t) const {
   // Fast path: well-known IDs.
   if (t.id_ == kAnyTypeId || t.id_ == kNumberId || t.id_ == kNumericId)
     return true;
@@ -687,7 +687,7 @@ payload (`classInstance.superClassTypeId`).
 ### Registration
 
 ```cpp
-Type IRTypeContext::createClassInstance(
+Type TypeContext::createClassInstance(
     Type superClassType,
     Identifier className,
     llvh::ArrayRef<ExactObjectField> fields) {
@@ -709,7 +709,7 @@ Type IRTypeContext::createClassInstance(
 ### Subtype Check
 
 ```cpp
-bool IRTypeContext::isSubclass(Type a, Type b) const {
+bool TypeContext::isSubclass(Type a, Type b) const {
   assert(getKind(a) == TypeKind::ClassInstance);
   assert(getKind(b) == TypeKind::ClassInstance);
   uint32_t cur = a.id_;
@@ -729,7 +729,7 @@ needed.
 
 ## 7. Interning
 
-### Within IRTypeContext (Acyclic Path)
+### Within TypeContext (Acyclic Path)
 
 For non-looping types, all type construction methods intern their results.
 Since sub-types are `Type` values (= integer indices) and are already
@@ -785,7 +785,7 @@ See the design document for the full algorithm and rationale.
 
 ### Batch Allocation for Looping Types
 
-The acyclic interning path (§7 "Within IRTypeContext") assumes sub-types
+The acyclic interning path (§7 "Within TypeContext") assumes sub-types
 are already interned before their parent. For looping (recursive) types,
 this assumption breaks: the sub-types include the type itself.
 
@@ -800,7 +800,7 @@ but they refer to each other.
 
 #### Construction Protocol
 
-Looping types are constructed in three phases within `IRTypeContext`:
+Looping types are constructed in three phases within `TypeContext`:
 
 **Phase A — Reserve IDs.** Walk the cycle cluster (all reachable looping
 types not yet in the identity table). For each node, allocate an `entries_`
@@ -809,7 +809,7 @@ slot and assign an ID, but leave the entry contents uninitialized
 
 ```cpp
 // Reserve an ID without filling in the entry.
-uint32_t IRTypeContext::reserveEntry() {
+uint32_t TypeContext::reserveEntry() {
   uint32_t id = entries_.size();
   entries_.push_back(TypeEntry{});  // placeholder, kind = unset
   return id;
@@ -915,7 +915,7 @@ Union arms must be in canonical order for interning to produce unique entries.
    subsumption-reduced. This is safe because looping types come from Flow,
    which has already canonicalized its unions.
 4. **Sort**: arms are sorted by `id_`. This is a deterministic total order
-   (arbitrary but consistent within a single `IRTypeContext`).
+   (arbitrary but consistent within a single `TypeContext`).
 5. **Collapse**: if one arm remains, return it directly (no Union entry).
 
 ### Sorting and Looping Types
@@ -939,27 +939,27 @@ context parameter. The thread-local provides the context implicitly.
 ### Implementation
 
 ```cpp
-class IRTypeContext {
-  static thread_local IRTypeContext *current_;
+class TypeContext {
+  static thread_local TypeContext *current_;
 
  public:
-  static IRTypeContext &current() {
-    assert(current_ && "No IRTypeContext set on this thread");
+  static TypeContext &current() {
+    assert(current_ && "No TypeContext set on this thread");
     return *current_;
   }
 };
 
 /// RAII guard that sets the thread-local context for the duration of a scope.
-class IRTypeContextRAII {
-  IRTypeContext *prev_;
+class TypeContextRAII {
+  TypeContext *prev_;
 
  public:
-  explicit IRTypeContextRAII(IRTypeContext &ctx)
-      : prev_(IRTypeContext::current_) {
-    IRTypeContext::current_ = &ctx;
+  explicit TypeContextRAII(TypeContext &ctx)
+      : prev_(TypeContext::current_) {
+    TypeContext::current_ = &ctx;
   }
-  ~IRTypeContextRAII() {
-    IRTypeContext::current_ = prev_;
+  ~TypeContextRAII() {
+    TypeContext::current_ = prev_;
   }
 };
 ```
@@ -978,7 +978,7 @@ are covered:
 
 ```cpp
 // At Module creation:
-IRTypeContextRAII guard(module->getTypeContext());
+TypeContextRAII guard(module->getTypeContext());
 // All Type operations for the lifetime of the Module are now covered.
 ```
 
@@ -987,13 +987,13 @@ Unit tests that use `Type` algebra directly (e.g.,
 
 **TLS overhead**: on some platforms (notably older Android), `thread_local`
 access involves a function call through `__tls_get_addr`. Since every
-`canBeX()` and type operation goes through `IRTypeContext::current()`, code
+`canBeX()` and type operation goes through `TypeContext::current()`, code
 in tight loops should cache the context reference locally:
 
 ```cpp
-IRTypeContext &ctx = IRTypeContext::current();
+TypeContext &ctx = TypeContext::current();
 for (auto &inst : block) {
-  // Use ctx directly, not IRTypeContext::current() each time.
+  // Use ctx directly, not TypeContext::current() each time.
   if (ctx.canBeNumber(inst.getType())) { ... }
 }
 ```
@@ -1001,7 +1001,7 @@ for (auto &inst : block) {
 ### Phase 2: Explicit Parameter
 
 All call sites are mechanically transformed to accept an explicit
-`IRTypeContext &`:
+`TypeContext &`:
 
 ```cpp
 // Phase 1 (thread-local):
@@ -1039,7 +1039,7 @@ which looks up the pre-allocated entries for `String` and `Symbol` and creates
 (or finds) the `Union(String, Symbol)` entry.
 
 **Constraint**: instruction constructors that call `unionTy` or similar must
-execute within an `IRTypeContextRAII` scope. This is ensured by installing
+execute within an `TypeContextRAII` scope. This is ensured by installing
 the guard at Module creation time (see §9), which covers all subsequent
 instruction creation.
 
@@ -1047,7 +1047,7 @@ instruction creation.
 
 The TypeInference pass (~76 calls to `unionTy`, ~6 to `subtractTy`, ~30 to
 `isSubsetOf`) works unchanged via the thread-local context. The
-`IRTypeContextRAII` guard is installed at the top of `runOnModule`.
+`TypeContextRAII` guard is installed at the top of `runOnModule`.
 
 ### LiteralIRType
 
@@ -1066,7 +1066,7 @@ void Profile(llvh::FoldingSetNodeID &ID) const {
 The lowering from Flow types to IR types occurs in the Flow checker / IR
 generator:
 
-1. The `Module`'s `IRTypeContext` is created.
+1. The `Module`'s `TypeContext` is created.
 2. The interning algorithm (§7) processes all reachable Flow types.
 3. The resulting IR `Type` values are attached to instructions and values.
 
@@ -1100,10 +1100,10 @@ generator:
 3. **No nested unions**: Union arms are never themselves unions (flattened).
 
 4. **Well-known IDs**: IDs below `kFirstDynamicId` are reserved and have
-   fixed meanings across all `IRTypeContext` instances.
+   fixed meanings across all `TypeContext` instances.
 
 5. **Context affinity**: a `Type` value is only meaningful within the
-   `IRTypeContext` that created it. Mixing types from different contexts is
+   `TypeContext` that created it. Mixing types from different contexts is
    undefined behavior. Since `Type` is a bare `uint32_t` with no room for a
    context pointer, this invariant cannot be enforced inside `Type` itself.
    It is enforced indirectly: the type table bounds-check
@@ -1161,11 +1161,11 @@ performance tuning comes after profiling on real workloads.
 
 **Files modified:**
 - `include/hermes/IR/IR.h`: `Type` class rewritten (pure index).
-- `include/hermes/IR/IR.h`: `Module` class (add `IRTypeContext` member).
-- New: `include/hermes/IR/IRTypeContext.h`.
-- New: `lib/IR/IRTypeContext.cpp`.
-- `Module` constructor: install `IRTypeContextRAII` guard.
-- Unit tests using `Type` algebra: install `IRTypeContextRAII` guard.
+- `include/hermes/IR/IR.h`: `Module` class (add `TypeContext` member).
+- New: `include/hermes/IR/TypeContext.h`.
+- New: `lib/IR/TypeContext.cpp`.
+- `Module` constructor: install `TypeContextRAII` guard.
+- Unit tests using `Type` algebra: install `TypeContextRAII` guard.
 
 **Semantic changes:** None. All types are well-known primitives. The context
 produces identical results to the old bitmask operations. The change is
@@ -1183,5 +1183,5 @@ bitmask arithmetic, but the results are identical.
 ### Phases 3–8: Incremental type enrichment
 
 Each phase adds new `TypeKind` values, extends the type operations, and
-adds new query/construction methods to `IRTypeContext`. Existing methods
+adds new query/construction methods to `TypeContext`. Existing methods
 continue to work.

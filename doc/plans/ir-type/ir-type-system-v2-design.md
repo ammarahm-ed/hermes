@@ -313,7 +313,7 @@ ClassInstance payload:
 
 There is no separate class registry or class ID namespace. The type table
 entry's own `id_` serves as the class identity. The `createClassInstance()`
-method on `IRTypeContext` creates a new (non-interned) entry for each
+method on `TypeContext` creates a new (non-interned) entry for each
 class declaration.
 
 **Subtyping**: `ClassInstance(A) <: ClassInstance(B)` iff B is an ancestor
@@ -417,7 +417,7 @@ performance requirements are clearer.
 A `Type` is a small, copyable value (ideally 4 bytes). It acts as an opaque
 handle into a type table owned by the Module.
 
-### IRTypeContext
+### TypeContext
 
 Owned by each `Module`. Stores all interned types and the class inheritance
 information needed for subtype checks. Type operations that involve refined
@@ -576,12 +576,12 @@ duplicating complex cycle-handling logic.
 
 ### Phase 1: Type representation and context (API-compatible)
 
-- Define `Type` as a handle into `IRTypeContext`.
-- Implement `IRTypeContext` with interning. Owned by `Module`.
-- Use a **thread-local pointer** to maintain the "current" `IRTypeContext`.
-  An RAII guard (`IRTypeContextRAII`) sets the thread-local at pass entry
+- Define `Type` as a handle into `TypeContext`.
+- Implement `TypeContext` with interning. Owned by `Module`.
+- Use a **thread-local pointer** to maintain the "current" `TypeContext`.
+  An RAII guard (`TypeContextRAII`) sets the thread-local at pass entry
   points. All type operations (`unionTy`, `intersectTy`, `isSubsetOf`, etc.)
-  use `IRTypeContext::current()` when they need the table.
+  use `TypeContext::current()` when they need the table.
 - Register all existing primitive types as interned entries.
 - All existing type operations delegate to the new implementation but produce
   identical results. **No call-site changes required.**
@@ -592,9 +592,9 @@ duplicating complex cycle-handling logic.
 ### Phase 2: Explicit context parameter (mechanical)
 
 - Mechanically transform all call sites of `unionTy`, `intersectTy`,
-  `subtractTy`, `isSubsetOf`, etc. to accept an explicit `IRTypeContext &`
+  `subtractTy`, `isSubsetOf`, etc. to accept an explicit `TypeContext &`
   parameter.
-- Remove the thread-local from `IRTypeContext`.
+- Remove the thread-local from `TypeContext`.
 - This is a large but purely mechanical change with no semantic effect.
   The thread-local from Phase 1 provides a working system to migrate from
   incrementally.
