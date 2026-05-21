@@ -10,6 +10,7 @@
 
 [options]
 name=hermes-parser
+experimental.restart_on_flowconfig_change=false
 emoji=true
 file_watcher=watchman
 lazy_mode=true
