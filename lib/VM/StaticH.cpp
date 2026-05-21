@@ -1052,8 +1052,10 @@ static inline void putByIndex_RJS(
         GCScopeMarkerRAII marker{runtime};
         auto result =
             JSObject::setOwnIndexed(objHandle, runtime, index, valueHandle);
-        if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION))
+        if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION)) {
+          marker.flush();
           _sh_throw_current(shr);
+        }
         if (LLVM_LIKELY(*result))
           return;
         // Read-only property, fall through to generic path.
@@ -1069,8 +1071,10 @@ static inline void putByIndex_RJS(
           runtime.makeHandle(HermesValue::encodeTrustedNumberValue(index)),
           valueHandle,
           defaultPropOpFlags);
-      if (LLVM_UNLIKELY(putRes == ExecutionStatus::EXCEPTION))
+      if (LLVM_UNLIKELY(putRes == ExecutionStatus::EXCEPTION)) {
+        marker.flush();
         _sh_throw_current(shr);
+      }
     }
     return;
   }
@@ -1084,8 +1088,10 @@ static inline void putByIndex_RJS(
         runtime.makeHandle(HermesValue::encodeTrustedNumberValue(index)),
         valueHandle,
         strictMode);
-    if (LLVM_UNLIKELY(retStatus == ExecutionStatus::EXCEPTION))
+    if (LLVM_UNLIKELY(retStatus == ExecutionStatus::EXCEPTION)) {
+      marker.flush();
       _sh_throw_current(shr);
+    }
   }
 }
 
