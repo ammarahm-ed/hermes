@@ -113,22 +113,28 @@ cl::opt<std::string> TestSuiteDir(
 /// directory. Walks up from each test path.
 std::string findTest262Dir() {
   if (!TestSuiteDir.empty())
-    return TestSuiteDir;
+    return llvh::sys::path::convert_to_slash(TestSuiteDir);
 
   for (const auto &p : TestPaths) {
+    // Normalize once up front so the "test262/" substring search and any
+    // returned path are platform-agnostic. Subsequent llvh::sys::path::append
+    // calls may use the OS-native separator, so we re-normalize before
+    // returning.
+    std::string normP = llvh::sys::path::convert_to_slash(p);
+
     // Check if the path itself contains test262.
-    llvh::StringRef pathRef(p);
+    llvh::StringRef pathRef(normP);
     auto pos = pathRef.rfind("test262/");
     if (pos != llvh::StringRef::npos) {
       std::string candidate = pathRef.substr(0, pos + 8).str(); // "test262/"
       llvh::SmallString<256> harnessCheck(candidate);
       llvh::sys::path::append(harnessCheck, "harness");
       if (llvh::sys::fs::is_directory(harnessCheck))
-        return candidate;
+        return llvh::sys::path::convert_to_slash(candidate);
     }
 
     // Walk up looking for a test262 directory with harness/.
-    llvh::SmallString<256> dir(p);
+    llvh::SmallString<256> dir(normP);
     for (int i = 0; i < 10; ++i) {
       llvh::sys::path::append(dir, "..");
       llvh::SmallString<256> candidate(dir);
@@ -138,7 +144,7 @@ std::string findTest262Dir() {
         llvh::SmallString<256> staCheck(candidate);
         llvh::sys::path::append(staCheck, "sta.js");
         if (llvh::sys::fs::exists(staCheck))
-          return std::string(dir.str());
+          return llvh::sys::path::convert_to_slash(dir.str());
       }
     }
   }

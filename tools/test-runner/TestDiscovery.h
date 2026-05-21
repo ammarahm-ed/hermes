@@ -114,6 +114,9 @@ inline TestEntry makeTestEntry(
 }
 
 /// Recursively collect .js test files from a directory.
+/// Paths are normalized to POSIX form (forward slashes) before storage so that
+/// downstream code — skiplist matching, suite detection, error messages —
+/// never has to worry about platform-specific separators.
 inline void collectTestFiles(
     const llvh::Twine &dirPath,
     std::vector<TestEntry> &out) {
@@ -126,7 +129,9 @@ inline void collectTestFiles(
                    << "\n";
       break;
     }
-    llvh::StringRef entry = it->path();
+    // The iterator hands back paths in the OS-native form. Normalize to POSIX
+    // before anything else inspects them.
+    std::string entry = llvh::sys::path::convert_to_slash(it->path());
     if (!isTestFile(entry))
       continue;
 
@@ -155,7 +160,9 @@ inline std::vector<TestEntry> discoverTests(
     if (llvh::sys::fs::is_directory(status)) {
       collectTestFiles(p, entries);
     } else if (llvh::sys::fs::is_regular_file(status)) {
-      llvh::StringRef path(p);
+      // Normalize CLI-supplied paths the same way we normalize directory-walked
+      // paths, so suite detection and skiplist matching see uniform separators.
+      std::string path = llvh::sys::path::convert_to_slash(p);
       if (!isTestFile(path))
         continue;
 

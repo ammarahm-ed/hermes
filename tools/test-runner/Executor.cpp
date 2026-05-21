@@ -283,8 +283,14 @@ TestResult executeCompiledTest(
     const ExecConfig &config,
     bool disableHandleSan,
     Clock::time_point startTime) {
-  bool expectRuntimeError =
-      !negative.phase.empty() && negative.phase == "runtime";
+  // Mirror Python's run() decision logic exactly:
+  //   lazy: expect error iff negative.phase is non-empty (any phase)
+  //   eager: expect error iff negative.phase == "runtime"
+  // Parse/resolution errors in eager mode are resolved against the compile
+  // step in executeTestVariant before we get here; in lazy mode they collapse
+  // into "any error counts" because lazy compilation defers parsing.
+  bool expectError =
+      config.lazy ? !negative.phase.empty() : negative.phase == "runtime";
 
   auto makeResult = [&](ResultCode code, const std::string &msg) {
     auto endTime = Clock::now();
@@ -374,19 +380,18 @@ TestResult executeCompiledTest(
   }
 
   // Evaluate result based on expectations.
-  if (expectRuntimeError) {
+  if (expectError) {
     if (!threwException) {
       return makeResult(
-          ResultCode::ExecuteFailed,
-          "FAIL: Expected runtime " + negative.errorType + " but test passed");
+          ResultCode::ExecuteFailed, "FAIL: Expected error but test passed");
     }
-    if (!negative.errorType.empty() &&
+    if (!config.lazy && !negative.errorType.empty() &&
         exceptionMsg.find(negative.errorType) == std::string::npos) {
       return makeResult(
           ResultCode::ExecuteFailed,
           "FAIL: Expected " + negative.errorType + " but got: " + exceptionMsg);
     }
-    return makeResult(ResultCode::Passed, "PASS (expected runtime error)");
+    return makeResult(ResultCode::Passed, "PASS (expected error)");
   }
 
   if (threwException) {
@@ -465,11 +470,6 @@ void processTestEntry(
   bool runNonStrict = !record.isOnlyStrict() && !record.isRaw();
   bool runRaw = record.isRaw();
 
-  if (record.isModule()) {
-    runStrict = false;
-    runNonStrict = true;
-    runRaw = false;
-  }
   // At least one variant must be run.
   assert((runNonStrict || runStrict || runRaw) && "No test variant to run");
   std::vector<std::string> includes = buildTestIncludes(entry, record);
@@ -609,7 +609,13 @@ std::unique_ptr<hbc::BCProvider> compileSource(
     bool optimize,
     bool lazy,
     std::string &errorMsg) {
-  auto llvmBuf = llvh::MemoryBuffer::getMemBufferCopy(source, sourceURL);
+  // Non-owning view over the caller's source string. Safe because the source
+  // outlives this BCProvider: the caller's std::string lives until runVariant
+  // returns, while the BCProvider is constructed here, handed to runBytecode
+  // via executeCompiledTest, and destroyed with the per-test runtime before
+  // executeCompiledTest returns. std::string::data() is null-terminated
+  // (C++11), satisfying getMemBuffer's RequiresNullTerminator default.
+  auto llvmBuf = llvh::MemoryBuffer::getMemBuffer(source, sourceURL);
   auto buf = std::make_unique<OwnedMemoryBuffer>(std::move(llvmBuf));
 
   hbc::CompileFlags flags;
@@ -682,9 +688,8 @@ TestResult executeTestVariant(
     return r;
   };
 
-  bool hasNegative = !negative.phase.empty();
-  bool expectCompileError = hasNegative && negative.phase == "parse";
-  bool expectResolutionError = hasNegative && negative.phase == "resolution";
+  bool expectCompileError = negative.phase == "parse";
+  bool expectResolutionError = negative.phase == "resolution";
 
   // Compile the source.
   // Note: enableJIT/forceJIT are runtime-only settings and don't affect
@@ -701,7 +706,12 @@ TestResult executeTestVariant(
         ResultCode::CompileFailed, "FAIL: Compilation failed: " + compileError);
   }
 
-  if (expectCompileError || expectResolutionError) {
+  // Eager mode: a parse/resolution-expected test that compiled cleanly is a
+  // hard failure. Skip this check under --lazy because lazy compilation defers
+  // function-body parsing, so a successful create() does not prove the source
+  // is well-formed. Mirror Python's lazy path, which has no compile-side check
+  // at all — defer the phase decision to executeCompiledTest.
+  if (!config.lazy && (expectCompileError || expectResolutionError)) {
     return makeResult(
         ResultCode::ExecuteFailed,
         "FAIL: Expected compile error but compilation succeeded");

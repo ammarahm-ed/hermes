@@ -12,11 +12,12 @@
 #include "hermes/Support/SourceErrorManager.h"
 
 #include "llvh/ADT/StringRef.h"
+#include "llvh/ADT/StringSet.h"
 #include "llvh/Support/MemoryBuffer.h"
+#include "llvh/Support/Path.h"
 #include "llvh/Support/raw_ostream.h"
 
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace hermes {
@@ -80,15 +81,17 @@ class Skiplist {
   std::vector<SkipCategory> categories_;
   /// Paths where handle sanitizer should be disabled (not skipped).
   std::vector<std::string> handlesanPaths_;
-  /// Features that cause a skip when present in test metadata.
-  std::unordered_set<std::string> unsupportedFeatures_;
+  /// Features that cause a skip when present in test metadata. Using
+  /// llvh::StringSet so lookups via StringRef do not need to allocate a
+  /// std::string key.
+  llvh::StringSet<> unsupportedFeatures_;
   /// Features that cause a permanent skip.
-  std::unordered_set<std::string> permanentUnsupportedFeatures_;
+  llvh::StringSet<> permanentUnsupportedFeatures_;
   /// Features that the built Hermes binary supports, even if they appear in
   /// unsupported_features. Matching the Python runner, which queries
   /// `hermes --version` to discover supported features and excludes them
   /// from feature-based skipping.
-  std::unordered_set<std::string> supportedFeatures_;
+  llvh::StringSet<> supportedFeatures_;
 
   /// Extract all string values from a JSON array of skip entries into a
   /// container. Each entry can be either a bare string or an object with a
@@ -116,17 +119,25 @@ class Skiplist {
   }
 
   /// Extract all path strings from a JSON array into a vector.
+  /// Paths are normalized to POSIX (forward slashes) so substring matches
+  /// against POSIX-normalized test paths work uniformly on all platforms.
+  /// On Unix `convert_to_slash` is a no-op, so the JSON's existing `/`
+  /// entries pass through unchanged.
   static void flattenEntries(
       parser::JSONArray *arr,
       std::vector<std::string> &out) {
-    flattenStrings(arr, [&out](std::string s) { out.push_back(std::move(s)); });
+    flattenStrings(arr, [&out](std::string s) {
+      out.push_back(llvh::sys::path::convert_to_slash(s));
+    });
   }
 
-  /// Extract feature names from a JSON array into a set.
-  static void flattenFeatures(
-      parser::JSONArray *arr,
-      std::unordered_set<std::string> &out) {
-    flattenStrings(arr, [&out](std::string s) { out.insert(std::move(s)); });
+  /// Extract feature names from a JSON array into a set. Empty strings are
+  /// skipped because llvh::StringSet asserts on empty keys.
+  static void flattenFeatures(parser::JSONArray *arr, llvh::StringSet<> &out) {
+    flattenStrings(arr, [&out](std::string s) {
+      if (!s.empty())
+        out.insert(s);
+    });
   }
 
   /// Get a JSON array from the root object by key, or nullptr.
@@ -282,13 +293,12 @@ class Skiplist {
   /// Features that the built binary actually supports (based on compile-time
   /// config) are not skipped, matching the Python runner's behavior.
   SkipReason shouldSkipFeature(llvh::StringRef feature) const {
-    std::string feat = feature.str();
     // If the binary supports this feature, don't skip regardless of skiplist.
-    if (supportedFeatures_.count(feat))
+    if (supportedFeatures_.count(feature))
       return SkipReason::NotSkipped;
-    if (permanentUnsupportedFeatures_.count(feat))
+    if (permanentUnsupportedFeatures_.count(feature))
       return SkipReason::PermanentUnsupportedFeature;
-    if (unsupportedFeatures_.count(feat))
+    if (unsupportedFeatures_.count(feature))
       return SkipReason::UnsupportedFeature;
     return SkipReason::NotSkipped;
   }

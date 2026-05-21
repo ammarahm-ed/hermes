@@ -8,6 +8,7 @@
 #ifndef HERMES_TOOLS_TESTRUNNER_HARNESSCACHE_H
 #define HERMES_TOOLS_TESTRUNNER_HARNESSCACHE_H
 
+#include "llvh/ADT/StringMap.h"
 #include "llvh/ADT/StringRef.h"
 #include "llvh/Support/FileSystem.h"
 #include "llvh/Support/MemoryBuffer.h"
@@ -15,7 +16,6 @@
 #include "llvh/Support/raw_ostream.h"
 
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace hermes {
@@ -27,8 +27,9 @@ namespace testrunner {
 /// so that test source assembly never touches the filesystem again.
 class HarnessCache {
   /// All .js files from test262/harness/, keyed by filename
-  /// (e.g. "sta.js", "assert.js", "sm/shell.js").
-  std::unordered_map<std::string, std::string> files_;
+  /// (e.g. "sta.js", "assert.js", "sm/shell.js"). Using llvh::StringMap so
+  /// lookups via StringRef do not need to allocate a std::string key.
+  llvh::StringMap<std::string> files_;
 
  public:
   HarnessCache() = default;
@@ -64,7 +65,7 @@ class HarnessCache {
           rel = rel.drop_front(1);
       }
 
-      files_[rel.str()] = (*fileBuf)->getBuffer().str();
+      files_[rel] = (*fileBuf)->getBuffer().str();
     }
 
     return true;
@@ -72,7 +73,7 @@ class HarnessCache {
 
   /// Look up a harness file by name. Returns nullptr if not found.
   const std::string *get(llvh::StringRef name) const {
-    auto it = files_.find(name.str());
+    auto it = files_.find(name);
     if (it == files_.end())
       return nullptr;
     return &it->second;
