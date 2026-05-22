@@ -326,6 +326,9 @@ Runtime::Runtime(
           crashMgr_->registerCallback([this](int fd) { crashCallback(fd); })),
       codeCoverageProfiler_(std::make_unique<CodeCoverageProfiler>(*this)),
       gcEventCallback_(runtimeConfig.getGCConfig().getCallback()) {
+  hermes_assert(
+      runtimeConfig.getMicrotaskQueue(),
+      "MicrotaskQueue must be enabled. Setting it to false is no longer supported.");
   assert(
       (void *)this == (void *)(PointerBase *)this &&
       "cast to PointerBase should be no-op");

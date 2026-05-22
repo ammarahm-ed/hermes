@@ -37,7 +37,6 @@ struct SynthTraceTest : public ::testing::Test {
         ::hermes::vm::RuntimeConfig::Builder()
             .withSynthTraceMode(
                 ::hermes::vm::SynthTraceMode::TracingAndReplaying)
-            .withMicrotaskQueue(true)
             .build();
     auto *hermesRoot = jsi::castInterface<IHermesRootAPI>(makeHermesRootAPI());
     // We pass "forReplay = true" below, to prevent the TracingHermesRuntime
@@ -1567,7 +1566,6 @@ struct SynthTraceRuntimeTest : public ::testing::Test {
             ::hermes::vm::RuntimeConfig::Builder()
                 .withSynthTraceMode(
                     ::hermes::vm::SynthTraceMode::TracingAndReplaying)
-                .withMicrotaskQueue(true)
                 .build()) {
     auto *hermesRoot = jsi::castInterface<IHermesRootAPI>(makeHermesRootAPI());
     traceRt = makeTracingHermesRuntime(
