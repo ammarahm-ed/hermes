@@ -2193,6 +2193,33 @@ Value *ESTreeIRGen::genTypedObjectExpr(
       storedValues{};
   llvh::SmallVector<char, 32> stringStorage{};
   for (auto &node : Expr->_properties) {
+    if (auto *spread = llvh::dyn_cast<ESTree::SpreadElementNode>(&node)) {
+      // FlowChecker degrades the enclosing object literal to 'any' when
+      // a spread argument has type 'any'. This function is not
+      // run in that case, so the spread type must be ExactObjectType if we're
+      // here.
+      auto *spreadInfo = flowContext_.getNodeTypeOrAny(spread->_argument)->info;
+      assert(
+          llvh::isa<flow::ExactObjectType>(spreadInfo) &&
+          "spread source in typed object literal must be ExactObjectType");
+      auto *srcType = llvh::cast<flow::ExactObjectType>(spreadInfo);
+      Value *src = genExpression(spread->_argument);
+      for (size_t i = 0, e = srcType->getFields().size(); i < e; ++i) {
+        const auto &srcField = srcType->getFields()[i];
+        Value *loaded = Builder.createPrLoadInst(
+            src,
+            i,
+            Builder.getLiteralString(srcField.name),
+            flowTypeToIRType(srcField.type));
+        auto optIndex = type->findField(srcField.name);
+        assert(
+            optIndex.hasValue() &&
+            "Spread field must exist in destination type");
+        storedValues[srcField.name] = {loaded, *optIndex};
+      }
+      continue;
+    }
+
     auto *prop = llvh::cast<ESTree::PropertyNode>(&node);
     assert(
         !prop->_computed && !prop->_method && prop->_kind == kw_.identInit &&
