@@ -668,7 +668,6 @@ extern "C" SHLegacyValue _sh_ljs_create_class(
     SHLegacyValue *homeObjectOut,
     SHLegacyValue *superClass) {
   Runtime &runtime = getRuntime(shr);
-  GCScopeMarkerRAII marker{runtime};
   auto classRes = createClass(
       runtime,
       superClass ? Handle{toPHV(superClass)} : Runtime::getEmptyValue(),
