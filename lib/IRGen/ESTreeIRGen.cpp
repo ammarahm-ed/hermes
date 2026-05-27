@@ -673,26 +673,18 @@ void ESTreeIRGen::_emitIteratorCloseImpl(
   auto *haveReturn = Builder.createBasicBlock(Builder.getFunction());
   auto *noReturn = Builder.createBasicBlock(Builder.getFunction());
 
-  auto *returnMethod = genBuiltinCall(
-      BuiltinMethod::HermesBuiltin_getMethod,
-      {iteratorRecord.iterator, Builder.getLiteralString("return")});
-  auto *returnIsUndefined = Builder.createBinaryOperatorInst(
-      returnMethod,
-      Builder.getLiteralUndefined(),
-      ValueKind::BinaryStrictlyEqualInstKind);
-  Builder.createCondBranchInst(returnIsUndefined, noReturn, haveReturn);
-
-  Builder.setInsertionBlock(haveReturn);
   if (ignoreInnerException) {
+    // Per spec §7.4.11 IteratorClose step 5 / §7.4.13 AsyncIteratorClose
+    // step 5 ("If completion is a throw completion, return ? completion"):
+    // if the original completion is already a throw, any error from
+    // GetMethod or from calling return() must be suppressed in favor of the
+    // original. Wrap the entire getMethod + call sequence in the try/catch
+    // so that a throw from the return getter is also caught and discarded.
     emitTryCatchScaffolding(
         noReturn,
         // emitBody.
-        [this,
-         returnMethod,
-         &iteratorRecord,
-         isAsyncIterator,
-         astNode,
-         needsOverloadYield](BasicBlock *catchBlock) {
+        [this, &iteratorRecord, isAsyncIterator, astNode, needsOverloadYield](
+            BasicBlock *catchBlock) {
           SurroundingTry thisTry{
               curFunction(),
               astNode,
@@ -702,15 +694,32 @@ void ESTreeIRGen::_emitIteratorCloseImpl(
                  ControlFlowChange cfc,
                  BasicBlock *continueTarget) {}};
 
+          auto *haveReturn = Builder.createBasicBlock(Builder.getFunction());
+          auto *noReturn = Builder.createBasicBlock(Builder.getFunction());
+
+          auto *returnMethod = genBuiltinCall(
+              BuiltinMethod::HermesBuiltin_getMethod,
+              {iteratorRecord.iterator, Builder.getLiteralString("return")});
+          auto *returnIsUndefined = Builder.createBinaryOperatorInst(
+              returnMethod,
+              Builder.getLiteralUndefined(),
+              ValueKind::BinaryStrictlyEqualInstKind);
+          Builder.createCondBranchInst(returnIsUndefined, noReturn, haveReturn);
+
+          Builder.setInsertionBlock(haveReturn);
           auto *callResult = Builder.createCallInst(
               returnMethod,
               /* newTarget */ Builder.getLiteralUndefined(),
               iteratorRecord.iterator,
               {});
-          if (isAsyncIterator)
+          if (isAsyncIterator) {
             genYieldOrAwaitExpr(
                 needsOverloadYield ? emitAwaitAsyncGenerator(callResult)
                                    : callResult);
+          }
+          Builder.createBranchInst(noReturn);
+
+          Builder.setInsertionBlock(noReturn);
         },
         // emitNormalCleanup.
         []() {},
@@ -721,6 +730,16 @@ void ESTreeIRGen::_emitIteratorCloseImpl(
           Builder.createBranchInst(nextBlock);
         });
   } else {
+    auto *returnMethod = genBuiltinCall(
+        BuiltinMethod::HermesBuiltin_getMethod,
+        {iteratorRecord.iterator, Builder.getLiteralString("return")});
+    auto *returnIsUndefined = Builder.createBinaryOperatorInst(
+        returnMethod,
+        Builder.getLiteralUndefined(),
+        ValueKind::BinaryStrictlyEqualInstKind);
+    Builder.createCondBranchInst(returnIsUndefined, noReturn, haveReturn);
+
+    Builder.setInsertionBlock(haveReturn);
     auto *callResult = Builder.createCallInst(
         returnMethod,
         /* newTarget */ Builder.getLiteralUndefined(),
