@@ -317,10 +317,7 @@
         "test262/test/language/statements/async-function/eval-var-scope-syntax-err.js",
         "test262/test/language/expressions/async-arrow-function/eval-var-scope-syntax-err.js",
         "test262/test/built-ins/Promise/all/S25.4.4.1_A7.2_T1.js",
-        "test262/test/built-ins/Promise/all/S25.4.4.1_A8.1_T1.js",
-        "test262/test/language/expressions/async-generator/yield-star-next-get-abrupt.js",
-        "test262/test/language/expressions/class/elements/async-gen-private-method-static/yield-star-next-get-abrupt.js",
-        "test262/test/language/statements/class/elements/async-gen-private-method-static/yield-star-sync-next.js"
+        "test262/test/built-ins/Promise/all/S25.4.4.1_A8.1_T1.js"
       ],
       "comment": "Async test failures newly detected after fixing the test262 runner to check async results regardless of exit code (github.com/facebook/hermes/issues/1982)."
     },
