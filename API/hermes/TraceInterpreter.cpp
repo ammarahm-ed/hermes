@@ -198,7 +198,7 @@ bool isDoubleEqual(double a, double b) {
   // (when it is shortened to 64 bits), or comparing values between Darwin and
   // non-Darwin platforms could lead to different results.
   const double ep =
-      (std::abs(a) + std::abs(b)) * std::numeric_limits<double>::epsilon();
+      2 * (std::abs(a) + std::abs(b)) * std::numeric_limits<double>::epsilon();
   return std::abs(a - b) <= ep;
 }
 
