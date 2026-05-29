@@ -21,6 +21,8 @@
 #include "ProfileGenerator.h"
 #include "SamplingProfilerSampler.h"
 
+#include "hermes/Support/OSCompat.h"
+
 #include <fcntl.h>
 #include <cassert>
 #include <chrono>
@@ -123,7 +125,7 @@ uint32_t SamplingProfiler::walkRuntimeStack(
     }
   }
   sampleStorage.tid = threadID_;
-  sampleStorage.timeStamp = std::chrono::steady_clock::now();
+  sampleStorage.timeStamp = oscompat::sampling_clock_now();
   return count;
 }
 

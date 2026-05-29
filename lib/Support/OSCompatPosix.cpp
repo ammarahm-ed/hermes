@@ -65,6 +65,7 @@
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
+#include <time.h>
 #endif
 
 #include "llvh/Config/config.h"
@@ -829,6 +830,17 @@ uint64_t cpu_cycle_counter() {
   return t.tv_sec * 1000LL * 1000LL * 1000LL + t.tv_nsec;
 #endif
 }
+
+#ifdef __APPLE__
+std::chrono::steady_clock::time_point sampling_clock_now() noexcept {
+  auto ns = static_cast<int64_t>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+  return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
+}
+#else
+std::chrono::steady_clock::time_point sampling_clock_now() noexcept {
+  return std::chrono::steady_clock::now();
+}
+#endif
 
 bool set_env(const char *name, const char *value) {
   // Enforce the contract of this function that value must not be empty

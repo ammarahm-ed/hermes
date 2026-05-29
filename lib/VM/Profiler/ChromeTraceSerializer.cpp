@@ -9,6 +9,7 @@
 
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
 
+#include "hermes/Support/OSCompat.h"
 #include "hermes/VM/JSNativeFunctions.h"
 
 #include <unordered_map>
@@ -91,7 +92,7 @@ ChromeTraceSerializer::ChromeTraceSerializer(
     ChromeTraceFormat &&chromeTrace)
     : samplingProfiler_(sp), trace_(std::move(chromeTrace)) {
   firstEventTimeStamp_ = trace_.getSampledEvents().empty()
-      ? std::chrono::steady_clock::now()
+      ? oscompat::sampling_clock_now()
       : trace_.getSampledEvents()[0].getTimeStamp();
 }
 
