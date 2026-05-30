@@ -1408,7 +1408,11 @@ void ESTreeIRGen::emitDestructuringTypedObject(
         Value *loaded =
             Builder.createPrLoadInst(source, srcIdx, nameLit, irType);
         Builder.createPrStoreInst(
-            loaded, restObj, destIdx, nameLit, irType.isNonPtr());
+            loaded,
+            restObj,
+            destIdx,
+            nameLit,
+            getTypeContext().isNonPtr(irType));
       }
 
       LReference lref = createLRef(rest->_argument, declInit);
