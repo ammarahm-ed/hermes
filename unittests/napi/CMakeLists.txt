@@ -63,6 +63,22 @@ if(APPLE)
   )
 endif()
 
+# Addon for end-to-end testing of napi_create_async_work and
+# napi_create_threadsafe_function through ConsoleHost's event loop.
+add_library(napi_async_work_addon SHARED napi_async_work_addon.c)
+target_include_directories(napi_async_work_addon PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+set_target_properties(napi_async_work_addon PROPERTIES
+  PREFIX ""
+  SUFFIX ".node"
+)
+if(APPLE)
+  target_link_options(napi_async_work_addon PRIVATE
+    -undefined dynamic_lookup
+  )
+endif()
+
 add_hermes_unittest(NapiTests
   NapiAddFinalizerTest.cpp
   NapiArrayBufferTest.cpp

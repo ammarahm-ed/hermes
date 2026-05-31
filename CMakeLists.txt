@@ -844,6 +844,7 @@ if(HERMES_ENABLE_TEST_SUITE)
       napi_test_addon
       napi_ref_addon
       napi_text_encoder_addon
+      napi_async_work_addon
     )
   endif()
 

@@ -26,6 +26,7 @@
 #include "hermes/VM/instrumentation/PerfEvents.h"
 #include "hermes/hermes.h"
 #ifdef HERMES_ENABLE_NAPI
+#include "hermes/Support/SerialExecutor.h"
 #include "hermes_napi_impl.h"
 #endif
 
@@ -202,6 +203,24 @@ struct NapiEnvDeleter {
   }
 };
 
+/// Host integration for envs created by loadNativeModule. Set by
+/// executeHBCBytecodeImpl via CurrentNapiHostScope for the duration of
+/// script execution; nullptr otherwise (in which case async-work and
+/// tsfn APIs return napi_generic_failure).
+static hermes_napi_host *currentNapiHost = nullptr;
+
+struct CurrentNapiHostScope {
+  explicit CurrentNapiHostScope(hermes_napi_host *host) {
+    assert(currentNapiHost == nullptr && "nested CurrentNapiHostScope");
+    currentNapiHost = host;
+  }
+  ~CurrentNapiHostScope() {
+    currentNapiHost = nullptr;
+  }
+  CurrentNapiHostScope(const CurrentNapiHostScope &) = delete;
+  CurrentNapiHostScope &operator=(const CurrentNapiHostScope &) = delete;
+};
+
 /// Load a NAPI native module from a shared library.
 /// Usage: var exports = loadNativeModule("/path/to/addon.node");
 static vm::CallResult<vm::HermesValue> loadNativeModule(
@@ -225,7 +244,13 @@ static vm::CallResult<vm::HermesValue> loadNativeModule(
   // Create a napi_env for loading the module. The env must outlive the
   // loaded module because NativeFunctions hold pointers to
   // CallbackBundles owned by the env.
-  napi_env env = hermes_napi_create_env(&runtime);
+  //
+  // The host pointer (currentNapiHost) is set by executeHBCBytecodeImpl
+  // for the duration of script execution and provides the worker thread
+  // + event-loop integration needed by napi_create_async_work and
+  // threadsafe-function APIs. When null (no script context), async-work
+  // and tsfn APIs return napi_generic_failure.
+  napi_env env = hermes_napi_create_env(&runtime, currentNapiHost);
 
   // Open a handle scope for the module init call.
   napi_handle_scope scope;
@@ -734,10 +759,16 @@ auto maybeCatchException(const F &f) -> decltype(f()) {
 }
 
 #ifdef JSI_UNSTABLE
-// Simple EventLoopControl that just adds the tasks to a queue when
-// `scheduleTask` is called and tracks the number of sources. When the queue
-// is empty, users can also wait for new tasks to be added.
+// Simple event-loop queue: tasks scheduled via `scheduleTask` are drained
+// by `drainTasks` on the JS thread. `registerTaskQueueSource` /
+// `unregisterTaskQueueSource` track external sources (workers, async work)
+// that may post tasks; `drainTasks` does not exit until the queue, the
+// source set, and the anonymous source counter are all empty. All
+// methods are thread-safe.
 class EventLoopControl final : public facebook::hermes::IEventLoopControl {
+ public:
+  ~EventLoopControl() = default;
+
   void scheduleTask(const std::function<void()> &callback) override {
     std::lock_guard<std::mutex> lock(mutex_);
     tasks_.push(callback);
@@ -754,13 +785,29 @@ class EventLoopControl final : public facebook::hermes::IEventLoopControl {
   void unregisterTaskQueueSource(uint64_t sourceId) override {
     std::lock_guard<std::mutex> lock(mutex_);
     sources_.erase(sourceId);
-    if (sources_.empty()) {
+    if (sources_.empty() && anonSources_ == 0) {
       cv_.notify_all();
     }
   }
 
- public:
-  ~EventLoopControl() = default;
+  /// Add an anonymous (unidentified) loop reference. Used by clients
+  /// that don't care about a returned id — they just want to hold the
+  /// loop alive. Each call must be paired with a matching
+  /// removeAnonSource. Thread-safe.
+  void addAnonSource() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++anonSources_;
+  }
+
+  void removeAnonSource() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(anonSources_ > 0 && "anon source underflow");
+    --anonSources_;
+    if (sources_.empty() && anonSources_ == 0) {
+      cv_.notify_all();
+    }
+  }
+
   /// Drain all tasks from the queue, blocking until there are no more tasks
   /// and no more active sources that could schedule new tasks.
   void drainTasks() {
@@ -775,10 +822,10 @@ class EventLoopControl final : public facebook::hermes::IEventLoopControl {
         // also try to queue more tasks, causing a deadlock.
         task();
         lock.lock();
-      } else if (!sources_.empty()) {
+      } else if (!sources_.empty() || anonSources_ > 0) {
         // No tasks to run, but there are still active sources that may
-        // schedule tasks. Sleep until woken by `scheduleTask` or
-        // `decrementTaskQueueSource`
+        // schedule tasks. Sleep until woken by `scheduleTask`,
+        // `unregisterTaskQueueSource`, or `removeAnonSource`.
         cv_.wait(lock);
       } else {
         // No tasks and no sources at this point, exit the event loop.
@@ -788,18 +835,106 @@ class EventLoopControl final : public facebook::hermes::IEventLoopControl {
   }
 
  private:
-  // Callbacks are added to the queue from the Worker thread and removed from
-  // the main thread. Guard with a mutex.
+  // Callbacks may be added from any thread and removed on the JS thread.
   std::mutex mutex_{};
-  // Used to wake up the event-loop if it is waiting for a new task or if all
-  // task sources have disappeared.
+  // Used to wake up the event loop if it is waiting for a new task or if
+  // all task sources have disappeared.
   std::condition_variable cv_;
-  // All schedules tasks.
+  // All scheduled tasks.
   std::queue<std::function<void()>> tasks_{};
-  // Counter of total number of sources. Incremented when register is called.
+  // Counter of total number of sources ever registered (monotonic).
   uint64_t sourceCount_{0};
-  // The set of active sources
+  // The set of active sources (from the id-based register API).
   llvh::DenseSet<uint64_t> sources_{};
+  // Count of active anonymous sources (from the addAnonSource API).
+  int anonSources_{0};
+};
+#endif
+
+#if defined(HERMES_ENABLE_NAPI) && defined(JSI_UNSTABLE)
+// Bridges a hermes_napi_host onto EventLoopControl plus a worker thread,
+// so NAPI async work and threadsafe-function dispatch can be wired into
+// ConsoleHost's event loop. The post_work / post_task trampolines
+// register a task queue source for the duration of each in-flight item,
+// so `EventLoopControl::drainTasks` does not return until every queued
+// item has completed.
+//
+// cancel_work always returns false (SerialExecutor exposes no per-task
+// cancel; cancelation is reported as napi_generic_failure to the addon).
+class NapiHostAdapter final {
+ public:
+  explicit NapiHostAdapter(EventLoopControl *jsLoop) : jsLoop_(jsLoop) {
+    host.data = this;
+    host.post_work = &postWorkTrampoline;
+    host.cancel_work = &cancelWorkTrampoline;
+    host.post_task = &postTaskTrampoline;
+    host.uv_loop = nullptr;
+    host.fatal_exception = nullptr;
+    host.ref_loop = &refLoopTrampoline;
+    host.unref_loop = &unrefLoopTrampoline;
+  }
+
+  // The struct passed to hermes_napi_create_env. Field destructor is
+  // trivial; lifetime of this struct is tied to the adapter.
+  hermes_napi_host host{};
+
+ private:
+  EventLoopControl *jsLoop_;
+  // Single worker thread used for napi_create_async_work `execute`
+  // callbacks. NAPI does not promise parallel execution, so one thread
+  // is semantically sufficient.
+  ::hermes::SerialExecutor worker_{};
+
+  static void postWorkTrampoline(
+      void *loop_data,
+      void *work_data,
+      void (*execute)(void *work_data),
+      void (*complete)(void *work_data, napi_status status)) {
+    auto *self = static_cast<NapiHostAdapter *>(loop_data);
+    // Keep the JS event loop alive until `complete` finishes — without
+    // this, drainTasks could exit before the worker has a chance to
+    // schedule the completion callback.
+    uint64_t srcId = self->jsLoop_->registerTaskQueueSource();
+    self->worker_.add([self, work_data, execute, complete, srcId]() {
+      execute(work_data);
+      self->jsLoop_->scheduleTask([self, work_data, complete, srcId]() {
+        complete(work_data, napi_ok);
+        self->jsLoop_->unregisterTaskQueueSource(srcId);
+      });
+    });
+  }
+
+  static bool cancelWorkTrampoline(void * /*loop_data*/, void * /*work*/) {
+    // SerialExecutor has no per-task cancel. Report failure; the NAPI
+    // layer surfaces napi_generic_failure to the addon. Acceptable per
+    // the hermes_napi_host contract (hermes_napi.h cancel_work doc).
+    return false;
+  }
+
+  static void postTaskTrampoline(
+      void *loop_data,
+      void *task_data,
+      void (*callback)(void *task_data)) {
+    auto *self = static_cast<NapiHostAdapter *>(loop_data);
+    uint64_t srcId = self->jsLoop_->registerTaskQueueSource();
+    self->jsLoop_->scheduleTask([self, task_data, callback, srcId]() {
+      callback(task_data);
+      self->jsLoop_->unregisterTaskQueueSource(srcId);
+    });
+  }
+
+  // ref_loop / unref_loop forward to EventLoopControl's anonymous
+  // source counter. Per the hermes_napi_host contract these are paired
+  // and non-nested within a single env; with multiple envs sharing this
+  // adapter, several refs may be in flight concurrently — the counter
+  // handles that naturally with no per-call state in the adapter.
+  static void refLoopTrampoline(void *loop_data) {
+    static_cast<NapiHostAdapter *>(loop_data)->jsLoop_->addAnonSource();
+  }
+
+  static void unrefLoopTrampoline(void *loop_data) {
+    static_cast<NapiHostAdapter *>(loop_data)->jsLoop_->removeAnonSource();
+  }
 };
 #endif
 
@@ -819,6 +954,17 @@ bool executeHBCBytecodeImpl(
   // Declared before hermesRuntime so it outlives the runtime. The runtime's
   // finalizerExecutor_ may call into the EventLoopControl during destruction.
   EventLoopControl eventLoopControl{};
+#endif
+
+#if defined(HERMES_ENABLE_NAPI) && defined(JSI_UNSTABLE)
+  // NAPI host adapter — must outlive any napi_env created via
+  // loadNativeModule. Declared after eventLoopControl so the adapter's
+  // worker thread is joined first (during the adapter's destructor),
+  // before eventLoopControl tears down. All loadedModuleEnvs are cleared
+  // before this function returns (see the cleanup block at the bottom),
+  // so adapter teardown does not race with env teardown.
+  NapiHostAdapter napiHostAdapter{&eventLoopControl};
+  CurrentNapiHostScope napiHostScope{&napiHostAdapter.host};
 #endif
 
   // Create HermesRuntime (JSI wrapper) - this installs JSI extensions like
@@ -959,7 +1105,8 @@ bool executeHBCBytecodeImpl(
   }
 
 #ifdef JSI_UNSTABLE
-  // Run all tasks queued in the event loop.
+  // Run all tasks queued in the event loop. Drains JSI-scheduled tasks
+  // and any pending NAPI async-work completions / tsfn dispatches.
   eventLoopControl.drainTasks();
 #endif
 
