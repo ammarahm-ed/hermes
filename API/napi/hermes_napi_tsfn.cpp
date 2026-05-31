@@ -81,9 +81,17 @@ struct napi_threadsafe_function__ {
   PinnedHermesValue js_func{};
 
   /// Whether the TSFN is "referenced" (prevents event loop exit).
-  /// For Hermes, this has no practical effect since we don't control
-  /// the event loop, but we track the state for API compatibility.
+  /// When true and the host provides register_loop_source, this tsfn
+  /// contributes one to the env's tsfn loop ref count, which in turn
+  /// holds a single host loop source. Tracked as an API state even
+  /// when the host has no loop-source callbacks.
   bool is_ref = true;
+
+  /// Whether this tsfn currently holds an env loop ref. True iff
+  /// `is_ref` was true at create / ref time and the host provides
+  /// loop-source callbacks. Used to know whether finalize / unref
+  /// should release.
+  bool loop_refed = false;
 
   /// Whether a dispatch task has been posted to the event loop but
   /// not yet started running. Used to avoid posting redundant tasks.
@@ -209,6 +217,14 @@ static void tsfnDispatch(void *tsfn_data) {
         napi_close_handle_scope(env, scope);
       }
 
+      // Release the env-level loop ref, if this tsfn was holding one.
+      // The env unregisters its host source on the 1→0 transition; the
+      // loop may then exit if no other sources or tasks remain.
+      if (tsfn->loop_refed) {
+        env->releaseTsfnLoopRef();
+        tsfn->loop_refed = false;
+      }
+
       // Remove from env's TSFN list and delete.
       env->removeTsfn(tsfn);
       delete tsfn;
@@ -277,6 +293,13 @@ void hermes_napi_cleanup_tsfns(napi_env env) {
     if (tsfn->finalize_cb) {
       tsfn->finalize_cb(env, tsfn->finalize_data, tsfn->context);
     }
+    // Release the env-level loop ref so the env's counter stays
+    // accurate during teardown. The env destructor unregisters the
+    // host source after this loop finishes (see ~napi_env__).
+    if (tsfn->loop_refed) {
+      env->releaseTsfnLoopRef();
+      tsfn->loop_refed = false;
+    }
     delete tsfn;
   }
 }
@@ -339,6 +362,15 @@ napi_status NAPI_CDECL napi_create_threadsafe_function(
   // else: js_func stays undefined (default-constructed PinnedHermesValue)
 
   env->addTsfn(tsfn);
+
+  // A referenced TSFN keeps the loop alive for its lifetime. Without
+  // this, producer threads racing the event loop's shutdown could
+  // dispatch into a torn-down env. The env coalesces all referenced
+  // tsfns into one host loop source; see napi_env__::acquireTsfnLoopRef.
+  if (tsfn->is_ref && env->host_->ref_loop != nullptr) {
+    env->acquireTsfnLoopRef();
+    tsfn->loop_refed = true;
+  }
 
   *result = tsfn;
   return napi_clear_last_error(env);
@@ -459,7 +491,13 @@ napi_status NAPI_CDECL napi_ref_threadsafe_function(
     return napi_set_last_error(env, napi_invalid_arg);
   }
 
-  func->is_ref = true;
+  if (!func->is_ref) {
+    func->is_ref = true;
+    if (!func->loop_refed && env->host_->ref_loop != nullptr) {
+      env->acquireTsfnLoopRef();
+      func->loop_refed = true;
+    }
+  }
   return napi_clear_last_error(env);
 }
 
@@ -471,6 +509,12 @@ napi_status NAPI_CDECL napi_unref_threadsafe_function(
     return napi_set_last_error(env, napi_invalid_arg);
   }
 
-  func->is_ref = false;
+  if (func->is_ref) {
+    func->is_ref = false;
+    if (func->loop_refed) {
+      env->releaseTsfnLoopRef();
+      func->loop_refed = false;
+    }
+  }
   return napi_clear_last_error(env);
 }

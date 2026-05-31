@@ -92,6 +92,7 @@ add_hermes_unittest(NapiTests
   NapiReferenceTest.cpp
   NapiRunScriptTest.cpp
   NapiStringTest.cpp
+  NapiTsfnTest.cpp
   NapiTypedArrayTest.cpp
   NapiTypeTagTest.cpp
   NapiValueTest.cpp

@@ -350,6 +350,14 @@ struct napi_env__ {
   /// Mark all active TSFNs as GC roots via \p acceptor.
   void markTsfns(hermes::vm::RootAcceptor &acceptor);
 
+  /// Acquire a tsfn loop reference. On the 0 → 1 transition, calls
+  /// host->ref_loop. On other increments, just bumps the counter.
+  void acquireTsfnLoopRef();
+
+  /// Release a tsfn loop reference. On the 1 → 0 transition, calls
+  /// host->unref_loop. On other decrements, just lowers the counter.
+  void releaseTsfnLoopRef();
+
   /// The Hermes VM runtime this environment is bound to.
   hermes::vm::Runtime &runtime;
 
@@ -448,6 +456,15 @@ struct napi_env__ {
   /// Head of the doubly-linked list of active thread-safe functions.
   /// Used for GC root marking of JS function values.
   napi_threadsafe_function__ *tsfnListHead_ = nullptr;
+
+  /// Number of currently referenced thread-safe functions in this env.
+  /// While > 0, this env holds one host loop reference via host->ref_loop.
+  /// Incremented by tsfn create (when is_ref) and napi_ref_tsfn;
+  /// decremented by napi_unref_tsfn and tsfn finalize.
+  ///
+  /// The env coalesces all referenced tsfns into a single host
+  /// ref_loop / unref_loop pair — see the contract on hermes_napi_host.
+  int activeTsfnLoopRefs_ = 0;
 
   /// A pending finalizer callback queued during GC for deferred execution.
   struct PendingFinalizer {

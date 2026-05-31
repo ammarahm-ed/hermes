@@ -206,10 +206,15 @@ napi_env__::~napi_env__() {
     deferredListHead_ = def->next_;
     delete def;
   }
-  // Clean up any remaining thread-safe functions.
+  // Clean up any remaining thread-safe functions. Each refed tsfn
+  // decrements activeTsfnLoopRefs_ via releaseTsfnLoopRef in cleanup,
+  // which fires host->unref_loop on the 1→0 transition — so the host's
+  // loop ref is released naturally as part of tsfn cleanup.
   // hermes_napi_cleanup_tsfns is defined in hermes_napi_tsfn.cpp.
   extern void hermes_napi_cleanup_tsfns(napi_env env);
   hermes_napi_cleanup_tsfns(this);
+  assert(
+      activeTsfnLoopRefs_ == 0 && "tsfn loop ref count nonzero after cleanup");
   // Note: Runtime::addCustomRootsFunction does not currently provide a
   // mechanism to remove a registered function. The custom root function
   // captures `this`, so the env must be destroyed before the Runtime.
@@ -240,6 +245,25 @@ napi_value napi_env__::addToCurrentScope(hermes::vm::HermesValue val) {
   *slot = val;
   ++currentSlotIndex_;
   return reinterpret_cast<napi_value>(slot);
+}
+
+void napi_env__::acquireTsfnLoopRef() {
+  ++activeTsfnLoopRefs_;
+  // Call host->ref_loop only on the 0 → 1 transition: tsfns coalesce
+  // into a single env-level loop ref so the host sees one ref per env
+  // regardless of how many tsfns are alive. This is the contract
+  // documented on hermes_napi_host::ref_loop.
+  if (activeTsfnLoopRefs_ == 1 && host_->ref_loop != nullptr) {
+    host_->ref_loop(host_->data);
+  }
+}
+
+void napi_env__::releaseTsfnLoopRef() {
+  assert(activeTsfnLoopRefs_ > 0 && "underflow in tsfn loop ref count");
+  --activeTsfnLoopRefs_;
+  if (activeTsfnLoopRefs_ == 0 && host_->unref_loop != nullptr) {
+    host_->unref_loop(host_->data);
+  }
 }
 
 void napi_env__::markHandleScopes(hermes::vm::RootAcceptor &acceptor) {

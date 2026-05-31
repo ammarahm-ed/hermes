@@ -70,6 +70,34 @@ struct hermes_napi_host {
   /// When null (the default), napi_fatal_exception() prints the error
   /// and calls abort() via hermes_fatal().
   void (*fatal_exception)(void *data, napi_env env, napi_value err);
+
+  /// Hold a long-lived reference on the event loop. The host should
+  /// keep the loop alive until a matching unref_loop call. Used by
+  /// threadsafe functions to model libuv-style "ref" semantics: while
+  /// any tsfn in an env is referenced, the env holds one ref so
+  /// producer threads can dispatch into JS without racing the loop's
+  /// shutdown.
+  ///
+  /// Contract: within a single napi_env, ref_loop / unref_loop calls
+  /// are paired and NEVER nested — every ref_loop is followed by a
+  /// matching unref_loop before the next ref_loop from that env. The
+  /// env coalesces all referenced tsfns into one ref/unref pair, so an
+  /// env contributes at most one outstanding ref at a time.
+  ///
+  /// Across distinct envs sharing the same host, multiple unmatched
+  /// refs may be in flight concurrently — one per env that has any
+  /// referenced tsfn — so the host implementation must accept
+  /// concurrent unmatched ref_loop calls (typically via a refcount
+  /// or its existing source-tracking mechanism).
+  ///
+  /// Optional — when null, TSFN ref/unref are tracked for API
+  /// compatibility only and have no effect on loop lifetime.
+  /// Must be paired with unref_loop.
+  void (*ref_loop)(void *loop_data);
+
+  /// Release a long-lived loop reference previously taken by ref_loop.
+  /// Optional; null only if ref_loop is also null.
+  void (*unref_loop)(void *loop_data);
 };
 
 typedef hermes_napi_host hermes_napi_event_loop;
