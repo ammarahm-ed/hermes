@@ -1524,7 +1524,6 @@ class FlowChecker::ExprVisitor {
 
     static const UnTypes s_types[] = {
         // clang-format off
-        {UnopKind::del, TypeKind::Boolean, llvh::None},
         {UnopKind::voidOp, TypeKind::Void, llvh::None},
         {UnopKind::typeOf, TypeKind::String, llvh::None},
         {UnopKind::plus, TypeKind::Number, TypeKind::Number},
@@ -1569,6 +1568,28 @@ class FlowChecker::ExprVisitor {
       Type *constraint) {
     visitESTreeNode(*this, node->_argument, node, nullptr);
     Type *argType = outer_.getNodeTypeOrAny(node->_argument);
+
+    // Handle `delete` specially.
+    if (node->_operator == outer_.kw_.identDelete) {
+      outer_.setNodeType(node, outer_.flowContext_.getBoolean());
+
+      if (auto *mem = llvh::dyn_cast<ESTree::MemberExpressionLikeNode>(
+              node->_argument)) {
+        Type *objType = outer_.getNodeTypeOrAny(ESTree::getObject(mem));
+        if (!llvh::isa<AnyType>(objType->info)) {
+          // `delete` removes a property and so violates any non-`any` object's
+          // declared shape.
+          outer_.sm_.error(
+              node->getSourceRange(),
+              "ft: cannot delete property of typed object");
+        }
+      } else {
+        outer_.sm_.error(
+            node->getSourceRange(),
+            "ft: 'delete' can only be applied to member expressions");
+      }
+      return;
+    }
 
     Type *res;
     if (Type *t = determineUnopType(
