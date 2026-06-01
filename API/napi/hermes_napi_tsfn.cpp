@@ -93,8 +93,12 @@ struct napi_threadsafe_function__ {
   /// should release.
   bool loop_refed = false;
 
-  /// Whether a dispatch task has been posted to the event loop but
-  /// not yet started running. Used to avoid posting redundant tasks.
+  /// Whether a dispatch is in flight (queued in the host loop, running,
+  /// or both within the same handoff window). Set to true by the
+  /// producer-side CAS that posts a task; cleared only by tsfnDispatch
+  /// when it has nothing left to do. This invariant — at most one
+  /// dispatch live at a time — is what makes inline finalize+delete
+  /// safe: tsfnDispatch knows no copy of itself is queued behind it.
   std::atomic<bool> dispatch_pending{false};
 
   /// Doubly-linked list pointers for the env's TSFN list.
@@ -141,9 +145,12 @@ static void tsfnDispatch(void *tsfn_data) {
   auto *tsfn = static_cast<napi_threadsafe_function__ *>(tsfn_data);
   napi_env env = tsfn->env;
 
-  // Clear the dispatch_pending flag so that new Push() calls will
-  // post a new task.
-  tsfn->dispatch_pending.store(false, std::memory_order_release);
+  // dispatch_pending stays true for the whole call. Clearing it here
+  // would let a producer push CAS true and post a second dispatch
+  // while we are still draining — and if we then drained the last
+  // item and thread_count==0 we would delete tsfn out from under that
+  // queued copy. The tail of this function clears it only when we are
+  // sure nothing more is queued behind us.
 
   unsigned iterations = kMaxDispatchCount;
   bool has_more = true;
@@ -232,11 +239,34 @@ static void tsfnDispatch(void *tsfn_data) {
     }
   }
 
-  // If there are more items, re-post to the event loop.
-  if (has_more && env->host_ != nullptr) {
-    tsfn->dispatch_pending.store(true, std::memory_order_release);
+  // Loop exited without finalizing. Decide whether to re-post or to
+  // release the dispatch_pending flag.
+  if (has_more) {
+    // Iterations exhausted but queue still has items. dispatch_pending
+    // is already true; just re-post so we keep the single-dispatch
+    // invariant intact.
     env->host_->post_task(env->host_->data, tsfn, tsfnDispatch);
+    return;
   }
+
+  // Queue was empty on our last check. Reacquire the mutex and re-check
+  // under the lock: a producer push or release that lost the race to
+  // post (because dispatch_pending was true) might have left state we
+  // must drain or finalize before clearing the flag.
+  std::lock_guard<std::mutex> lock(tsfn->mutex);
+  if (tsfn->queue.empty() && tsfn->thread_count > 0 && !tsfn->is_closing) {
+    // Genuinely idle: drop the flag. The next producer push will see
+    // false, CAS to true under our mutex's release/acquire pairing,
+    // and post a fresh dispatch.
+    tsfn->dispatch_pending.store(false, std::memory_order_release);
+    return;
+  }
+
+  // A push landed, or release dropped thread_count to zero, or abort
+  // closed us — re-post and let the next dispatch drain and/or
+  // finalize. We do not inline the finalize here to keep that code
+  // path in one place.
+  env->host_->post_task(env->host_->data, tsfn, tsfnDispatch);
 }
 
 //===========================================================================
