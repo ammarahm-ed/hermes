@@ -1006,6 +1006,12 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   ///   the key cannot be converted.
   UniqueString *propertyKeyAsIdentifier(ESTree::Node *Key);
 
+  /// Convert a Flow VarianceNode AST node to a FieldVariance.
+  /// "plus"/"readonly" -> ReadOnly, "minus"/"writeonly" -> WriteOnly.
+  /// "in"/"out" are type-parameter variances and are not valid on fields:
+  /// emit an error and return None. nullptr returns None (invariant).
+  FieldVariance parseVariance(ESTree::VarianceNode *varianceNode);
+
   /// Try to find a an enclosing class.
   /// Private names can only be used in lexical descendants of the class
   /// in which they are declared, so this function lets us check that the
@@ -1262,11 +1268,6 @@ Type *FlowChecker::processObjectTypeAnnotation(
       sm_.error(n.getSourceRange(), "ft: unsupported object type property");
       continue;
     }
-    if (prop->_variance) {
-      sm_.error(
-          n.getSourceRange(), "ft: object type variance is not supported");
-      continue;
-    }
     if (prop->_static) {
       sm_.error(
           n.getSourceRange(),
@@ -1313,7 +1314,10 @@ Type *FlowChecker::processObjectTypeAnnotation(
     }
 
     // Found a property we support, add it to the list.
-    fields.emplace_back(Identifier::getFromPointer(name), cb(prop->_value));
+    FieldVariance variance = parseVariance(
+        llvh::cast_or_null<ESTree::VarianceNode>(prop->_variance));
+    fields.emplace_back(
+        Identifier::getFromPointer(name), cb(prop->_value), variance);
   }
 
   // It's possible we've failed on one of the properties, just continue

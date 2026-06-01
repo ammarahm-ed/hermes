@@ -236,7 +236,18 @@ void FlowTypesDumper::printTypeDescription(
     case TypeKind::ExactObject: {
       os << "({\n";
       for (const auto &field : llvh::cast<ExactObjectType>(type)->getFields()) {
-        os << "  " << field.name << ": ";
+        os << "  ";
+        switch (field.variance) {
+          case FieldVariance::None:
+            break;
+          case FieldVariance::ReadOnly:
+            os << '+';
+            break;
+          case FieldVariance::WriteOnly:
+            os << '-';
+            break;
+        }
+        os << field.name << ": ";
         printTypeRef(os, field.type);
         os << '\n';
       }

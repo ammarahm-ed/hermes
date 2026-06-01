@@ -20,6 +20,14 @@
 /// type of the checked node being equal to the type of the constraint that was
 /// passed in, so the caller still needs to check the type and report errors or
 /// insert its own casts itself.
+///
+/// Write positions of `=` and destructuring patterns are walked through
+/// `ExprVisitor::visitAssignmentTarget`, which recognizes the outermost
+/// MemberExpression at each pattern leaf and tells the member-access path
+/// it is a pure write. Inner subexpressions (`a.b` inside `a.b.c = ...`)
+/// flow through the normal read visit. The other write cases (compound
+/// assignment, `++`/`--`, `delete`, for-in/of LHS) can't destructure, so
+/// `classifyMemberAccess` does a bottom-up parent check on the read path.
 //===----------------------------------------------------------------------===//
 
 #include "FlowChecker.h"
@@ -507,12 +515,14 @@ class FlowChecker::ExprVisitor {
 
   /// Member access on a ClassType. Handles Array<T> length/push/index as
   /// special cases of class member access, then dispatches to the public or
-  /// private name lookup.
+  /// private name lookup. \p isWrite is true when the access is a pure write
+  /// target (the leaf of a `=` assignment or destructuring pattern).
   Type *visitMemberClass(
       ESTree::MemberExpressionNode *node,
       ESTree::Node *parent,
       Type *objType,
-      ClassType *classType) {
+      ClassType *classType,
+      bool isWrite) {
     // Array<T>: special-case .length / .push / numeric index. Private name
     // access on an array falls through to the generic class path below.
     // TODO: This is a HACK, fix it by making Array<T> more expressive.
@@ -572,16 +582,13 @@ class FlowChecker::ExprVisitor {
       return outer_.flowContext_.getAny();
     }
 
-    // Setter-only access is only legal on the LHS of `=`.
-    if (field->isAccessor() && !field->hasGetter()) {
-      auto *assignParent =
-          llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
-      if (!assignParent || node != assignParent->_left ||
-          assignParent->_operator != outer_.kw_.identEqual) {
-        outer_.sm_.error(
-            node->_property->getSourceRange(),
-            "ft: cannot read setter-only property");
-      }
+    // Setter-only access is only legal as a write target. The write path
+    // for `=` (and destructuring leaves) passes isWrite=true via
+    // visitAssignmentTarget; everything else reads.
+    if (field->isAccessor() && !field->hasGetter() && !isWrite) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: cannot read setter-only property");
     }
     // Overloaded methods may only be referenced as a direct call target.
     if (field->isOverloaded()) {
@@ -600,7 +607,8 @@ class FlowChecker::ExprVisitor {
   Type *visitMemberClassConstructor(
       ESTree::MemberExpressionNode *node,
       ESTree::Node *parent,
-      ClassConstructorType *consType) {
+      ClassConstructorType *consType,
+      bool isWrite) {
     if (node->_computed) {
       outer_.sm_.error(
           node->_property->getSourceRange(),
@@ -644,15 +652,10 @@ class FlowChecker::ExprVisitor {
     if (field->isAccessor()) {
       // Static accessor: result type is the field type.
       // Do NOT propagate Decl — IRGen handles the call.
-      if (!field->hasGetter()) {
-        auto *assign = llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
-        bool isSimpleAssignTarget = assign && assign->_left == node &&
-            assign->_operator == outer_.kw_.identEqual;
-        if (!isSimpleAssignTarget) {
-          outer_.sm_.error(
-              node->_property->getSourceRange(),
-              "ft: cannot read setter-only property");
-        }
+      if (!field->hasGetter() && !isWrite) {
+        outer_.sm_.error(
+            node->_property->getSourceRange(),
+            "ft: cannot read setter-only property");
       }
       return field->type;
     }
@@ -678,10 +681,58 @@ class FlowChecker::ExprVisitor {
     return field->type;
   }
 
+  /// Classification of a MemberExpression access as a read, write, or both.
+  struct MemberAccessKind {
+    bool read;
+    bool write;
+  };
+
+  /// Classify whether \p node is being read, written, or both. \p isWrite is
+  /// set by visitAssignmentTarget for `=` write targets (including leaves
+  /// buried inside destructuring patterns); in that case the access is a pure
+  /// write. Otherwise, the remaining write cases (compound assignment,
+  /// ++/--, for-in/of LHS) each put the MemberExpression directly under
+  /// the relevant parent, so a bottom-up parent check is sufficient.
+  MemberAccessKind classifyMemberAccess(
+      ESTree::MemberExpressionNode *node,
+      ESTree::Node *parent,
+      bool isWrite) {
+    MemberAccessKind k{!isWrite, isWrite};
+    if (isWrite)
+      return k;
+    if (auto *assign = llvh::dyn_cast<ESTree::AssignmentExpressionNode>(parent);
+        assign && assign->_left == node) {
+      // Compound assignment (+=, -=, etc) reads and writes.
+      // `=` is handled via the isWrite flag set by visitAssignmentTarget.
+      k.write = true;
+    } else if (auto *upd = llvh::dyn_cast<ESTree::UpdateExpressionNode>(parent);
+               upd && upd->_argument == node) {
+      k.write = true;
+    } else if (auto *forIn = llvh::dyn_cast<ESTree::ForInStatementNode>(parent);
+               forIn && forIn->_left == node) {
+      k.write = true;
+      k.read = false;
+    } else if (auto *forOf = llvh::dyn_cast<ESTree::ForOfStatementNode>(parent);
+               forOf && forOf->_left == node) {
+      k.write = true;
+      k.read = false;
+    } else if (auto *un = llvh::dyn_cast<ESTree::UnaryExpressionNode>(parent);
+               un && un->_argument == node &&
+               un->_operator == outer_.kw_.identDelete) {
+      // `delete` is rejected outright by the UnaryExpression visitor; it
+      // is neither a read nor a write for variance purposes.
+      k.read = false;
+      k.write = false;
+    }
+    return k;
+  }
+
   /// Named/computed access on an exact object type.
   Type *visitMemberExactObject(
       ESTree::MemberExpressionNode *node,
-      ExactObjectType *exactObjType) {
+      ESTree::Node *parent,
+      ExactObjectType *exactObjType,
+      bool isWrite) {
     if (node->_computed) {
       // TODO: determine what this should do for real.
       // Flow allows this and just returns 'any' (deliberately unsound).
@@ -699,7 +750,20 @@ class FlowChecker::ExprVisitor {
           "ft: property " + id->_name->str() + " not defined in object");
       return outer_.flowContext_.getAny();
     }
-    return exactObjType->getFields()[*optFieldIdx].type;
+    const auto &field = exactObjType->getFields()[*optFieldIdx];
+
+    MemberAccessKind access = classifyMemberAccess(node, parent, isWrite);
+
+    if (field.variance == FieldVariance::ReadOnly && access.write) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: cannot assign to readonly property " + id->_name->str());
+    } else if (field.variance == FieldVariance::WriteOnly && access.read) {
+      outer_.sm_.error(
+          node->_property->getSourceRange(),
+          "ft: cannot read writeonly property " + id->_name->str());
+    }
+    return field.type;
   }
 
   /// Numeric-literal indexed access or .length on a tuple type.
@@ -777,17 +841,42 @@ class FlowChecker::ExprVisitor {
       ESTree::Node *parent,
       Type *constraint) {
     // TODO: types
+    // Encountered through the normal expression visit, so this access is a
+    // read. The write path goes through visitAssignmentTarget.
     visitESTreeNode(*this, node->_object, node, nullptr);
     if (node->_computed)
       visitESTreeNode(*this, node->_property, node, nullptr);
-    resolveMemberExpressionType(node, parent);
+    resolveMemberExpressionType(node, parent, /*isWrite*/ false);
+  }
+
+  /// Walk \p target which sits in the write position of a `=` assignment or
+  /// destructuring pattern. Identifier and (Optional)MemberExpression are
+  /// handled directly; pattern nodes are dispatched to their visitor, which
+  /// recurses via this function for nested write positions. Only the
+  /// outermost MemberExpression at each pattern leaf is a write — its inner
+  /// `_object` (e.g. `a.b` inside `a.b.c`) is just a read of the container
+  /// whose slot is being written.
+  void visitAssignmentTarget(
+      ESTree::Node *target,
+      ESTree::Node *parent,
+      Type *constraint) {
+    if (auto *mem = llvh::dyn_cast<ESTree::MemberExpressionNode>(target)) {
+      visitESTreeNode(*this, mem->_object, mem, nullptr);
+      if (mem->_computed)
+        visitESTreeNode(*this, mem->_property, mem, nullptr);
+      resolveMemberExpressionType(mem, parent, /*isWrite*/ true);
+      return;
+    }
+    visitESTreeNode(*this, target, parent, constraint);
   }
 
   /// Compute and set the type of \p node, assuming its \c _object (and
-  /// \c _property when computed) have already been visited.
+  /// \c _property when computed) have already been visited. \p isWrite is
+  /// true when called from visitAssignmentTarget for a write-target leaf.
   void resolveMemberExpressionType(
       ESTree::MemberExpressionNode *node,
-      ESTree::Node *parent) {
+      ESTree::Node *parent,
+      bool isWrite) {
     Type *objType = outer_.getNodeTypeOrAny(node->_object);
     Type *resType = outer_.flowContext_.getAny();
 
@@ -816,13 +905,13 @@ class FlowChecker::ExprVisitor {
     }
 
     if (auto *classType = llvh::dyn_cast<ClassType>(objType->info)) {
-      resType = visitMemberClass(node, parent, objType, classType);
+      resType = visitMemberClass(node, parent, objType, classType, isWrite);
     } else if (
         auto *consType = llvh::dyn_cast<ClassConstructorType>(objType->info)) {
-      resType = visitMemberClassConstructor(node, parent, consType);
+      resType = visitMemberClassConstructor(node, parent, consType, isWrite);
     } else if (
         auto *exactObjType = llvh::dyn_cast<ExactObjectType>(objType->info)) {
-      resType = visitMemberExactObject(node, exactObjType);
+      resType = visitMemberExactObject(node, parent, exactObjType, isWrite);
     } else if (auto *tupleType = llvh::dyn_cast<TupleType>(objType->info)) {
       resType = visitMemberTuple(node, tupleType);
     } else if (llvh::isa<StringType>(objType->info)) {
@@ -1104,12 +1193,24 @@ class FlowChecker::ExprVisitor {
             auto *spreadObjTy =
                 llvh::dyn_cast<ExactObjectType>(spreadTy->info)) {
           for (const auto &srcField : spreadObjTy->getFields()) {
+            // Spread reads every source field; writeonly fields are not
+            // readable.
+            if (srcField.variance == FieldVariance::WriteOnly) {
+              outer_.sm_.error(
+                  spread->getSourceRange(),
+                  "ft: cannot read writeonly property " +
+                      srcField.name.getUnderlyingPointer()->str());
+            }
+            // The spread's destination is a fresh object literal, so its
+            // fields are always invariant regardless of the source's
+            // variance.
             auto [it, inserted] = names.try_emplace(
                 srcField.name.getUnderlyingPointer(), fields.size());
             if (inserted) {
               fields.emplace_back(srcField.name, srcField.type);
             } else {
               fields[it->second].type = srcField.type;
+              fields[it->second].variance = FieldVariance::None;
             }
           }
         } else {
@@ -1690,7 +1791,13 @@ class FlowChecker::ExprVisitor {
       visitESTreeNode(*this, node->_right, node, nullptr);
       lhsConstraint = outer_.getNodeTypeOrAny(node->_right);
     }
-    visitESTreeNode(*this, node->_left, node, lhsConstraint);
+    // For `=`, route through
+    // visitAssignmentTarget so MemberExpression are classified as writes while
+    // their inner _object subexpressions are still classified as reads.
+    if (node->_operator == outer_.kw_.identEqual)
+      visitAssignmentTarget(node->_left, node, lhsConstraint);
+    else
+      visitESTreeNode(*this, node->_left, node, lhsConstraint);
 
     // Check if the LHS is an accessor property.
     if (auto *mem = llvh::dyn_cast<ESTree::MemberExpressionNode>(node->_left)) {
@@ -1864,13 +1971,13 @@ class FlowChecker::ExprVisitor {
           continue;
         if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&child)) {
           // Rest binding receives the array type itself.
-          visitESTreeNodeNoReplace(*this, rest->_argument, &child, constraint);
+          visitAssignmentTarget(rest->_argument, &child, constraint);
           if (!llvh::isa<ESTree::ArrayPatternNode>(rest->_argument)) {
             checkChild(rest->_argument, constraint);
           }
           break;
         }
-        visitESTreeNodeNoReplace(*this, &child, node, elemType);
+        visitAssignmentTarget(&child, node, elemType);
         if (!llvh::isa<ESTree::ArrayPatternNode>(&child)) {
           checkChild(&child, elemType);
         }
@@ -1894,8 +2001,10 @@ class FlowChecker::ExprVisitor {
       }
     }
 
-    // Annotate the children of the array pattern.
-    visitESTreeChildren(*this, node, nullptr);
+    // Annotate the children of the array pattern. All slots are write
+    // bindings; route each through visitAssignmentTarget.
+    for (ESTree::Node &child : node->_elements)
+      visitAssignmentTarget(&child, node, nullptr);
 
     llvh::SmallVector<Type *, 4> types;
     for (ESTree::Node &elem : node->_elements)
@@ -1905,6 +2014,45 @@ class FlowChecker::ExprVisitor {
         node,
         outer_.flowContext_.createType(
             outer_.flowContext_.createTuple(types), node));
+  }
+
+  /// Object destructuring LHS (`({x: a.b} = src)`). The parser converts an
+  /// object literal in an assignment LHS into an ObjectPatternNode. Each
+  /// property's `_value` is a write target; a trailing `RestElement`
+  /// argument is also a write binding.
+  void visit(
+      ESTree::ObjectPatternNode *node,
+      ESTree::Node *parent,
+      Type *constraint) {
+    for (ESTree::Node &child : node->_properties) {
+      if (auto *prop = llvh::dyn_cast<ESTree::PropertyNode>(&child)) {
+        // The key is read as a property name; not a value position.
+        visitESTreeNodeNoReplace(*this, prop->_key, prop, nullptr);
+        visitAssignmentTarget(prop->_value, prop, nullptr);
+      } else if (auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&child)) {
+        visitAssignmentTarget(rest->_argument, rest, nullptr);
+      } else {
+        visitAssignmentTarget(&child, node, nullptr);
+      }
+    }
+  }
+
+  /// Default-value pattern (`{a = 1} = obj`, `[a = 1] = arr`). Always
+  /// invoked inside a destructuring write position, so `_left` is a write
+  /// target and `_right` is a read.
+  void visit(
+      ESTree::AssignmentPatternNode *node,
+      ESTree::Node *parent,
+      Type *constraint) {
+    visitAssignmentTarget(node->_left, node, constraint);
+    visitESTreeNode(*this, node->_right, node, nullptr);
+  }
+
+  /// Rest binding (`[...rest]` or `{...rest}` LHS). The argument is a
+  /// write target.
+  void
+  visit(ESTree::RestElementNode *node, ESTree::Node *parent, Type *constraint) {
+    visitAssignmentTarget(node->_argument, node, constraint);
   }
 
   void visit(
@@ -1982,7 +2130,7 @@ class FlowChecker::ExprVisitor {
         // Receiver isn't a function: finish resolving the member expression
         // (without re-visiting the object) and let the regular path emit the
         // appropriate diagnostic.
-        resolveMemberExpressionType(methodCallee, node);
+        resolveMemberExpressionType(methodCallee, node, /*isWrite*/ false);
         shouldVisitCallee = false;
       }
     }

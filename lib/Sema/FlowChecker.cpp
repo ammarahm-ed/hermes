@@ -1962,15 +1962,33 @@ bool FlowChecker::expandObjectDestructuring(
         return false;
       }
       consumed.set(*optFieldIdx);
-      Type *fieldType = objType->getFields()[*optFieldIdx].type;
-      onChild(prop->_value, fieldType);
+      const auto &field = objType->getFields()[*optFieldIdx];
+      // Destructuring reads the source field, so writeonly fields are not
+      // allowed.
+      if (field.variance == FieldVariance::WriteOnly) {
+        sm_.error(
+            prop->_key->getSourceRange(),
+            "ft: cannot read writeonly property " + propName.str());
+      }
+      onChild(prop->_value, field.type);
     } else if (
         auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&propNode)) {
       // The parser guarantees a rest element is the last property.
       llvh::SmallVector<ExactObjectType::Field, 4> restFields;
       for (size_t i = 0, e = objType->getFields().size(); i < e; ++i) {
-        if (!consumed.test(i))
-          restFields.push_back(objType->getFields()[i]);
+        if (consumed.test(i))
+          continue;
+        const auto &srcField = objType->getFields()[i];
+        // The rest binding reads every remaining source field.
+        if (srcField.variance == FieldVariance::WriteOnly) {
+          sm_.error(
+              rest->getSourceRange(),
+              "ft: cannot read writeonly property " +
+                  srcField.name.getUnderlyingPointer()->str());
+        }
+        // The rest binding's destination is a fresh exact object, so its
+        // fields are always invariant.
+        restFields.emplace_back(srcField.name, srcField.type);
       }
       Type *restType =
           flowContext_.createType(flowContext_.createExactObject(restFields));
@@ -2909,11 +2927,40 @@ FlowChecker::CanFlowResult FlowChecker::canAFlowIntoB(
   }
 
   for (size_t i = 0, e = aFields.size(); i < e; ++i) {
-    // TODO: This will be more complex when we allow variance in object types.
     if (aFields[i].name != bFields[i].name)
       return {};
-    if (!aFields[i].type->info->equals(bFields[i].type->info))
+    FieldVariance av = aFields[i].variance;
+    FieldVariance bv = bFields[i].variance;
+    // An invariant source can flow into a destination of any variance
+    // (the destination gives up a capability). A ReadOnly or WriteOnly
+    // source can only flow into the same variance, since flowing into
+    // an invariant destination would require regaining the dropped
+    // capability and ReadOnly vs. WriteOnly are mutually incompatible.
+    if (av != FieldVariance::None && av != bv)
       return {};
+    switch (bv) {
+      case FieldVariance::None:
+        // Invariant: types must be equal.
+        if (!aFields[i].type->info->equals(bFields[i].type->info))
+          return {};
+        break;
+      case FieldVariance::ReadOnly: {
+        // Covariant: a's field type must flow into b's field type without a
+        // checked cast.
+        CanFlowResult cf = canAFlowIntoB(aFields[i].type, bFields[i].type);
+        if (!cf.canFlow || cf.needCheckedCast)
+          return {};
+        break;
+      }
+      case FieldVariance::WriteOnly: {
+        // Contravariant: b's field type must flow into a's field type
+        // without a checked cast.
+        CanFlowResult cf = canAFlowIntoB(bFields[i].type, aFields[i].type);
+        if (!cf.canFlow || cf.needCheckedCast)
+          return {};
+        break;
+      }
+    }
   }
 
   return {.canFlow = true};
@@ -4052,6 +4099,21 @@ UniqueString *FlowChecker::propertyKeyAsIdentifier(ESTree::Node *Key) {
   }
 
   return nullptr;
+}
+
+FieldVariance FlowChecker::parseVariance(ESTree::VarianceNode *varianceNode) {
+  if (!varianceNode)
+    return FieldVariance::None;
+  UniqueString *kind = varianceNode->_kind;
+  if (kind == kw_.identFlowPlus || kind == kw_.identReadonly)
+    return FieldVariance::ReadOnly;
+  if (kind == kw_.identFlowMinus || kind == kw_.identWriteonly)
+    return FieldVariance::WriteOnly;
+  // "in" / "out" are type-parameter variances and have no meaning here.
+  sm_.error(
+      varianceNode->getSourceRange(),
+      "ft: '" + kind->str() + "' is not a valid field variance");
+  return FieldVariance::None;
 }
 
 bool FlowChecker::classTypeIsEnclosing(ClassType *classType) {

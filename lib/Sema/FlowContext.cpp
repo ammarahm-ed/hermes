@@ -583,6 +583,8 @@ int ExactObjectType::_compareImpl(
       [&state](const Field &ta, const Field &tb) {
         if (int tmp = ta.name.str().compare(tb.name.str()))
           return tmp;
+        if (ta.variance != tb.variance)
+          return ta.variance < tb.variance ? -1 : 1;
         if (int tmp = ta.type->info->compare(tb.type->info, state))
           return tmp;
         return 0;
@@ -597,6 +599,8 @@ bool ExactObjectType::_equalsImpl(
   for (size_t i = 0, e = fields_.size(); i < e; ++i) {
     if (fields_[i].name != other->fields_[i].name)
       return {};
+    if (fields_[i].variance != other->fields_[i].variance)
+      return false;
     if (!fields_[i].type->info->equals(other->fields_[i].type->info, state))
       return false;
   }

@@ -466,6 +466,18 @@ class TupleType : public TypeInfo {
   }
 };
 
+/// Variance of a field in a structural type. Controls read/write permissions
+/// and how the field participates in subtyping.
+enum class FieldVariance : uint8_t {
+  /// Invariant: both read and write allowed; subtyping requires type equality.
+  None,
+  /// Covariant (Flow's `+`): read-only; subtyping is covariant in field type.
+  ReadOnly,
+  /// Contravariant (Flow's `-`): write-only; subtyping is contravariant in
+  /// field type.
+  WriteOnly,
+};
+
 /// A type representing an ordered, named list of fields in an object.
 /// ExactObject types with different field orders can't flow into each other.
 class ExactObjectType : public TypeInfo {
@@ -476,8 +488,14 @@ class ExactObjectType : public TypeInfo {
     Identifier name;
     /// The type of the field.
     Type *type;
+    /// Variance of this field (None == invariant).
+    FieldVariance variance;
 
-    Field(Identifier name, Type *type) : name(name), type(type) {}
+    Field(
+        Identifier name,
+        Type *type,
+        FieldVariance variance = FieldVariance::None)
+        : name(name), type(type), variance(variance) {}
   };
 
  private:
