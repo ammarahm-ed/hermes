@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi, jsi_unstable
+// UNSUPPORTED: windows
 
 // Queues 10 concurrent async-works and only prints "all done" after the
 // last completion fires. Without proper task-queue source counting in

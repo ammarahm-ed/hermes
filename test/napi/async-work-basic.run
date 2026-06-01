@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi, jsi_unstable
+// UNSUPPORTED: windows
 
 // Proves the full async-work pipeline: napi_queue_async_work hands off
 // to the host adapter's worker thread (execute runs off-JS), then

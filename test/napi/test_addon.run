@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi
+// UNSUPPORTED: windows
 
 // RUN: echo 'var addon = loadNativeModule("%napi_addon_dir/napi_ref_addon.node"); print(typeof addon.add); print(typeof addon.hello); print(addon.add(2, 3)); print(addon.add(-1, 1)); print(addon.add(1.5, 2.5)); print(addon.hello()); print(addon.add(0, 0));' > %t.js && %hermes %t.js | %FileCheck --match-full-lines %s
 

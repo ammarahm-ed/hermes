@@ -18,7 +18,9 @@
 #include "hermes/VM/StringPrimitive.h"
 #include "hermes/VM/TwineChar16.h"
 
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 #include <cstring>
 
 //===========================================================================
@@ -771,6 +773,11 @@ hermes_napi_load_module(napi_env env, const char *path, napi_value *result) {
   using namespace hermes::vm;
   Runtime &runtime = env->runtime;
 
+#ifdef _WIN32
+  (void)runtime.raiseTypeError(
+      TwineChar16("Loading native modules is not supported on Windows"));
+  return captureRuntimeException(env, napi_pending_exception);
+#else
   // Open the shared library. RTLD_LOCAL prevents symbol collisions
   // between different addons. RTLD_NOW ensures all symbols are resolved
   // immediately so we get a clear error if something is missing.
@@ -833,4 +840,5 @@ hermes_napi_load_module(napi_env env, const char *path, napi_value *result) {
   }
 
   return napi_clear_last_error(env);
+#endif
 }

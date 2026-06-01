@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi
+// UNSUPPORTED: windows
 
 // RUN: sed 's|ADDON_PATH|%napi_addon_dir/napi_text_encoder_addon.node|' %s > %t.js && LC_ALL=en_US.UTF-8 %hermes -Xhermes-internal-test-methods %t.js | %FileCheck --match-full-lines %s
 "use strict";

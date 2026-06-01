@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi, jsi_unstable
+// UNSUPPORTED: windows
 
 // Spawns a worker thread inside the addon that posts 5 calls through
 // a threadsafe function back to JS. Each dispatch goes through the

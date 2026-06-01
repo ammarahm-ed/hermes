@@ -6,6 +6,7 @@
  */
 
 // REQUIRES: napi
+// UNSUPPORTED: windows
 
 // RUN: %hermes %s | %FileCheck --match-full-lines %s
 
