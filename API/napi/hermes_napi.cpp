@@ -96,6 +96,37 @@ napi_env__::napi_env__(hermes::vm::Runtime &runtime, hermes_napi_host *host)
   // whenever Runtime::drainJobs() is called (e.g., between promise
   // microtask batches).
   runtime.addDrainJobsCallback([this]() { drainPendingFinalizers(); });
+
+  // Drive substantive env teardown from ~Runtime BEFORE finalizeAll,
+  // while the heap is still functional. Cleanup hooks and ref
+  // finalizers may allocate and call into JS.
+  runtime.addShutdownCallback([this]() { shutdown(); });
+
+  // After finalizeAll runs, drain wrap callbacks queued by
+  // finalizeNapiObjectData when getHeap().finalizeAll() finalized
+  // wrapped objects still reachable from JS roots at teardown
+  // (callbacks for objects collected earlier — during normal
+  // operation or during shutdown()'s user-code phases — have
+  // already been drained with full env access).
+  //
+  // These run on the mutator with a non-null env, so spec-
+  // conformant finalizers (which only free native resources)
+  // work normally.
+  //
+  // The GC heap is now in a post-mortem state — every cell has
+  // had its finalizer called, and allocating new JS values or
+  // calling back into JS would trigger a collection that
+  // re-finalizes those cells (undefined behavior). We set
+  // inPostShutdownDrain_ before the drain; CHECK_ENV checks the
+  // flag and returns napi_cannot_run_js for every NAPI function.
+  // Spec-conformant finalizers ignore the return; non-conformant
+  // ones get a defined error instead of an undefined crash. Then
+  // delete the env.
+  runtime.addPostShutdownDeleter([this]() {
+    inPostShutdownDrain_ = true;
+    drainPendingFinalizers();
+    delete this;
+  });
 }
 
 void napi_env__::queuePendingFinalizer(
@@ -137,15 +168,9 @@ void napi_env__::drainPendingFinalizers() {
   }
 }
 
-napi_env__::~napi_env__() {
-  // Drain any pending finalizers before marking the env as dead.
+void napi_env__::shutdown() {
+  // Drain anything queued during normal operation.
   drainPendingFinalizers();
-
-  // Signal to GC finalizers that the env is being destroyed. Finalizers
-  // that run during Runtime::~Runtime() (after the env is freed) check
-  // this flag and skip accessing the env. The shared_ptr ensures the
-  // flag itself outlives the env.
-  *alive_ = false;
 
   // Run cleanup hooks in LIFO (reverse registration) order.
   // Hooks may remove themselves during execution, so iterate a copy.
@@ -217,11 +242,23 @@ napi_env__::~napi_env__() {
   hermes_napi_cleanup_tsfns(this);
   assert(
       activeTsfnLoopRefs_ == 0 && "tsfn loop ref count nonzero after cleanup");
-  // Note: Runtime::addCustomRootsFunction does not currently provide a
-  // mechanism to remove a registered function. The custom root function
-  // captures `this`, so the env must be destroyed before the Runtime.
-  // In practice, the Runtime is typically destroyed immediately after
-  // (or holds ownership of) the env.
+
+  // Final drain. User code in the cleanup hooks, ref finalizers,
+  // instance data finalizer, and TSFN cleanup above may have
+  // transitively triggered GC, queueing wrap callbacks. Drain
+  // them here so they run with full env access while the heap is
+  // still functional. drainPendingFinalizers loops internally to
+  // handle cascading queue additions. Anything queued after this
+  // point comes from getHeap().finalizeAll() and is handled by
+  // the post-shutdown deleter under inPostShutdownDrain_.
+  drainPendingFinalizers();
+}
+
+napi_env__::~napi_env__() {
+  // Substantive teardown ran via shutdown() and the post-shutdown
+  // deleter — both have already executed by the time we get here.
+  // Member destructors release the remaining heap-allocated
+  // structures.
 }
 
 napi_value napi_env__::addToCurrentScope(hermes::vm::HermesValue val) {
@@ -293,12 +330,12 @@ void napi_env__::markHandleScopes(hermes::vm::RootAcceptor &acceptor) {
 //===========================================================================
 
 napi_env hermes_napi_create_env(void *hermes_runtime, hermes_napi_host *host) {
+  // The env registers shutdown and post-shutdown deleter callbacks
+  // on the Runtime in its constructor, so the Runtime takes
+  // ownership and will tear it down and free it at the right phase
+  // of ~Runtime. The returned pointer is borrowed by the caller.
   return new napi_env__(
       *static_cast<hermes::vm::Runtime *>(hermes_runtime), host);
-}
-
-void hermes_napi_destroy_env(napi_env env) {
-  delete env;
 }
 
 //===========================================================================

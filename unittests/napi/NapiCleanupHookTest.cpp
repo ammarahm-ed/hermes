@@ -58,10 +58,9 @@ struct EnvScope {
   }
 
   void destroy() {
-    if (env) {
-      hermes_napi_destroy_env(env);
-      env = nullptr;
-    }
+    // The env is owned by the Runtime and torn down as part of
+    // ~Runtime. Drop the borrowed pointer and reset the runtime.
+    env = nullptr;
     rt.reset();
   }
 

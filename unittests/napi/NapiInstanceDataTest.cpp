@@ -79,9 +79,9 @@ TEST_F(NapiTestFixture, SetInstanceDataFinalizerCalledOnEnvDestroy) {
 
   EXPECT_FALSE(finalizerCalled);
 
-  // Destroy the env — should call the finalizer.
-  hermes_napi_destroy_env(env_);
-  env_ = nullptr; // Prevent TearDown from double-destroying.
+  // Destroy the Runtime — env shutdown calls the finalizer.
+  env_ = nullptr;
+  rt_.reset();
 
   EXPECT_TRUE(finalizerCalled);
 }
@@ -119,9 +119,9 @@ TEST_F(NapiTestFixture, SetInstanceDataFinalizerCalledOnReplace) {
   EXPECT_TRUE(firstFinalizerCalled);
   EXPECT_FALSE(secondFinalizerCalled);
 
-  // Destroy the env — should call the second finalizer.
-  hermes_napi_destroy_env(env_);
+  // Destroy the Runtime — env shutdown calls the second finalizer.
   env_ = nullptr;
+  rt_.reset();
 
   EXPECT_TRUE(secondFinalizerCalled);
 }
@@ -150,9 +150,9 @@ TEST_F(NapiTestFixture, SetInstanceDataFinalizerReceivesCorrectArgs) {
           },
           &info));
 
-  // Destroy env to trigger finalizer.
-  hermes_napi_destroy_env(env_);
+  // Destroy the Runtime — env shutdown triggers the finalizer.
   env_ = nullptr;
+  rt_.reset();
 
   EXPECT_EQ(&myData, info.receivedData);
   // The env pointer should match what was passed.

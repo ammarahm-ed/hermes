@@ -118,10 +118,9 @@ class NapiAsyncWorkTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    if (env_) {
-      hermes_napi_destroy_env(env_);
-      env_ = nullptr;
-    }
+    // The env is owned by the Runtime and torn down as part of
+    // ~Runtime. Drop the borrowed pointer and reset the runtime.
+    env_ = nullptr;
     rt_.reset();
   }
 };

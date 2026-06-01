@@ -191,18 +191,6 @@ static vm::CallResult<vm::HermesValue> loadSegment(
 }
 
 #ifdef HERMES_ENABLE_NAPI
-/// Envs created for loaded NAPI modules. These must remain alive for
-/// the lifetime of the Runtime because NativeFunctions created during
-/// module init hold pointers to CallbackBundles owned by these envs.
-static std::vector<std::unique_ptr<napi_env__, struct NapiEnvDeleter>>
-    loadedModuleEnvs;
-
-struct NapiEnvDeleter {
-  void operator()(napi_env env) const {
-    hermes_napi_destroy_env(env);
-  }
-};
-
 /// Host integration for envs created by loadNativeModule. Set by
 /// executeHBCBytecodeImpl via CurrentNapiHostScope for the duration of
 /// script execution; nullptr otherwise (in which case async-work and
@@ -270,8 +258,8 @@ static vm::CallResult<vm::HermesValue> loadNativeModule(
     }
 
     napi_close_handle_scope(env, scope);
-    loadedModuleEnvs.push_back(
-        std::unique_ptr<napi_env__, NapiEnvDeleter>(env));
+    // env is owned by the Runtime; it stays alive for the Runtime's
+    // lifetime so the module's NativeFunctions remain valid.
 
     runtime.setThrownValue(exceptionVal);
     return ExecutionStatus::EXCEPTION;
@@ -283,7 +271,8 @@ static vm::CallResult<vm::HermesValue> loadNativeModule(
   std::memcpy(&resultVal, phv, sizeof(HermesValue));
 
   napi_close_handle_scope(env, scope);
-  loadedModuleEnvs.push_back(std::unique_ptr<napi_env__, NapiEnvDeleter>(env));
+  // env is owned by the Runtime; it stays alive for the Runtime's
+  // lifetime so the module's NativeFunctions remain valid.
 
   return resultVal;
 }
@@ -960,9 +949,9 @@ bool executeHBCBytecodeImpl(
   // NAPI host adapter — must outlive any napi_env created via
   // loadNativeModule. Declared after eventLoopControl so the adapter's
   // worker thread is joined first (during the adapter's destructor),
-  // before eventLoopControl tears down. All loadedModuleEnvs are cleared
-  // before this function returns (see the cleanup block at the bottom),
-  // so adapter teardown does not race with env teardown.
+  // before eventLoopControl tears down. NAPI envs are owned by the
+  // Runtime and torn down by ~Runtime before the adapter goes out of
+  // scope, so adapter teardown does not race with env teardown.
   NapiHostAdapter napiHostAdapter{&eventLoopControl};
   CurrentNapiHostScope napiHostScope{&napiHostAdapter.host};
 #endif
@@ -1182,14 +1171,8 @@ bool executeHBCBytecodeImpl(
   }
 #endif
 
-#ifdef HERMES_ENABLE_NAPI
-  // Destroy all NAPI envs before the Runtime goes out of scope.
-  // The env destructor releases WeakRefSlots, which must happen while
-  // the GC is still alive. Collect first so that env finalizer
-  // callbacks don't trigger GC reentrancy.
-  runtime->collect("pre-env-teardown");
-  loadedModuleEnvs.clear();
-#endif
+  // NAPI envs are owned by the Runtime and torn down as part of
+  // ~Runtime — no explicit cleanup is required here.
 
   return !threwException;
 }

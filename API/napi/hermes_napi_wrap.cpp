@@ -27,33 +27,27 @@ static SymbolID napiDataSymbolID() {
 /// This runs during GC sweep, so it must NOT call back into JS (GC
 /// reentrancy). Instead, it queues finalizer callbacks for deferred
 /// execution outside GC via the env's pending finalizer queue.
+///
+/// The env is owned by the Runtime and outlives every GC cycle,
+/// including the one driven by ~Runtime::getHeap().finalizeAll(),
+/// so dereferencing it here is always safe.
 static void finalizeNapiObjectData(GC &, NativeState *ns) {
   auto *data = static_cast<NapiObjectData *>(ns->context());
   if (!data)
     return;
 
   napi_env env = data->env;
-  bool envAlive = *data->envAlive;
 
-  // Queue or call each finalizer callback.
   if (data->wrapFinalizeCb) {
-    if (envAlive) {
-      env->queuePendingFinalizer(
-          data->wrapFinalizeCb, data->wrapData, data->wrapFinalizeHint);
-    } else {
-      data->wrapFinalizeCb(nullptr, data->wrapData, data->wrapFinalizeHint);
-    }
+    env->queuePendingFinalizer(
+        data->wrapFinalizeCb, data->wrapData, data->wrapFinalizeHint);
   }
 
   auto *entry = data->finalizerChain;
   while (entry) {
     if (entry->finalize_cb) {
-      if (envAlive) {
-        env->queuePendingFinalizer(
-            entry->finalize_cb, entry->data, entry->finalize_hint);
-      } else {
-        entry->finalize_cb(nullptr, entry->data, entry->finalize_hint);
-      }
+      env->queuePendingFinalizer(
+          entry->finalize_cb, entry->data, entry->finalize_hint);
     }
     auto *next = entry->next;
     delete entry;
@@ -133,7 +127,7 @@ napi_status getOrCreateNapiObjectData(
   }
 
   // Create a new NapiObjectData and define the internal property.
-  auto *data = new NapiObjectData{env, env->alive_};
+  auto *data = new NapiObjectData{env};
 
   auto *ns = NativeState::create(runtime, data, finalizeNapiObjectData);
 

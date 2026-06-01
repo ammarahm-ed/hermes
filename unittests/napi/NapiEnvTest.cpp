@@ -215,10 +215,11 @@ TEST_F(NapiTestFixture, WrapRefFinalizerCanAccessInstanceDataDuringTeardown) {
     ASSERT_EQ(napi_ok, napi_close_handle_scope(env_, scope));
   }
 
-  // Destroy the env. The ref finalizer must be able to read instance
-  // data because instance data finalization runs after ref cleanup.
-  hermes_napi_destroy_env(env_);
-  env_ = nullptr; // Prevent TearDown from double-destroying.
+  // Destroy the Runtime, which drives env shutdown. The ref finalizer
+  // must be able to read instance data because instance data
+  // finalization runs after ref cleanup.
+  env_ = nullptr;
+  rt_.reset();
 
   EXPECT_TRUE(state.called);
   EXPECT_EQ(napi_ok, state.getStatus);
@@ -275,8 +276,9 @@ TEST_F(NapiTestFixture, InstanceDataFinalizedAfterRefFinalizers) {
     ASSERT_EQ(napi_ok, napi_close_handle_scope(env_, scope));
   }
 
-  hermes_napi_destroy_env(env_);
+  // Destroy the Runtime, which drives env shutdown.
   env_ = nullptr;
+  rt_.reset();
 
   // Both finalizers must have been called.
   EXPECT_NE(-1, order.refOrder);
@@ -342,7 +344,265 @@ TEST(NapiEnvDrainJobsTest, DrainJobsDrainsPendingFinalizers) {
   EXPECT_TRUE(finalizerCalled)
       << "Finalizer should have been drained by drainJobs()";
 
-  hermes_napi_destroy_env(env);
+  // Env is owned by the Runtime; rt going out of scope tears it down.
+}
+
+//===========================================================================
+// Wrapped-object finalizers fire with a live env at Runtime teardown
+//===========================================================================
+
+/// Wrap a JS object, drop the only reference from JS, then destroy the
+/// Runtime. The wrap finalizer must fire exactly once with a non-null
+/// env — calling it with nullptr would crash any addon built on
+/// node-addon-api's ObjectWrap (its FinalizeCallback derefs env via
+/// HandleScope). This is the central invariant of the new lifetime
+/// model: the env is owned by the Runtime and outlives every GC cycle,
+/// so user finalizers never see a null env.
+TEST_F(NapiTestFixture, WrappedObjectFinalizerFiresWithLiveEnvAtTeardown) {
+  struct FinalizerState {
+    int callCount = 0;
+    bool sawNullEnv = false;
+  };
+  FinalizerState state;
+
+  // Create a wrapped object inside a scope so it becomes unreachable
+  // after the scope closes.
+  {
+    napi_handle_scope scope = nullptr;
+    ASSERT_EQ(napi_ok, napi_open_handle_scope(env_, &scope));
+
+    napi_value obj = nullptr;
+    ASSERT_EQ(napi_ok, napi_create_object(env_, &obj));
+
+    int nativeData = 0;
+    ASSERT_EQ(
+        napi_ok,
+        napi_wrap(
+            env_,
+            obj,
+            &nativeData,
+            [](napi_env env, void *, void *hint) {
+              auto *s = static_cast<FinalizerState *>(hint);
+              ++s->callCount;
+              if (env == nullptr)
+                s->sawNullEnv = true;
+            },
+            &state,
+            /*result=*/nullptr));
+
+    ASSERT_EQ(napi_ok, napi_close_handle_scope(env_, scope));
+  }
+
+  // Destroy the Runtime. The wrapped object is finalized by
+  // getHeap().finalizeAll(), which queues the callback into the
+  // env (the env is kept alive past finalizeAll precisely for this
+  // reason). The post-shutdown deleter then drains the queue with
+  // a non-null env on the mutator. The heap is post-mortem at
+  // that point, but a callback that only touches native state
+  // (the typical case) works normally.
+  env_ = nullptr;
+  rt_.reset();
+
+  EXPECT_EQ(1, state.callCount);
+  EXPECT_FALSE(state.sawNullEnv);
+}
+
+/// A finalizer that runs during the post-finalizeAll drain may try to
+/// call back into JS (spec says it shouldn't, but the case is real).
+/// NAPI_PREAMBLE detects this via inPostShutdownDrain_ and returns
+/// napi_cannot_run_js — a defined error instead of an undefined
+/// crash. Spec-conformant finalizers (which only free native
+/// resources) ignore this and complete normally.
+TEST_F(NapiTestFixture, FinalizerDuringPostShutdownDrainGetsCannotRunJs) {
+  struct FinalizerState {
+    int callCount = 0;
+    napi_env receivedEnv = nullptr;
+    napi_status createObjectStatus = napi_ok;
+  };
+  FinalizerState state;
+
+  {
+    napi_handle_scope scope = nullptr;
+    ASSERT_EQ(napi_ok, napi_open_handle_scope(env_, &scope));
+
+    // Stash the wrapped object on globalThis so it survives shutdown's
+    // proactive GC and ends up finalized by ~Runtime's finalizeAll.
+    napi_value global = nullptr;
+    ASSERT_EQ(napi_ok, napi_get_global(env_, &global));
+
+    napi_value obj = nullptr;
+    ASSERT_EQ(napi_ok, napi_create_object(env_, &obj));
+
+    int nativeData = 0;
+    ASSERT_EQ(
+        napi_ok,
+        napi_wrap(
+            env_,
+            obj,
+            &nativeData,
+            [](napi_env env, void *, void *hint) {
+              auto *s = static_cast<FinalizerState *>(hint);
+              ++s->callCount;
+              s->receivedEnv = env;
+              // Attempt to allocate — NAPI_PREAMBLE must reject with
+              // napi_cannot_run_js while inPostShutdownDrain_ is set.
+              napi_value v = nullptr;
+              s->createObjectStatus = napi_create_object(env, &v);
+            },
+            &state,
+            /*result=*/nullptr));
+
+    ASSERT_EQ(napi_ok, napi_set_named_property(env_, global, "kept", obj));
+
+    ASSERT_EQ(napi_ok, napi_close_handle_scope(env_, scope));
+  }
+
+  env_ = nullptr;
+  rt_.reset();
+
+  // Callback fired exactly once with a live env.
+  EXPECT_EQ(1, state.callCount);
+  EXPECT_NE(nullptr, state.receivedEnv);
+  // Allocation attempt was rejected cleanly.
+  EXPECT_EQ(napi_cannot_run_js, state.createObjectStatus);
+}
+
+/// A wrapped object that becomes unreachable DURING the env's
+/// shutdown phase (via user code in a cleanup hook that drops its
+/// only ref and forces a GC) has its wrap finalizer drained at the
+/// end of shutdown(), with the heap still functional and
+/// inPostShutdownDrain_ NOT yet set. The finalizer therefore has
+/// full env access — napi_create_object succeeds.
+///
+/// Contrast with FinalizerDuringPostShutdownDrainGetsCannotRunJs,
+/// where the wrapped object survives shutdown() entirely and is
+/// only finalized by finalizeAll, putting its callback in the
+/// constrained post-shutdown drain.
+TEST_F(NapiTestFixture, FinalizerDuringShutdownHasFunctionalEnv) {
+  struct State {
+    napi_env env = nullptr;
+    napi_ref keepAliveRef = nullptr;
+    int callCount = 0;
+    napi_env receivedEnv = nullptr;
+    napi_status createObjectStatus = napi_invalid_arg;
+  };
+  State state;
+  state.env = env_;
+
+  // Wrap a JS object with finalize_cb stored on the NapiObjectData
+  // (result=nullptr so the finalizer goes through the deferred
+  // queue, not the ref-list walk). Hold it alive with a separate
+  // strong napi_ref so it survives until the cleanup hook drops it.
+  {
+    napi_handle_scope scope = nullptr;
+    ASSERT_EQ(napi_ok, napi_open_handle_scope(env_, &scope));
+
+    napi_value obj = nullptr;
+    ASSERT_EQ(napi_ok, napi_create_object(env_, &obj));
+
+    int nativeData = 0;
+    ASSERT_EQ(
+        napi_ok,
+        napi_wrap(
+            env_,
+            obj,
+            &nativeData,
+            [](napi_env env, void *, void *hint) {
+              auto *s = static_cast<State *>(hint);
+              ++s->callCount;
+              s->receivedEnv = env;
+              // The heap should be fully functional — this is the
+              // distinguishing assertion vs. the post-shutdown
+              // drain case.
+              napi_value v = nullptr;
+              s->createObjectStatus = napi_create_object(env, &v);
+            },
+            &state,
+            /*result=*/nullptr));
+
+    ASSERT_EQ(
+        napi_ok, napi_create_reference(env_, obj, 1, &state.keepAliveRef));
+
+    ASSERT_EQ(napi_ok, napi_close_handle_scope(env_, scope));
+  }
+
+  // Cleanup hook drops the strong ref and forces a GC. Both happen
+  // during shutdown()'s cleanup-hook phase, so the wrapped object's
+  // wrap callback queues into pendingFinalizers_ via
+  // finalizeNapiObjectData and is drained by the final
+  // drainPendingFinalizers() at the end of shutdown().
+  ASSERT_EQ(
+      napi_ok,
+      napi_add_env_cleanup_hook(
+          env_,
+          [](void *arg) {
+            auto *s = static_cast<State *>(arg);
+            ASSERT_EQ(napi_ok, napi_delete_reference(s->env, s->keepAliveRef));
+            s->env->runtime.collect("test-shutdown-gc");
+          },
+          &state));
+
+  env_ = nullptr;
+  rt_.reset();
+
+  EXPECT_EQ(1, state.callCount);
+  EXPECT_NE(nullptr, state.receivedEnv);
+  // Full env access — napi_create_object succeeds because the
+  // heap is still functional when the drain runs.
+  EXPECT_EQ(napi_ok, state.createObjectStatus);
+}
+
+/// If the wrapped object becomes unreachable AND is collected before
+/// Runtime teardown (so its finalizer queues during normal operation
+/// and drains via the drainJobs hook or NAPI_PREAMBLE), the finalizer
+/// MUST fire with a non-null env.
+TEST(NapiEnvTeardownLiveEnvTest, FinalizerBeforeTeardownGetsLiveEnv) {
+  using namespace hermes::vm;
+
+  auto config = RuntimeConfig::Builder()
+                    .withGCConfig(
+                        GCConfig::Builder()
+                            .withInitHeapSize(1 << 16)
+                            .withMaxHeapSize(1 << 19)
+                            .build())
+                    .build();
+  auto rt = Runtime::create(config);
+  napi_env env = hermes_napi_create_env(&*rt);
+
+  struct FinalizerState {
+    int callCount = 0;
+    bool sawNullEnv = false;
+  } state;
+
+  {
+    napi_handle_scope scope = nullptr;
+    ASSERT_EQ(napi_ok, napi_open_handle_scope(env, &scope));
+
+    napi_value ext = nullptr;
+    ASSERT_EQ(
+        napi_ok,
+        napi_create_external(
+            env,
+            &state,
+            [](napi_env e, void *data, void *) {
+              auto *s = static_cast<FinalizerState *>(data);
+              ++s->callCount;
+              if (e == nullptr)
+                s->sawNullEnv = true;
+            },
+            nullptr,
+            &ext));
+
+    ASSERT_EQ(napi_ok, napi_close_handle_scope(env, scope));
+  }
+
+  rt->collect("test");
+  env->drainPendingFinalizers();
+
+  EXPECT_EQ(1, state.callCount);
+  EXPECT_FALSE(state.sawNullEnv);
+
+  // Env is owned by rt; teardown is implicit.
 }
 
 } // namespace

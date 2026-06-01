@@ -88,10 +88,9 @@ class NapiTsfnTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    if (env_) {
-      hermes_napi_destroy_env(env_);
-      env_ = nullptr;
-    }
+    // The env is owned by the Runtime and torn down as part of
+    // ~Runtime. Drop the borrowed pointer and reset the runtime.
+    env_ = nullptr;
     rt_.reset();
   }
 
@@ -191,7 +190,7 @@ TEST_F(NapiTsfnTest, RepeatedUnrefAndRef_AreIdempotent) {
 
 TEST_F(NapiTsfnTest, EnvTeardown_ReleasesLoopSource) {
   // Create a tsfn but never release it on the test thread. Env teardown
-  // (TearDown calls hermes_napi_destroy_env) must release the source.
+  // (via Runtime destruction in TearDown) must release the source.
   napi_handle_scope scope = nullptr;
   napi_open_handle_scope(env_, &scope);
   napi_threadsafe_function tsfn = makeTsfn();
@@ -199,8 +198,10 @@ TEST_F(NapiTsfnTest, EnvTeardown_ReleasesLoopSource) {
   napi_close_handle_scope(env_, scope);
   (void)tsfn;
 
-  hermes_napi_destroy_env(env_);
+  // Destroy the Runtime — env tsfn cleanup runs as part of
+  // shutdown() and releases the loop ref.
   env_ = nullptr;
+  rt_.reset();
   EXPECT_TRUE(loop_.loopRefs == 0);
 }
 
@@ -308,7 +309,7 @@ TEST(NapiTsfnNoLoopSourceTest, TsfnWorksWithoutLoopSourceCallbacks) {
   loop.drainAll();
 
   napi_close_handle_scope(env, scope);
-  hermes_napi_destroy_env(env);
+  // env is owned by the Runtime; it dies with `rt` going out of scope.
 }
 
 } // namespace napi

@@ -138,7 +138,6 @@ int main(int argc, char **argv) {
     if (isBytecode) {
       llvh::errs() << "Error: --compile cannot be used with .hbc input\n";
       napi_close_handle_scope(env, scope);
-      hermes_napi_destroy_env(env);
       return 1;
     }
     hermes_compile_flags cflags{};
@@ -158,7 +157,6 @@ int main(int argc, char **argv) {
     if (status != napi_ok) {
       printAndClearException(env);
       napi_close_handle_scope(env, scope);
-      hermes_napi_destroy_env(env);
       return 1;
     }
     std::error_code ec;
@@ -168,13 +166,11 @@ int main(int argc, char **argv) {
                    << ": " << ec.message() << "\n";
       hermes_free_bytecode(bytecode);
       napi_close_handle_scope(env, scope);
-      hermes_napi_destroy_env(env);
       return 1;
     }
     os.write(reinterpret_cast<const char *>(bytecode), bytecodeSize);
     hermes_free_bytecode(bytecode);
     napi_close_handle_scope(env, scope);
-    hermes_napi_destroy_env(env);
     return 0;
   }
 
@@ -213,6 +209,6 @@ int main(int argc, char **argv) {
   }
 
   napi_close_handle_scope(env, scope);
-  hermes_napi_destroy_env(env);
+  // env is owned by the runtime; it dies with `runtime` going out of scope.
   return exitCode;
 }

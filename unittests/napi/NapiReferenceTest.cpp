@@ -731,9 +731,9 @@ TEST_F(NapiTestFixture, Reference_EnvDestroyCallsFinalizers) {
 
   closeScope(env_, scope);
 
-  // Destroy the env — this should call the finalizer.
-  hermes_napi_destroy_env(env_);
-  env_ = nullptr; // Prevent TearDown from double-destroying.
+  // Destroy the Runtime — env shutdown calls the finalizer.
+  env_ = nullptr;
+  rt_.reset();
 
   EXPECT_TRUE(envFinalizerCalled);
 }

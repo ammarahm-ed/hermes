@@ -108,18 +108,49 @@ typedef hermes_napi_host hermes_napi_event_loop;
 
 /// Create a new NAPI environment backed by a Hermes Runtime.
 /// The \p hermes_runtime parameter is an opaque pointer to a
-/// hermes::vm::Runtime instance. The caller is responsible for keeping
-/// the Runtime alive for the lifetime of the returned env, and must
-/// call hermes_napi_destroy_env when done.
+/// hermes::vm::Runtime instance.
+///
+/// The env is owned by the Runtime and is automatically torn down and
+/// freed when the Runtime is destroyed. The caller must keep the
+/// Runtime alive for as long as it uses the returned pointer, and must
+/// not free the env itself.
+///
+/// Finalizer semantics at Runtime teardown:
+///
+/// Finalizers registered via napi_wrap, napi_add_finalizer,
+/// napi_create_external, etc. are guaranteed to be invoked exactly
+/// once with the live env that owns the wrapped object. We never
+/// invoke user finalizers with env == nullptr.
+///
+/// Callbacks fire in one of two contexts, both with a non-null env:
+///
+///   - Unrestricted: the wrapped object was collected while the GC
+///     heap was fully functional — either during normal operation
+///     (collection happens, callback is drained at the next
+///     NAPI_PREAMBLE / drainJobs) or during the env's shutdown
+///     phase (cleanup hooks, persistent-reference finalizers, the
+///     instance-data finalizer, or thread-safe-function cleanup
+///     transitively triggered a GC; the callback is drained at the
+///     end of shutdown). The callback may freely allocate, call
+///     into JS, and use the env as in any other context.
+///
+///   - Restricted: the wrapped object was still reachable from JS
+///     roots at teardown and was finalized by
+///     getHeap().finalizeAll() itself. The callback is drained
+///     after finalizeAll, with the GC heap in a post-mortem state.
+///     Any NAPI call that would allocate or run JavaScript returns
+///     napi_cannot_run_js instead of executing. A spec-conformant
+///     finalizer (which only frees native resources — free(),
+///     close(), delete, refcount decrement) is unaffected. A
+///     finalizer that tries to call back into JS receives the
+///     error code and may choose to log it.
+///
 /// The optional \p host provides host integration callbacks (async work,
 /// thread-safe functions, etc.); if nullptr, those APIs return
 /// napi_generic_failure.
 napi_env hermes_napi_create_env(
     void *hermes_runtime,
     hermes_napi_host *host = nullptr);
-
-/// Destroy a NAPI environment previously created with hermes_napi_create_env.
-void hermes_napi_destroy_env(napi_env env);
 
 /// Get the last module registered via the deprecated napi_module_register().
 /// Returns nullptr if no module has been registered.

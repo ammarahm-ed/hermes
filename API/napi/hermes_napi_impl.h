@@ -317,6 +317,28 @@ struct napi_env__ {
   /// queued callbacks.
   void drainPendingFinalizers();
 
+  /// Drive substantive shutdown of this environment. Drains pending
+  /// finalizers, runs cleanup hooks, finalizes persistent references,
+  /// runs the instance data finalizer, and tears down deferreds and
+  /// thread-safe functions. Registered as a Runtime shutdown
+  /// callback so it runs before Runtime::~Runtime calls
+  /// getHeap().finalizeAll(), with a fully functional heap.
+  ///
+  /// User code invoked here (cleanup hooks, ref finalizers, etc.)
+  /// may transitively trigger GC, which queues wrap callbacks via
+  /// finalizeNapiObjectData. A final drainPendingFinalizers() at
+  /// the end of shutdown() runs those callbacks while the heap is
+  /// still fully functional, so they have unrestricted env access.
+  ///
+  /// After this returns, the env structure still exists (it must
+  /// outlive finalizeAll so finalizeNapiObjectData can call
+  /// queuePendingFinalizer for wrapped objects still alive at
+  /// teardown). Only callbacks queued by finalizeAll itself end
+  /// up in the Runtime's post-shutdown deleter, where
+  /// inPostShutdownDrain_ is set and NAPI calls that would
+  /// allocate or run JS return napi_cannot_run_js.
+  void shutdown();
+
   //--- Reference management ---
 
   /// Add a reference to the env's linked list.
@@ -429,13 +451,6 @@ struct napi_env__ {
   /// Hint passed to the instance data finalizer.
   void *instanceDataFinalizeHint_ = nullptr;
 
-  /// Shared flag indicating whether the env is still alive. GC
-  /// finalizers that capture the env pointer also capture this flag.
-  /// When the env is destroyed, the flag is set to false so that
-  /// finalizers running during Runtime::~Runtime() (after the env
-  /// is freed) can detect the stale env and skip accessing it.
-  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
-
   /// Optional host integration interface provided by the host
   /// application. When non-null, enables async work APIs
   /// (napi_queue_async_work, napi_cancel_async_work) and thread-safe
@@ -486,6 +501,22 @@ struct napi_env__ {
   /// True while drainPendingFinalizers() is executing, to prevent
   /// re-entrant draining (a callback may trigger GC which queues more).
   bool drainingFinalizers_ = false;
+
+  /// True while running the final post-finalizeAll drain in the
+  /// post-shutdown deleter. Set by the deleter before invoking
+  /// drainPendingFinalizers() and never cleared (the env is deleted
+  /// immediately after).
+  ///
+  /// At this point Runtime::~Runtime has already called
+  /// getHeap().finalizeAll(), so the GC heap is in a post-mortem
+  /// state — allocating new JS values or triggering a collection
+  /// would re-finalize already-finalized cells (UB). NAPI_PREAMBLE
+  /// returns napi_cannot_run_js when this flag is set, so any
+  /// finalizer callback that calls back into JS gets a defined
+  /// error instead of an undefined crash. Spec-conformant
+  /// finalizers (which only free native resources) ignore the
+  /// return and complete normally.
+  bool inPostShutdownDrain_ = false;
 };
 
 //===========================================================================
@@ -517,12 +548,21 @@ inline napi_status napi_set_last_error(
 // Argument checking macros
 //===========================================================================
 
-/// Return napi_invalid_arg if env is null.
-#define CHECK_ENV(env)         \
-  do {                         \
-    if ((env) == nullptr) {    \
-      return napi_invalid_arg; \
-    }                          \
+/// Return napi_invalid_arg if env is null, or napi_cannot_run_js if
+/// the env is in its post-shutdown drain (running queued finalizers
+/// after Runtime::~Runtime's finalizeAll). At that point the GC heap
+/// is in a post-mortem state; allocating new JS values or calling
+/// into JS would re-finalize already-finalized cells. The flag
+/// gives finalizer callbacks that try to call back into JS a defined
+/// error instead of an undefined crash. Spec-conformant finalizers
+/// (which only free native resources) never see this code.
+#define CHECK_ENV(env)               \
+  do {                               \
+    if ((env) == nullptr) {          \
+      return napi_invalid_arg;       \
+    }                                \
+    if ((env)->inPostShutdownDrain_) \
+      return napi_cannot_run_js;     \
   } while (0)
 
 /// Return the given status if the condition is false.
@@ -550,6 +590,10 @@ inline napi_status napi_set_last_error(
 /// Functions that are exception-safe (handle scopes, error info, getters
 /// for singletons, type checks, value extraction) should use CHECK_ENV
 /// instead.
+///
+/// CHECK_ENV (called first) returns napi_cannot_run_js if the env is
+/// in its post-shutdown drain, so finalizer callbacks that try to call
+/// back into JS get a defined error instead of triggering re-finalization.
 #define NAPI_PREAMBLE(env)                                           \
   do {                                                               \
     CHECK_ENV((env));                                                \

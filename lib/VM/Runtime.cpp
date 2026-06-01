@@ -504,7 +504,20 @@ Runtime::~Runtime() {
   samplingProfiler.reset();
 #endif // HERMESVM_SAMPLING_PROFILER_AVAILABLE
 
+  // Run embedder shutdown callbacks while the heap is still functional.
+  // Callbacks may allocate, call into JS, and trigger GC.
+  for (auto &cb : shutdownCallbacks_)
+    cb();
+  shutdownCallbacks_.clear();
+
   getHeap().finalizeAll();
+
+  // Heap is now quiesced; run deleters for embedder objects that had to
+  // outlive finalizeAll (e.g., napi_env whose NativeState finalizers
+  // were invoked above and called env->queuePendingFinalizer).
+  for (auto &d : postShutdownDeleters_)
+    d();
+  postShutdownDeleters_.clear();
   // Remove inter-module dependencies so we can delete them in any order.
   for (auto &module : runtimeModuleList_) {
     module.prepareForDestruction();

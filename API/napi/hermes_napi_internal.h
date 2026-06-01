@@ -68,7 +68,6 @@ struct NapiFinalizerEntry {
 /// napi_wrap, napi_add_finalizer, and napi_type_tag_object.
 struct NapiObjectData {
   napi_env env;
-  std::shared_ptr<bool> envAlive;
 
   // -- Wrap (napi_wrap) --
   bool hasWrap = false;

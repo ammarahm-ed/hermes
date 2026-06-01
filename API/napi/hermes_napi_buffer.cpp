@@ -181,14 +181,11 @@ napi_status NAPI_CDECL napi_create_external_buffer(
   // finalizer.
   std::shared_ptr<void> ctx;
   if (finalize_cb) {
-    auto envAlive = env->alive_;
-    ctx = std::shared_ptr<void>(
-        data, [env, envAlive, finalize_cb, finalize_hint](void *d) {
-          if (*envAlive) {
-            env->queuePendingFinalizer(finalize_cb, d, finalize_hint);
-          } else {
-            finalize_cb(nullptr, d, finalize_hint);
-          }
+    // The env is owned by the Runtime and outlives every GC cycle,
+    // so capturing it by raw pointer is safe.
+    ctx =
+        std::shared_ptr<void>(data, [env, finalize_cb, finalize_hint](void *d) {
+          env->queuePendingFinalizer(finalize_cb, d, finalize_hint);
         });
   }
 

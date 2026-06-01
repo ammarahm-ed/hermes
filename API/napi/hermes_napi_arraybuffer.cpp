@@ -88,20 +88,12 @@ napi_status NAPI_CDECL napi_create_external_arraybuffer(
   // JSArrayBuffer's NativeState by setExternalDataBlock.
   std::shared_ptr<void> ctx;
   if (finalize_cb) {
-    // Capture env, finalize_cb, finalize_hint, and the env's alive
-    // flag. The shared_ptr's custom deleter is called when the
-    // JSArrayBuffer is GC'd or detached. If the env has been
-    // destroyed (alive == false), skip the callback since the env
-    // memory is freed.
-    auto envAlive = env->alive_;
+    // The env is owned by the Runtime and outlives every GC cycle,
+    // so capturing it by raw pointer is safe.
     ctx = std::shared_ptr<void>(
-        external_data, [env, envAlive, finalize_cb, finalize_hint](void *data) {
-          if (*envAlive) {
-            // Queue for deferred execution outside GC.
-            env->queuePendingFinalizer(finalize_cb, data, finalize_hint);
-          } else {
-            finalize_cb(nullptr, data, finalize_hint);
-          }
+        external_data, [env, finalize_cb, finalize_hint](void *data) {
+          // Queue for deferred execution outside GC.
+          env->queuePendingFinalizer(finalize_cb, data, finalize_hint);
         });
   }
 

@@ -21,7 +21,6 @@ using namespace hermes::vm;
 /// called during GC finalization when the external object is collected.
 struct NapiExternalDecoration : public DecoratedObject::Decoration {
   napi_env env;
-  std::shared_ptr<bool> envAlive;
   void *data;
   napi_finalize finalize_cb;
   void *finalize_hint;
@@ -37,20 +36,17 @@ struct NapiExternalDecoration : public DecoratedObject::Decoration {
       napi_finalize finalize_cb,
       void *finalize_hint)
       : env(env),
-        envAlive(env->alive_),
         data(data),
         finalize_cb(finalize_cb),
         finalize_hint(finalize_hint) {}
 
   ~NapiExternalDecoration() override {
     if (finalize_cb) {
-      if (*envAlive) {
-        // Queue for deferred execution outside GC — calling back
-        // into JS during GC sweep causes reentrancy.
-        env->queuePendingFinalizer(finalize_cb, data, finalize_hint);
-      } else {
-        finalize_cb(nullptr, data, finalize_hint);
-      }
+      // Queue for deferred execution outside GC — calling back into
+      // JS during GC sweep causes reentrancy. The env is owned by
+      // the Runtime and outlives every GC cycle, so dereferencing it
+      // here is always safe.
+      env->queuePendingFinalizer(finalize_cb, data, finalize_hint);
     }
   }
 };

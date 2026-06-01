@@ -240,6 +240,23 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// perform housekeeping such as draining deferred finalizers.
   void addDrainJobsCallback(std::function<void()> callback);
 
+  /// Register a callback invoked from ~Runtime() BEFORE
+  /// getHeap().finalizeAll() runs. At this point the heap is still
+  /// fully functional — callbacks may allocate, call into JS, and
+  /// trigger GC. Used by embedders (e.g., NAPI) to drive substantive
+  /// teardown of their state (running cleanup hooks, finalizing
+  /// persistent references, etc.) while a valid JS execution context
+  /// is still available. Callbacks run in registration order.
+  void addShutdownCallback(std::function<void()> callback);
+
+  /// Register a deleter invoked from ~Runtime() AFTER
+  /// getHeap().finalizeAll() returns. At this point the heap is
+  /// quiesced — do NOT allocate, call into JS, or trigger GC. Used
+  /// to free embedder objects that needed to outlive finalizeAll
+  /// (e.g., a napi_env whose NativeState finalizers were called by
+  /// finalizeAll). Deleters run in registration order.
+  void addPostShutdownDeleter(std::function<void()> deleter);
+
   /// Add a custom function that will be executed sometime during garbage
   /// collection to mark additional weak GC roots that may not be known to the
   /// Runtime.
@@ -1222,6 +1239,8 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   std::vector<std::function<void(HeapSnapshot &)>> customSnapshotNodeFuncs_;
   std::vector<std::function<void(HeapSnapshot &)>> customSnapshotEdgeFuncs_;
   std::vector<std::function<void()>> drainJobsCallbacks_;
+  std::vector<std::function<void()>> shutdownCallbacks_;
+  std::vector<std::function<void()>> postShutdownDeleters_;
 
   /// All state related to JIT compilation.
   JITContext jitContext_;
@@ -2162,6 +2181,14 @@ inline void Runtime::addCustomWeakRootsFunction(
 
 inline void Runtime::addDrainJobsCallback(std::function<void()> callback) {
   drainJobsCallbacks_.emplace_back(std::move(callback));
+}
+
+inline void Runtime::addShutdownCallback(std::function<void()> callback) {
+  shutdownCallbacks_.emplace_back(std::move(callback));
+}
+
+inline void Runtime::addPostShutdownDeleter(std::function<void()> deleter) {
+  postShutdownDeleters_.emplace_back(std::move(deleter));
 }
 
 inline void Runtime::addCustomSnapshotFunction(
