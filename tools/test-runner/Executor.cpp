@@ -240,7 +240,11 @@ TestRuntimeEnv createTestRuntime(
 /// callbacks and other microtask contexts.
 vm::ExecutionStatus drainMicrotasks(vm::Runtime &runtime) {
   runtime.clearKeptObjects();
-  runtime.cleanUpFinalizationCallbacks();
+  if (LLVM_UNLIKELY(
+          runtime.cleanUpFinalizationCallbacks() ==
+          vm::ExecutionStatus::EXCEPTION)) {
+    return vm::ExecutionStatus::EXCEPTION;
+  }
   if (!runtime.hasMicrotaskQueue())
     return vm::ExecutionStatus::RETURNED;
   return runtime.drainJobs();
