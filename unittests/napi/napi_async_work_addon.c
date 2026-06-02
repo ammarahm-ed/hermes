@@ -168,7 +168,6 @@ static napi_value doManyWorks(napi_env env, napi_callback_info info) {
 typedef struct {
   napi_threadsafe_function tsfn;
   int32_t n;
-  pthread_t worker;
 } TsfnCtx;
 
 /// Called on the JS thread for each tsfn dispatch. `data` is the int
@@ -240,8 +239,9 @@ static napi_value postFromThread(napi_env env, napi_callback_info info) {
   // The initial_thread_count=1 slot is owned by the worker — we do not
   // release on the JS thread. The worker releases when it has finished
   // calling, which drops refcount to 0 and triggers tsfn_finalize.
-  pthread_create(&c->worker, NULL, tsfn_worker_main, c);
-  pthread_detach(c->worker);
+  pthread_t worker;
+  pthread_create(&worker, NULL, tsfn_worker_main, c);
+  pthread_detach(worker);
   return NULL;
 }
 
