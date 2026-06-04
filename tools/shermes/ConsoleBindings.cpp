@@ -54,8 +54,7 @@ class VectorMutableBuffer : public facebook::jsi::MutableBuffer {
 
 } // namespace
 
-#ifdef JSI_UNSTABLE
-  // Simple EventLoopControl that just adds the tasks to a queue when
+// Simple EventLoopControl that just adds the tasks to a queue when
 // `scheduleTask` is called and tracks the number of sources. When the queue
 // is empty, users can also wait for new tasks to be added.
 class EventLoopControl final : public facebook::hermes::IEventLoopControl {
@@ -122,7 +121,6 @@ class EventLoopControl final : public facebook::hermes::IEventLoopControl {
   // The set of active sources
   llvh::DenseSet<uint64_t> sources_{};
 };
-#endif
 
 /// Object that contains console state that needs to be preserved between
 /// init_console_bindings and run_event_loop.
@@ -135,10 +133,8 @@ struct SHConsoleContext {
   int scriptArgc;
   const char *const *scriptArgv;
 
-#ifdef JSI_UNSTABLE
   EventLoopControl eventLoopControl{};
   facebook::hermes::HermesRuntime *hermesRuntime{nullptr};
-#endif
 
   SHConsoleContext(
       facebook::jsi::Object &&helpers,
@@ -149,14 +145,12 @@ struct SHConsoleContext {
         scriptArgv(scriptArgv) {}
 
   ~SHConsoleContext() {
-#ifdef JSI_UNSTABLE
     if (hermesRuntime) {
       auto *iface =
           facebook::jsi::castInterface<facebook::hermes::ISetEventLoopControl>(
               hermesRuntime);
       iface->setEventLoopControl(nullptr);
     }
-#endif
   }
 };
 
@@ -381,12 +375,10 @@ extern "C" SHERMES_EXPORT SHConsoleContext *init_console_bindings(
 
   initHermesCLIBindings(hrt, consoleContext.get());
 
-#ifdef JSI_UNSTABLE
   consoleContext->hermesRuntime = &hrt;
   auto *setEventLoopInterface =
       jsi::castInterface<facebook::hermes::ISetEventLoopControl>(&hrt);
   setEventLoopInterface->setEventLoopControl(&consoleContext->eventLoopControl);
-#endif
 
   jsi::Object &helpers = consoleContext->helpers;
 
@@ -457,10 +449,8 @@ extern "C" SHERMES_EXPORT bool run_event_loop(
       hrt.drainMicrotasks();
     }
 
-#ifdef JSI_UNSTABLE
     // Run all tasks queued in the event loop.
     consoleContext->eventLoopControl.drainTasks();
-#endif
   } catch (jsi::JSError &e) {
     // Handle JS exceptions here.
     fprintf(stderr, "JS Exception: %s\n", e.what());

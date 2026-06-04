@@ -747,7 +747,6 @@ auto maybeCatchException(const F &f) -> decltype(f()) {
 #endif
 }
 
-#ifdef JSI_UNSTABLE
 // Simple event-loop queue: tasks scheduled via `scheduleTask` are drained
 // by `drainTasks` on the JS thread. `registerTaskQueueSource` /
 // `unregisterTaskQueueSource` track external sources (workers, async work)
@@ -838,7 +837,6 @@ class EventLoopControl final : public facebook::hermes::IEventLoopControl {
   // Count of active anonymous sources (from the addAnonSource API).
   int anonSources_{0};
 };
-#endif
 
 #if defined(HERMES_ENABLE_NAPI) && defined(JSI_UNSTABLE)
 // Bridges a hermes_napi_host onto EventLoopControl plus a worker thread,
@@ -939,11 +937,9 @@ bool executeHBCBytecodeImpl(
 
   std::unique_ptr<vm::StatSamplingThread> statSampler;
 
-#ifdef JSI_UNSTABLE
   // Declared before hermesRuntime so it outlives the runtime. The runtime's
   // finalizerExecutor_ may call into the EventLoopControl during destruction.
   EventLoopControl eventLoopControl{};
-#endif
 
 #if defined(HERMES_ENABLE_NAPI) && defined(JSI_UNSTABLE)
   // NAPI host adapter — must outlive any napi_env created via
@@ -1000,12 +996,10 @@ bool executeHBCBytecodeImpl(
 #endif
   }
 
-#ifdef JSI_UNSTABLE
   auto *setEventLoopInterface =
       facebook::jsi::castInterface<facebook::hermes::ISetEventLoopControl>(
           hermesRuntime.get());
   setEventLoopInterface->setEventLoopControl(&eventLoopControl);
-#endif
 
   vm::GCScope scope(*runtime);
   ConsoleHostContext ctx{*runtime};
@@ -1093,11 +1087,9 @@ bool executeHBCBytecodeImpl(
     }
   }
 
-#ifdef JSI_UNSTABLE
   // Run all tasks queued in the event loop. Drains JSI-scheduled tasks
   // and any pending NAPI async-work completions / tsfn dispatches.
   eventLoopControl.drainTasks();
-#endif
 
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   if (options.sampleProfiling != ExecuteOptions::SampleProfilingMode::None) {
