@@ -754,6 +754,23 @@ TEST_F(TypeContextTest, CanBeAnyAndConveniences) {
   EXPECT_FALSE(ctx.isKnownPrimitiveType(Type::createObject()));
 }
 
+TEST_F(TypeContextTest, WellKnownUnionsAreInterned) {
+  TypeContext tc;
+  // Dynamically building a well-known union must return its canonical
+  // well-known id. Regression: the last well-known union (ObjectOrUndef)
+  // was skipped by the intern-table pre-population loop, so building it
+  // dynamically produced a fresh duplicate id != createObjectOrUndef().
+  EXPECT_EQ(
+      Type::createObjectOrUndef(),
+      tc.unionTy(Type::createObject(), Type::createUndefined()));
+  EXPECT_EQ(
+      Type::createObjectOrNull(),
+      tc.unionTy(Type::createObject(), Type::createNull()));
+  EXPECT_EQ(
+      Type::createStringOrSymbol(),
+      tc.unionTy(Type::createString(), Type::createSymbol()));
+}
+
 TEST(TypeContextNoGuardTest, PrintFallback) {
   // Without a TypeContext, Type::print emits a "type#<id>" placeholder.
   std::string s;

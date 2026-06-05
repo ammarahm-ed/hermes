@@ -858,7 +858,7 @@ TypeContext::TypeContext() {
 
   // Pre-populate intern table with well-known unions.
   // TypeContext is a friend of Type, so we can access Type::id_.
-  for (uint32_t id = _kFirstUnionId; id != _kLastUnionId; ++id) {
+  for (uint32_t id = _kFirstUnionId; id <= _kLastUnionId; ++id) {
     auto arms = getUnionArms(Type{id});
     UnionInternKey key;
     key.arms.reserve(arms.size());
