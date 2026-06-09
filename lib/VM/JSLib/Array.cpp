@@ -1672,11 +1672,9 @@ class StandardSortModel : public SortModel {
     assert(!lv_.bValue->isEmpty());
 
     if (lv_.aValue->isUndefined()) {
-      // Spec defines undefined as greater than everything.
-      return 1;
+      return lv_.bValue->isUndefined() ? 0 : 1;
     }
     if (lv_.bValue->isUndefined()) {
-      // Spec defines undefined as greater than everything.
       return -1;
     }
 
@@ -1701,6 +1699,119 @@ class StandardSortModel : public SortModel {
       return (res < 0) ? -1 : (res > 0 ? 1 : 0);
     } else {
       // Convert both arguments to strings and compare
+      auto aValueRes = toString_RJS(runtime_, lv_.aValue);
+      if (LLVM_UNLIKELY(aValueRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+      lv_.aValue = aValueRes->getHermesValue();
+
+      auto bValueRes = toString_RJS(runtime_, lv_.bValue);
+      if (LLVM_UNLIKELY(bValueRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+      lv_.bValue = bValueRes->getHermesValue();
+
+      return lv_.aValue->getString()->compare(lv_.bValue->getString());
+    }
+  }
+};
+
+/// A sort model that operates directly on a JSArray's indexed storage.
+/// This is only safe when the caller owns the array and user code has no
+/// reference to it (e.g. the fresh array created by toSorted). Unlike
+/// StandardSortModel, this bypasses the full property descriptor machinery
+/// and reads/writes via storage->at()/storage->set() directly.
+/// The array must not contain any holes (empty values). Its beginIndex must be
+/// 0 and elements count must be equal to length.
+class DirectSortModel : public SortModel {
+ private:
+  Runtime &runtime_;
+  GCScope gcScope_;
+  Handle<Callable> compareFn_;
+  Handle<JSArray> arr_;
+
+  struct : Locals {
+    PinnedValue<> aValue;
+    PinnedValue<> bValue;
+    PinnedValue<> tmpValue;
+  } lv_;
+  LocalsRAII lraii_;
+  GCScope::Marker gcMarker_;
+
+  /// Get the indexed storage, which must be re-fetched after any GC safepoint.
+  JSArray::StorageType *storage() {
+    return arr_->getIndexedStorageUnsafe(runtime_);
+  }
+
+ public:
+  DirectSortModel(
+      Runtime &runtime,
+      Handle<JSArray> arr,
+      Handle<Callable> compareFn)
+      : runtime_(runtime),
+        gcScope_(runtime),
+        compareFn_(compareFn),
+        arr_(arr),
+        lraii_(runtime_, &lv_),
+        gcMarker_(gcScope_.createMarker()) {
+    assert(arr_->getIndexedStorageUnsafe(runtime_) && "Empty array");
+#ifndef NDEBUG
+    NoAllocScope noAlloc{runtime};
+    auto *s = arr->getIndexedStorageUnsafe(runtime);
+    assert(
+        (arr->getBeginIndex() == 0) &&
+        (arr->getElemCount() == JSArray::getLength(*arr, runtime)));
+    for (uint32_t i = 0, e = arr->getEndIndex(); i < e; ++i) {
+      assert(
+          !s->at(i).isEmpty() && "DirectSortModel input must not have holes");
+    }
+#endif
+  }
+
+  ExecutionStatus swap(uint32_t a, uint32_t b) override {
+    NoAllocScope noAlloc{runtime_};
+    auto *s = storage();
+    auto tmp = s->at(a);
+    s->set(a, s->at(b), runtime_.getHeap());
+    s->set(b, tmp, runtime_.getHeap());
+    return ExecutionStatus::RETURNED;
+  }
+
+  CallResult<int> compare(uint32_t a, uint32_t b) override {
+    {
+      NoAllocScope noAlloc{runtime_};
+      auto *s = storage();
+      auto aSmall = s->at(a);
+      auto bSmall = s->at(b);
+      if (aSmall.isUndefined()) {
+        return bSmall.isUndefined() ? 0 : 1;
+      }
+      if (bSmall.isUndefined()) {
+        return -1;
+      }
+      lv_.aValue = aSmall.unboxToHV(runtime_);
+      lv_.bValue = bSmall.unboxToHV(runtime_);
+    }
+
+    GCScopeMarkerRAII gcMarker{gcScope_, gcMarker_};
+    if (compareFn_) {
+      auto callRes = Callable::executeCall2(
+          compareFn_,
+          runtime_,
+          Runtime::getUndefinedValue(),
+          lv_.aValue.get(),
+          lv_.bValue.get());
+      if (LLVM_UNLIKELY(callRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+      lv_.tmpValue = std::move(*callRes);
+      auto intRes = toNumber_RJS(runtime_, lv_.tmpValue);
+      if (LLVM_UNLIKELY(intRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+      auto res = intRes->getNumber();
+      return (res < 0) ? -1 : (res > 0 ? 1 : 0);
+    } else {
       auto aValueRes = toString_RJS(runtime_, lv_.aValue);
       if (LLVM_UNLIKELY(aValueRes == ExecutionStatus::EXCEPTION)) {
         return ExecutionStatus::EXCEPTION;
@@ -4761,11 +4872,12 @@ CallResult<HermesValue> arrayPrototypeToSorted(void *, Runtime &runtime) {
     }
   }
 
-  // Sort A in place.
+  // Sort A in place. Use DirectSortModel since A is a fresh array that
+  // user code has no reference to — direct storage access is safe.
   // 5. Let SortCompare be an Abstract Closure calling
   // CompareArrayElements(x, y, comparator).
   // 7-8. Copy sortedList into A (already done above, sort in place).
-  StandardSortModel sm(runtime, lv.A, compareFn);
+  DirectSortModel sm(runtime, lv.A, compareFn);
   if (LLVM_UNLIKELY(quickSort(&sm, 0u, len32) == ExecutionStatus::EXCEPTION))
     return ExecutionStatus::EXCEPTION;
 
