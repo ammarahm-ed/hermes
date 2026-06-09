@@ -64,9 +64,98 @@ enum class TypeKind : uint8_t {
   Union, ///< Union of two or more types.
 };
 
+/// Primitive-mask fast path.
+///
+/// In legacy untyped JavaScript -- which is what this fast path targets --
+/// most types are built only from JavaScript primitives (number, string,
+/// boolean, bigint, symbol, null, undefined) plus the unrefined Object and the
+/// internal Empty/Uninit markers. (Typed programs lean on refined object types,
+/// which are not maskable and take the general path.) For such a type,
+/// TypeContext caches a compact bitmask -- its "primMask" -- in the type table
+/// entry, encoding the whole type as a set of bits. When both operands of a
+/// type operation (unionTy/intersectTy/subtractTy, isSubsetOf/areDisjoint, the
+/// canBe* queries, the isPrimitive/isNonPtr predicates, ...) are maskable, the
+/// operation is computed with a handful of bit operations plus a small
+/// number-family lookup table, instead of walking and re-interning union arms;
+/// the result is then mapped back to its canonical interned Type through a
+/// cache. Refined object types and compiler-internal kinds (Environment,
+/// FunctionCode, ...) cannot be encoded this way: their entries are tagged
+/// kNotMaskable and always take the general, slower path. The mask is a pure
+/// accelerator -- it never changes which Type an operation yields, only how
+/// quickly it is found.
+///
+/// A primMask is kPrimMaskBits wide, in two parts:
+///   - the low kNumCodeBits bits hold one code from the number-family lattice
+///     (None < UInt31 < {Int32, Uint32} < Int32|Uint32 < Number), because the
+///     numeric subtypes overlap and so cannot be independent bits; and
+///   - the upper kKindBits bits are independent one-per-kind flags, one for
+///     each non-numeric primitive plus Object/Empty/Uninit.
+///
+/// The encoding constants below live in a nested namespace so they do not leak
+/// into the public `hermes` namespace; they sit in the header only because
+/// TypeEntry and the white-box unit tests reference them. The lattice tables
+/// and the leaf->mask mapping that operate on the encoding are private to
+/// TypeContext.cpp.
+namespace type_internal {
+
+/// Width of the number-family lattice code, in the low bits of a primMask.
+static constexpr unsigned kNumCodeBits = 3;
+/// Number of independent one-per-kind bits above the number code.
+static constexpr unsigned kKindBits = 9;
+/// Total width of a primMask.
+static constexpr unsigned kPrimMaskBits = kNumCodeBits + kKindBits;
+
+/// Sentinel primMask for a type that cannot be represented as a mask: the
+/// first value past the valid kPrimMaskBits-wide range, so it never collides
+/// with a real mask.
+static constexpr uint16_t kNotMaskable = 1u << kPrimMaskBits;
+
+/// Selects the number-family lattice code (the low kNumCodeBits bits).
+static constexpr uint16_t kNumCodeMask = (1u << kNumCodeBits) - 1;
+
+/// Number-family lattice element codes (subsets of Number).
+enum NumCode : uint16_t {
+  NC_None = 0, ///< no number
+  NC_UInt31 = 1, ///< [0, 2^31)        = Int32 ∩ Uint32
+  NC_Int32 = 2, ///< [-2^31, 2^31)
+  NC_Uint32 = 3, ///< [0, 2^32)
+  NC_Int32OrUint32 = 4, ///< [-2^31, 2^32) = Int32 ∪ Uint32
+  NC_Number = 5, ///< all fp64
+};
+
+/// Disjoint per-kind mask bits (MB), one per kind, occupying the kKindBits
+/// bits above the number code.
+enum MaskBit : uint16_t {
+  MB_Undefined = 1u << (kNumCodeBits + 0),
+  MB_Null = 1u << (kNumCodeBits + 1),
+  MB_Boolean = 1u << (kNumCodeBits + 2),
+  MB_BigInt = 1u << (kNumCodeBits + 3),
+  MB_String = 1u << (kNumCodeBits + 4),
+  MB_Symbol = 1u << (kNumCodeBits + 5),
+  MB_Object = 1u << (kNumCodeBits + 6),
+  MB_Empty = 1u << (kNumCodeBits + 7),
+  MB_Uninit = 1u << (kNumCodeBits + 8),
+};
+
+static_assert(
+    kPrimMaskBits < 16,
+    "a primMask and its kNotMaskable sentinel must fit in uint16_t");
+static_assert(
+    NC_Number <= kNumCodeMask,
+    "number-family codes must fit in kNumCodeBits");
+static_assert(
+    MB_Uninit == (1u << (kPrimMaskBits - 1)),
+    "the disjoint kind bits must exactly fill kKindBits above the number code");
+
+} // namespace type_internal
+
 /// An entry in the TypeContext type table.
 struct TypeEntry {
   TypeKind kind;
+  /// Compact primitive-mask encoding of this type, or kNotMaskable if the type
+  /// cannot be represented as a mask. See the type_internal namespace above for
+  /// the layout and how the fast path uses it.
+  uint16_t primMask{type_internal::kNotMaskable};
 
   union {
     /// ClassInstance payload. Classes are nominal: each class declaration
@@ -118,11 +207,7 @@ struct TypeEntry {
   };
 
   /// Construct a leaf type entry with no payload.
-  static TypeEntry createLeaf(TypeKind k) {
-    TypeEntry e{};
-    e.kind = k;
-    return e;
-  }
+  static TypeEntry createLeaf(TypeKind k);
 
   /// Construct a union type entry.
   static TypeEntry createUnion(uint32_t armOffset, uint16_t armCount) {
@@ -520,8 +605,13 @@ class TypeContext {
   /// (Number, Boolean, Null, Undefined only). Returns false for NoType.
   bool isNonPtr(Type t) const;
 
-  /// \return true if \p t is a single known primitive type
-  /// (Number, BigInt, Null, Boolean, String, Undefined, Symbol).
+  /// \return true if \p t is statically known to be exactly one JavaScript
+  /// primitive type: number, string, boolean, bigint, symbol, null, or
+  /// undefined. "Primitive" is meant in the JavaScript sense, not the
+  /// representation sense: the number subtypes Int32/Uint32/UInt31 -- and any
+  /// union of them, e.g. Int32|Uint32 -- all count as the single primitive
+  /// "number". Returns false for NoType, for Object, and for any type that
+  /// mixes more than one primitive or contains a non-primitive component.
   bool isKnownPrimitiveType(Type t) const;
 
   /// \return true if \p t is a superset of AnyType (i.e. it can hold "any"
@@ -575,6 +665,17 @@ class TypeContext {
   ///   `OS << "x = " << tc.fmt(t) << "\n";`
   PrintedType fmt(Type t) const;
 
+#ifdef UNIT_TEST
+  /// Expose the stored primMask for a type.
+  uint16_t testPrimMask(Type t) const {
+    return entries_[t.id_].primMask;
+  }
+  /// Drive the mask->Type cache directly.
+  Type testLookupPrimMask(uint16_t m) {
+    return lookupPrimMask(m);
+  }
+#endif
+
  private:
   friend class Type;
 
@@ -587,6 +688,15 @@ class TypeContext {
 
   /// Intern table mapping sorted arm sets to existing union type IDs.
   llvh::DenseMap<UnionInternKey, uint32_t, UnionInternKeyInfo> internTable_;
+
+  /// Number of distinct primitive masks (the kPrimMaskBits index space).
+  static constexpr uint32_t kNumPrimMasks = 1u << type_internal::kPrimMaskBits;
+
+  /// Cache mapping a primitive mask to its canonical Type, lazily populated.
+  /// Pure accelerator in front of internTable_; see lookupPrimMask. The live
+  /// working set is tiny (tens of entries on real programs), so a hash map
+  /// beats a dense kNumPrimMasks-slot array on cache locality.
+  llvh::DenseMap<uint32_t, Type> primCache_;
 
   /// Return true if any component of the type at \p id satisfies \p pred.
   /// For leaf types, tests the kind directly. For unions, tests any arm.
@@ -610,6 +720,12 @@ class TypeContext {
 
   /// Canonicalize a list of non-union type IDs into an interned union.
   uint32_t createUnionFromLeafArms(llvh::ArrayRef<uint32_t> arms);
+
+  /// Look up (or lazily create) the canonical Type for primitive mask \p m.
+  Type lookupPrimMask(uint16_t m);
+  /// Build the canonical Type for primitive mask \p m by decoding it to leaf
+  /// ids and interning through the existing union machinery.
+  Type materializePrimMask(uint16_t m);
 };
 
 inline llvh::raw_ostream &operator<<(llvh::raw_ostream &OS, PrintedType pt) {

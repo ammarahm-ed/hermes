@@ -10,6 +10,7 @@
 
 #include "hermes/IR/IR.h"
 
+#include "llvh/Support/MathExtras.h"
 #include "llvh/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -17,7 +18,80 @@
 
 namespace hermes {
 
+using namespace type_internal;
+
 namespace {
+
+/// Number-family join (union / least-upper-bound), indexed [a][b].
+constexpr uint8_t kNumberJoin[6][6] = {
+    /*None  */ {0, 1, 2, 3, 4, 5},
+    /*UInt31*/ {1, 1, 2, 3, 4, 5},
+    /*Int32 */ {2, 2, 2, 4, 4, 5},
+    /*Uint32*/ {3, 3, 4, 3, 4, 5},
+    /*I∪U   */ {4, 4, 4, 4, 4, 5},
+    /*Number*/ {5, 5, 5, 5, 5, 5},
+};
+
+/// Number-family meet (intersection / greatest-lower-bound), indexed [a][b].
+constexpr uint8_t kNumberMeet[6][6] = {
+    /*None  */ {0, 0, 0, 0, 0, 0},
+    /*UInt31*/ {0, 1, 1, 1, 1, 1},
+    /*Int32 */ {0, 1, 2, 1, 2, 2},
+    /*Uint32*/ {0, 1, 1, 3, 3, 3},
+    /*I∪U   */ {0, 1, 2, 3, 4, 4},
+    /*Number*/ {0, 1, 2, 3, 4, 5},
+};
+
+/// Number-family subtract (a − b, tightest representable superset),
+/// indexed [a][b].
+constexpr uint8_t kNumberSub[6][6] = {
+    /*None  */ {0, 0, 0, 0, 0, 0},
+    /*UInt31*/ {1, 0, 0, 0, 0, 0},
+    /*Int32 */ {2, 2, 0, 2, 0, 0},
+    /*Uint32*/ {3, 3, 3, 0, 0, 0},
+    /*I∪U   */ {4, 4, 3, 2, 0, 0},
+    /*Number*/ {5, 5, 5, 5, 5, 0},
+};
+
+/// \return the primMask for a leaf \p k, or kNotMaskable if \p k is a
+/// refined/compiler-internal kind that never participates in inference algebra
+/// (Environment, PrivateName, FunctionCode, Bits32, refined object kinds,
+/// Union).
+constexpr uint16_t leafKindToMask(TypeKind k) {
+  switch (k) {
+    case TypeKind::NoType:
+      return 0;
+    case TypeKind::Undefined:
+      return MB_Undefined;
+    case TypeKind::Null:
+      return MB_Null;
+    case TypeKind::Boolean:
+      return MB_Boolean;
+    case TypeKind::BigInt:
+      return MB_BigInt;
+    case TypeKind::String:
+      return MB_String;
+    case TypeKind::Symbol:
+      return MB_Symbol;
+    case TypeKind::Object:
+      return MB_Object;
+    case TypeKind::Empty:
+      return MB_Empty;
+    case TypeKind::Uninit:
+      return MB_Uninit;
+    case TypeKind::Number:
+      return NC_Number;
+    case TypeKind::Int32:
+      return NC_Int32;
+    case TypeKind::Uint32:
+      return NC_Uint32;
+    case TypeKind::UInt31:
+      return NC_UInt31;
+    default:
+      // Environment, PrivateName, FunctionCode, Bits32, refined kinds, Union.
+      return kNotMaskable;
+  }
+}
 
 /// \return true if \p k is a number kind (including subtypes).
 bool isNumberKind(TypeKind k) {
@@ -182,6 +256,13 @@ llvh::StringRef kindName(TypeKind k) {
 
 } // anonymous namespace
 
+TypeEntry TypeEntry::createLeaf(TypeKind k) {
+  TypeEntry e{};
+  e.kind = k;
+  e.primMask = leafKindToMask(k);
+  return e;
+}
+
 TypeKind TypeContext::getKind(Type t) const {
   assert(t.id_ < entries_.size() && "Type ID out of range");
   return entries_[t.id_].kind;
@@ -290,7 +371,22 @@ void TypeContext::print(llvh::raw_ostream &OS, Type t) const {
 }
 
 bool TypeContext::isKnownPrimitiveType(Type t) const {
-  return isPrimitive(t) && countKinds(t) == 1;
+  uint16_t m = entries_[t.id_].primMask;
+  // Every JavaScript primitive -- including each number subtype -- is maskable,
+  // so a non-maskable type necessarily contains a non-primitive component and
+  // cannot be a single primitive.
+  if (m == kNotMaskable)
+    return false;
+  // Object/Empty/Uninit are not JavaScript primitives.
+  if (m & (MB_Object | MB_Empty | MB_Uninit))
+    return false;
+  // Count distinct JavaScript primitive types. The number family
+  // (Number/Int32/Uint32/UInt31, and any union of them) is the single
+  // primitive "number", so a non-empty number code contributes exactly one
+  // regardless of which subtypes it covers.
+  unsigned disCount = llvh::countPopulation((uint16_t)(m & ~kNumCodeMask));
+  unsigned numCount = (m & kNumCodeMask) != NC_None ? 1 : 0;
+  return disCount + numCount == 1;
 }
 
 bool TypeContext::canBeAny(Type t) const {
@@ -310,89 +406,115 @@ llvh::iterator_range<Type::iterator> TypeContext::arms(Type t) const {
 }
 
 bool TypeContext::canBeNumber(Type t) const {
-  // Fast path: well-known IDs.
-  if (t.id_ == kNumberId || t.id_ == kAnyTypeId || t.id_ == kNumericId ||
-      t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & kNumCodeMask) != NC_None;
   return containsMatchingKind(t.id_, isNumberKind);
 }
 
 bool TypeContext::canBeString(Type t) const {
-  if (t.id_ == kStringId || t.id_ == kAnyTypeId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_String) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::String; });
 }
 
 bool TypeContext::canBeObject(Type t) const {
-  if (t.id_ == kObjectId || t.id_ == kAnyTypeId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Object) != 0;
   return containsMatchingKind(t.id_, isObjectKind);
 }
 
 bool TypeContext::canBeNull(Type t) const {
-  if (t.id_ == kNullId || t.id_ == kAnyTypeId || t.id_ == kNullOrUndefId ||
-      t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Null) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Null; });
 }
 
 bool TypeContext::canBeUndefined(Type t) const {
-  if (t.id_ == kUndefinedId || t.id_ == kAnyTypeId || t.id_ == kNullOrUndefId ||
-      t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Undefined) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Undefined; });
 }
 
 bool TypeContext::canBeEmpty(Type t) const {
-  if (t.id_ == kEmptyId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Empty) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Empty; });
 }
 
 bool TypeContext::canBeUninit(Type t) const {
-  if (t.id_ == kUninitId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Uninit) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Uninit; });
 }
 
 bool TypeContext::canBeBigInt(Type t) const {
-  if (t.id_ == kBigIntId || t.id_ == kAnyTypeId || t.id_ == kNumericId ||
-      t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_BigInt) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::BigInt; });
 }
 
 bool TypeContext::canBeBoolean(Type t) const {
-  if (t.id_ == kBooleanId || t.id_ == kAnyTypeId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Boolean) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Boolean; });
 }
 
 bool TypeContext::canBeSymbol(Type t) const {
-  if (t.id_ == kSymbolId || t.id_ == kAnyTypeId || t.id_ == kAnyEmptyUninitId)
-    return true;
+  uint16_t m = entries_[t.id_].primMask;
+  if (m != kNotMaskable)
+    return (m & MB_Symbol) != 0;
   return containsMatchingKind(
       t.id_, [](TypeKind k) { return k == TypeKind::Symbol; });
 }
 
 bool TypeContext::isPrimitive(Type t) const {
+  {
+    uint16_t m = entries_[t.id_].primMask;
+    if (m != kNotMaskable)
+      return m != 0 && (m & (MB_Object | MB_Empty | MB_Uninit)) == 0;
+  }
   return allMatchKind(t.id_, isPrimitiveKind);
 }
 
 bool TypeContext::canBePrimitive(Type t) const {
+  {
+    uint16_t m = entries_[t.id_].primMask;
+    if (m != kNotMaskable)
+      return (m & kNumCodeMask) != NC_None ||
+          (m &
+           (MB_Undefined | MB_Null | MB_Boolean | MB_BigInt | MB_String |
+            MB_Symbol)) != 0;
+  }
   if (t.id_ == kNoTypeId)
     return false;
   return containsMatchingKind(t.id_, isPrimitiveKind);
 }
 
 bool TypeContext::isNonPtr(Type t) const {
+  {
+    uint16_t m = entries_[t.id_].primMask;
+    if (m != kNotMaskable)
+      return m != 0 &&
+          (m &
+           (MB_BigInt | MB_String | MB_Symbol | MB_Object | MB_Empty |
+            MB_Uninit)) == 0;
+  }
   return allMatchKind(t.id_, isNonPtrKind);
 }
 
@@ -403,6 +525,18 @@ bool TypeContext::isSubsetOf(Type a, Type b) const {
     return true;
   if (b.id_ == kNoTypeId)
     return false;
+
+  uint16_t ma = entries_[a.id_].primMask;
+  uint16_t mb = entries_[b.id_].primMask;
+  if (ma != kNotMaskable && mb != kNotMaskable) {
+    uint16_t aDis = (uint16_t)(ma & ~kNumCodeMask);
+    uint16_t bDis = (uint16_t)(mb & ~kNumCodeMask);
+    if ((aDis & bDis) != aDis)
+      return false;
+    // a_num <: b_num  iff  meet(a_num,b_num) == a_num
+    uint16_t na = ma & kNumCodeMask, nb = mb & kNumCodeMask;
+    return kNumberMeet[na][nb] == na;
+  }
 
   TypeKind aKind = entries_[a.id_].kind;
   TypeKind bKind = entries_[b.id_].kind;
@@ -434,6 +568,14 @@ bool TypeContext::areDisjoint(Type a, Type b) const {
     return true;
   if (a.id_ == b.id_)
     return false;
+
+  uint16_t ma = entries_[a.id_].primMask;
+  uint16_t mb = entries_[b.id_].primMask;
+  if (ma != kNotMaskable && mb != kNotMaskable) {
+    if ((ma & ~kNumCodeMask) & (mb & ~kNumCodeMask))
+      return false; // shared disjoint kind
+    return kNumberMeet[ma & kNumCodeMask][mb & kNumCodeMask] == NC_None;
+  }
 
   TypeKind aKind = entries_[a.id_].kind;
   TypeKind bKind = entries_[b.id_].kind;
@@ -539,6 +681,13 @@ Type TypeContext::unionTy(Type a, Type b) {
     return b;
   if (b.id_ == kNoTypeId)
     return a;
+  uint16_t ma = entries_[a.id_].primMask;
+  uint16_t mb = entries_[b.id_].primMask;
+  if (ma != kNotMaskable && mb != kNotMaskable) {
+    uint16_t dis = (uint16_t)((ma | mb) & ~kNumCodeMask);
+    uint16_t nc = kNumberJoin[ma & kNumCodeMask][mb & kNumCodeMask];
+    return lookupPrimMask((uint16_t)(dis | nc));
+  }
   if (isSubsetOf(a, b))
     return b;
   if (isSubsetOf(b, a))
@@ -612,11 +761,77 @@ uint32_t TypeContext::createUnionFromLeafArms(llvh::ArrayRef<uint32_t> arms) {
   return id;
 }
 
+Type TypeContext::materializePrimMask(uint16_t m) {
+  assert(m != kNotMaskable && "cannot materialize a non-maskable mask");
+  llvh::SmallVector<uint32_t, 12> arms;
+  if (m & MB_Undefined)
+    arms.push_back(kUndefinedId);
+  if (m & MB_Null)
+    arms.push_back(kNullId);
+  if (m & MB_Boolean)
+    arms.push_back(kBooleanId);
+  if (m & MB_BigInt)
+    arms.push_back(kBigIntId);
+  if (m & MB_String)
+    arms.push_back(kStringId);
+  if (m & MB_Symbol)
+    arms.push_back(kSymbolId);
+  if (m & MB_Object)
+    arms.push_back(kObjectId);
+  if (m & MB_Empty)
+    arms.push_back(kEmptyId);
+  if (m & MB_Uninit)
+    arms.push_back(kUninitId);
+  switch (m & kNumCodeMask) {
+    case NC_None:
+      break;
+    case NC_UInt31:
+      arms.push_back(kUInt31Id);
+      break;
+    case NC_Int32:
+      arms.push_back(kInt32Id);
+      break;
+    case NC_Uint32:
+      arms.push_back(kUint32Id);
+      break;
+    case NC_Int32OrUint32:
+      arms.push_back(kInt32Id);
+      arms.push_back(kUint32Id);
+      break;
+    case NC_Number:
+      arms.push_back(kNumberId);
+      break;
+    default:
+      assert(false && "invalid number code in primMask");
+      break;
+  }
+  // createUnionFromLeafArms returns NoType for empty, the leaf id for one arm,
+  // or an interned union otherwise -- the same canonical id the slow path uses.
+  return Type{createUnionFromLeafArms(arms)};
+}
+
+Type TypeContext::lookupPrimMask(uint16_t m) {
+  assert(m < kNumPrimMasks && "mask out of range (kNotMaskable passed?)");
+  auto it = primCache_.find(m);
+  if (it != primCache_.end())
+    return it->second;
+  Type t = materializePrimMask(m);
+  primCache_.insert({m, t});
+  return t;
+}
+
 Type TypeContext::intersectTy(Type a, Type b) {
   if (a.id_ == b.id_)
     return a;
   if (a.id_ == kNoTypeId || b.id_ == kNoTypeId)
     return Type{kNoTypeId};
+  uint16_t ma = entries_[a.id_].primMask;
+  uint16_t mb = entries_[b.id_].primMask;
+  if (ma != kNotMaskable && mb != kNotMaskable) {
+    uint16_t dis = (uint16_t)((ma & mb) & ~kNumCodeMask);
+    uint16_t nc = kNumberMeet[ma & kNumCodeMask][mb & kNumCodeMask];
+    return lookupPrimMask((uint16_t)(dis | nc));
+  }
   TypeKind aKind = entries_[a.id_].kind;
   TypeKind bKind = entries_[b.id_].kind;
 
@@ -655,6 +870,15 @@ Type TypeContext::subtractTy(Type a, Type b) {
     return Type{kNoTypeId};
   if (b.id_ == kNoTypeId)
     return a;
+  uint16_t ma = entries_[a.id_].primMask;
+  uint16_t mb = entries_[b.id_].primMask;
+  if (ma != kNotMaskable && mb != kNotMaskable) {
+    uint16_t aDis = (uint16_t)(ma & ~kNumCodeMask);
+    uint16_t bDis = (uint16_t)(mb & ~kNumCodeMask);
+    uint16_t dis = (uint16_t)(aDis & ~bDis);
+    uint16_t nc = kNumberSub[ma & kNumCodeMask][mb & kNumCodeMask];
+    return lookupPrimMask((uint16_t)(dis | nc));
+  }
   if (isSubsetOf(a, b))
     return Type{kNoTypeId};
   if (areDisjoint(a, b))
@@ -679,6 +903,20 @@ Type TypeContext::subtractTy(Type a, Type b) {
 
 uint32_t TypeContext::addUnionEntry(llvh::ArrayRef<uint32_t> arms) {
   assert(arms.size() >= 2 && "Union must have at least 2 arms");
+  // Fold arm masks: OR the disjoint bits, join the number codes; any
+  // non-maskable arm makes the union non-maskable.
+  uint16_t disjoint = 0;
+  uint16_t numCode = NC_None;
+  bool maskable = true;
+  for (uint32_t armId : arms) {
+    uint16_t m = entries_[armId].primMask;
+    if (m == kNotMaskable) {
+      maskable = false;
+      break;
+    }
+    disjoint |= (m & ~kNumCodeMask);
+    numCode = kNumberJoin[numCode][m & kNumCodeMask];
+  }
   uint32_t offset = safePossiblyNarrowingCast<uint32_t>(
       typeArrays_.size(), "type array offset overflow");
   for (uint32_t armId : arms)
@@ -689,6 +927,8 @@ uint32_t TypeContext::addUnionEntry(llvh::ArrayRef<uint32_t> arms) {
           offset,
           safePossiblyNarrowingCast<uint16_t>(
               arms.size(), "too many union arms")));
+  entries_[id].primMask =
+      maskable ? (uint16_t)(disjoint | numCode) : kNotMaskable;
   return id;
 }
 

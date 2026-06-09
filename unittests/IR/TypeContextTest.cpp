@@ -31,6 +31,7 @@ class TypeContextTest : public ::testing::Test {
 } // namespace hermes
 
 using namespace hermes;
+using namespace hermes::type_internal;
 
 namespace {
 
@@ -752,6 +753,130 @@ TEST_F(TypeContextTest, CanBeAnyAndConveniences) {
   EXPECT_TRUE(ctx.isKnownPrimitiveType(Type::createNumber()));
   EXPECT_FALSE(ctx.isKnownPrimitiveType(Type::createAnyType()));
   EXPECT_FALSE(ctx.isKnownPrimitiveType(Type::createObject()));
+}
+
+TEST_F(TypeContextTest, PrimMaskValues) {
+  TypeContext tc;
+  // Leaves.
+  EXPECT_EQ(0u, tc.testPrimMask(Type::createNoType()));
+  EXPECT_EQ(MB_String, tc.testPrimMask(Type::createString()));
+  EXPECT_EQ((uint16_t)NC_Number, tc.testPrimMask(Type::createNumber()));
+  EXPECT_EQ(kNotMaskable, tc.testPrimMask(Type::createEnvironment()));
+  EXPECT_EQ(kNotMaskable, tc.testPrimMask(Type::createFunctionCode()));
+  // Well-known unions.
+  EXPECT_EQ(
+      (uint16_t)(MB_String | MB_Symbol),
+      tc.testPrimMask(Type::createStringOrSymbol()));
+  EXPECT_EQ(
+      (uint16_t)(MB_Null | MB_Undefined),
+      tc.testPrimMask(Type::createNullOrUndef()));
+  // AnyType = the 7 primitives + Object (no Empty/Uninit/internal).
+  EXPECT_EQ(
+      (uint16_t)(MB_Undefined | MB_Null | MB_Boolean | MB_BigInt | MB_String |
+                 MB_Symbol | MB_Object | NC_Number),
+      tc.testPrimMask(Type::createAnyType()));
+  // Well-known ids map to the matching leaf factories.
+  EXPECT_EQ(Type::createString(), asType(kStringId));
+  EXPECT_EQ(Type::createNumber(), asType(kNumberId));
+}
+
+TEST_F(TypeContextTest, LookupPrimMaskRoundTrips) {
+  TypeContext tc;
+  // Single bits map back to leaves.
+  EXPECT_EQ(Type::createString(), tc.testLookupPrimMask(MB_String));
+  EXPECT_EQ(Type::createNumber(), tc.testLookupPrimMask(NC_Number));
+  EXPECT_EQ(Type::createNoType(), tc.testLookupPrimMask(0));
+  // Combinations equal the slow-path union, and are stable (interned).
+  Type ns = tc.unionTy(Type::createNumber(), Type::createString());
+  EXPECT_EQ(ns, tc.testLookupPrimMask((uint16_t)(MB_String | NC_Number)));
+  EXPECT_EQ(
+      tc.testLookupPrimMask((uint16_t)(MB_String | NC_Number)),
+      tc.testLookupPrimMask((uint16_t)(MB_String | NC_Number)));
+  // Int32 ∪ Uint32 materializes to the 2-arm union.
+  Type iu = tc.testLookupPrimMask(NC_Int32OrUint32);
+  EXPECT_EQ(2u, tc.countKinds(iu));
+  // Multi-arm round-trip: Number | Boolean | String.
+  Type nbs = tc.unionTy(
+      Type::createNumber(),
+      tc.unionTy(Type::createBoolean(), Type::createString()));
+  EXPECT_EQ(
+      nbs,
+      tc.testLookupPrimMask((uint16_t)(NC_Number | MB_Boolean | MB_String)));
+}
+
+TEST_F(TypeContextTest, FastPathConstructors) {
+  TypeContext tc;
+  Type num = Type::createNumber(), str = Type::createString();
+  Type i32 = asType(kInt32Id);
+  Type u32 = asType(kUint32Id);
+  Type u31 = asType(kUInt31Id);
+
+  // union
+  Type ns = tc.unionTy(num, str);
+  EXPECT_TRUE(tc.canBeNumber(ns) && tc.canBeString(ns));
+  EXPECT_EQ(num, tc.unionTy(num, i32)); // Int32 <: Number
+  EXPECT_EQ(2u, tc.countKinds(tc.unionTy(i32, u32))); // Int32 ∪ Uint32
+
+  // intersect
+  EXPECT_EQ(u31, tc.intersectTy(i32, u32)); // Int32 ∩ Uint32 = UInt31
+  EXPECT_EQ(i32, tc.intersectTy(num, i32));
+  EXPECT_EQ(Type::createNoType(), tc.intersectTy(num, str));
+
+  // subtract
+  EXPECT_EQ(str, tc.subtractTy(tc.unionTy(num, str), num));
+  EXPECT_EQ(num, tc.subtractTy(num, i32)); // conservative: Number - Int32
+}
+
+TEST_F(TypeContextTest, FastPathQueries) {
+  TypeContext tc;
+  Type num = Type::createNumber(), str = Type::createString();
+  Type obj = Type::createObject(), i32 = asType(kInt32Id);
+  Type ns = tc.unionTy(num, str);
+
+  EXPECT_TRUE(tc.isSubsetOf(num, ns));
+  EXPECT_TRUE(tc.isSubsetOf(i32, num));
+  EXPECT_FALSE(tc.isSubsetOf(ns, num));
+  EXPECT_TRUE(tc.areDisjoint(num, str));
+  EXPECT_FALSE(tc.areDisjoint(num, i32));
+  EXPECT_TRUE(tc.areDisjoint(num, obj));
+
+  EXPECT_TRUE(tc.canBeNumber(ns));
+  EXPECT_TRUE(tc.canBeString(ns));
+  EXPECT_FALSE(tc.canBeObject(ns));
+  EXPECT_TRUE(tc.canBeNumber(i32));
+}
+
+TEST_F(TypeContextTest, FastPathPredicates) {
+  TypeContext tc;
+  Type num = Type::createNumber(), str = Type::createString();
+  Type obj = Type::createObject(), i32 = asType(kInt32Id);
+  Type u32 = asType(kUint32Id);
+  Type ns = tc.unionTy(num, str);
+  Type no = Type::createNoType();
+
+  EXPECT_TRUE(tc.isPrimitive(num));
+  EXPECT_TRUE(tc.isPrimitive(ns));
+  EXPECT_FALSE(tc.isPrimitive(obj));
+  EXPECT_FALSE(tc.isPrimitive(no));
+
+  EXPECT_TRUE(tc.canBePrimitive(tc.unionTy(num, obj)));
+  EXPECT_FALSE(tc.canBePrimitive(obj));
+
+  EXPECT_TRUE(tc.isNonPtr(num));
+  EXPECT_FALSE(tc.isNonPtr(str));
+
+  EXPECT_TRUE(tc.isKnownPrimitiveType(num));
+  EXPECT_TRUE(tc.isKnownPrimitiveType(i32));
+  EXPECT_TRUE(tc.isKnownPrimitiveType(asType(kUInt31Id)));
+  EXPECT_FALSE(tc.isKnownPrimitiveType(ns));
+  EXPECT_FALSE(tc.isKnownPrimitiveType(no));
+  EXPECT_FALSE(tc.isKnownPrimitiveType(obj));
+
+  // A union of number subtypes is still the single JS primitive "number".
+  Type i32u32 = tc.unionTy(i32, u32);
+  EXPECT_TRUE(tc.isKnownPrimitiveType(i32u32));
+  // ...but mixing the number family with another primitive is two primitives.
+  EXPECT_FALSE(tc.isKnownPrimitiveType(tc.unionTy(i32u32, str)));
 }
 
 TEST_F(TypeContextTest, WellKnownUnionsAreInterned) {
