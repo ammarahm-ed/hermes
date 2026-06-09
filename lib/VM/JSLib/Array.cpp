@@ -174,6 +174,13 @@ HermesValue createArrayConstructor(Runtime &runtime) {
   defineMethod(
       runtime,
       arrayPrototype,
+      Predefined::getSymbolID(Predefined::toSorted),
+      nullptr,
+      arrayPrototypeToSorted,
+      1);
+  defineMethod(
+      runtime,
+      arrayPrototype,
       Predefined::getSymbolID(Predefined::with),
       nullptr,
       arrayPrototypeWith,
@@ -4656,6 +4663,113 @@ CallResult<HermesValue> arrayPrototypeToReversed(void *, Runtime &runtime) {
     ++k;
   }
 
+  return lv.A.getHermesValue();
+}
+
+/// ES2025 23.1.3.34
+CallResult<HermesValue> arrayPrototypeToSorted(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+
+  // 1. If comparator is not undefined and IsCallable(comparator) is false,
+  // throw a TypeError exception.
+  auto compareFn = Handle<Callable>::dyn_vmcast(args.getArgHandle(0));
+  if (!args.getArg(0).isUndefined() && !compareFn) {
+    return runtime.raiseTypeError("Array sort argument must be callable");
+  }
+
+  struct : Locals {
+    PinnedValue<JSObject> O;
+    PinnedValue<JSArray> A;
+  } lv;
+  LocalsRAII lraii{runtime, &lv};
+
+  // 2. Let O be ? ToObject(this value).
+  auto oRes = toObject(runtime, args.getThisHandle());
+  if (LLVM_UNLIKELY(oRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.O.castAndSetHermesValue<JSObject>(*oRes);
+
+  // 3. Let len be ? LengthOfArrayLike(O).
+  auto jsArr = vmisa<JSArray>(*lv.O) ? Handle<JSArray>::vmcast(&lv.O)
+                                     : Runtime::makeNullHandle<JSArray>();
+  auto lenRes = lengthOfArrayLike(runtime, lv.O, jsArr);
+  if (LLVM_UNLIKELY(lenRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  auto len = lenRes.getValue();
+  // We use a JSArray to store the sorted results, which is limited to
+  // uint32_t elements.
+  if (LLVM_UNLIKELY(len > UINT32_MAX)) {
+    return runtime.raiseRangeError("invalid array length");
+  }
+  uint32_t len32 = (uint32_t)len;
+
+  // 4. Let A be ? ArrayCreate(len).
+  // Allocate with known capacity to avoid reallocation.
+  auto ARes = JSArray::create(runtime, len32, 0);
+  if (LLVM_UNLIKELY(ARes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.A = std::move(*ARes);
+  if (len == 0) {
+    return lv.A.getHermesValue();
+  }
+
+  // 6. Let sortedList be ? SortIndexedProperties(O, len, SortCompare,
+  // READ-THROUGH-HOLES).
+  // Copy all elements from O into A, treating holes as undefined.
+  if (jsArr && arrayFastPathCheck(runtime, jsArr.get(), nullptr, len32)) {
+    // A is freshly created with the default class, so length is writable.
+    // May allocate, so encode before NoAllocScope.
+    auto newLen = SmallHermesValue::encodeNumberValue(len32, runtime);
+    NoAllocScope noAllocScope{runtime};
+    auto *srcStorage = jsArr->getIndexedStorageNullable(runtime);
+    auto *destStorage = lv.A->getIndexedStorageNullable(runtime);
+    assert(srcStorage && destStorage && "storage should not be null");
+    // Bulk copy the source storage into the destination.
+    destStorage->appendWithinCapacity(runtime, srcStorage);
+    lv.A->setElemCountUnsafe(len32);
+    JSArray::putLengthUnsafe(lv.A.get(), runtime, newLen);
+    // Replace holes (empty values) with undefined.
+    for (uint32_t k = 0; k < len32; ++k) {
+      if (LLVM_UNLIKELY(destStorage->at(k).isEmpty())) {
+        destStorage->set(
+            k, SmallHermesValue::encodeUndefinedValue(), runtime.getHeap());
+      }
+    }
+  } else {
+    if (LLVM_UNLIKELY(
+            JSArray::setStorageEndIndex(lv.A, runtime, len32) ==
+            ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    // A is freshly created with the default class, so length is writable.
+    auto newLen = SmallHermesValue::encodeNumberValue(len32, runtime);
+    JSArray::putLengthUnsafe(lv.A.get(), runtime, newLen);
+    GCScope gcScope{runtime};
+    auto marker = gcScope.createMarker();
+    for (uint32_t k = 0; k < len32; ++k) {
+      gcScope.flushToMarker(marker);
+      CallResult<PseudoHandle<>> propRes = getIndexed_RJS(runtime, lv.O, k);
+      if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
+        return ExecutionStatus::EXCEPTION;
+      }
+      auto shv = SmallHermesValue::encodeHermesValue(
+          propRes->getHermesValue(), runtime);
+      JSArray::unsafeSetExistingElementAt(lv.A.get(), runtime, k, shv);
+    }
+  }
+
+  // Sort A in place.
+  // 5. Let SortCompare be an Abstract Closure calling
+  // CompareArrayElements(x, y, comparator).
+  // 7-8. Copy sortedList into A (already done above, sort in place).
+  StandardSortModel sm(runtime, lv.A, compareFn);
+  if (LLVM_UNLIKELY(quickSort(&sm, 0u, len32) == ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+
+  // 9. Return A.
   return lv.A.getHermesValue();
 }
 
