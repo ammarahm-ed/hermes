@@ -2332,6 +2332,10 @@ class InstrGen {
       case TypeKind::String:
         return "_sh_ljs_is_string";
       case TypeKind::Number:
+      // The number subtypes are all represented as doubles at runtime.
+      case TypeKind::Int32:
+      case TypeKind::Uint32:
+      case TypeKind::UInt31:
         return "_sh_ljs_is_double";
       case TypeKind::BigInt:
         return "_sh_ljs_is_bigint";
