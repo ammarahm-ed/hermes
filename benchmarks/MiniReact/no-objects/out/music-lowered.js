@@ -237,18 +237,24 @@
         });
       }
     };
-    _proto2.render = function render(element) {
+    _proto2.update = function update(element) {
       M$react_invariant$default(M$react_index$INTERNAL$workInProgressFiber === null && M$react_index$INTERNAL$workInProgressState === null, 'Cannot render, an existing render is in progress');
       const hasChanges = element !== this.element;
       this.element = element;
       if (hasChanges) {
         this.doWork(element);
       }
+    };
+    _proto2.toString = function toString() {
       M$react_invariant$default(this.root !== null, 'Expected root to be rendered');
       const root = M$sh_CHECKED_CAST$default(this.root);
       const output = [];
       this.printFiber(root, output, 0);
       return output.join('\n');
+    };
+    _proto2.render = function render(element) {
+      this.update(element);
+      return this.toString();
     };
     _proto2.doWork = function doWork(element) {
       let mustRender = this.root === null;

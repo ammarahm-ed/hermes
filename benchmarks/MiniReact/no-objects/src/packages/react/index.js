@@ -267,7 +267,8 @@ class Root {
   /**
    * Drive any remaining work to completion and return the rendered result
    */
-  render(element: React$MixedElement): string {
+  // Reconcile only: build/update the retained fiber tree. No serialization.
+  update(element: React$MixedElement): void {
     invariant(
       workInProgressFiber === null && workInProgressState === null,
       'Cannot render, an existing render is in progress',
@@ -277,12 +278,21 @@ class Root {
     if (hasChanges) {
       this.doWork(element);
     }
+  }
 
+  // Serialize the retained fiber tree to a string. Separate from update() so
+  // callers can reconcile without paying serialization cost every time.
+  toString(): string {
     invariant(this.root !== null, 'Expected root to be rendered');
     const root: Fiber = CHECKED_CAST<Fiber>(this.root);
     const output: string[] = [];
     this.printFiber(root, output, 0);
     return output.join('\n');
+  }
+
+  render(element: React$MixedElement): string {
+    this.update(element);
+    return this.toString();
   }
 
   doWork(element: React$MixedElement): void {

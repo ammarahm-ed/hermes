@@ -218,18 +218,24 @@
         });
       }
     }
-    render(element) {
+    update(element) {
       M$react_invariant$default(M$react_index$INTERNAL$workInProgressFiber === null && M$react_index$INTERNAL$workInProgressState === null, 'Cannot render, an existing render is in progress');
       const hasChanges = element !== this.element;
       this.element = element;
       if (hasChanges) {
         this.doWork(element);
       }
+    }
+    toString() {
       M$react_invariant$default(this.root !== null, 'Expected root to be rendered');
       const root = M$sh_CHECKED_CAST$default(this.root);
       const output = [];
       this.printFiber(root, output, 0);
       return output.join('\n');
+    }
+    render(element) {
+      this.update(element);
+      return this.toString();
     }
     doWork(element) {
       let mustRender = this.root === null;
