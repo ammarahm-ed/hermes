@@ -20,12 +20,12 @@ import aliasDefs from './aliases';
 // $FlowExpectedError[cannot-resolve-module]
 import prettierConfig from '../../.prettierrc.json';
 
-export type ESTreeJSON = $ReadOnlyArray<
-  $ReadOnly<{
+export type ESTreeJSON = ReadonlyArray<
+  Readonly<{
     name: string,
     base: string,
-    arguments: $ReadOnlyArray<
-      $ReadOnly<{
+    arguments: ReadonlyArray<
+      Readonly<{
         type:
           | 'NodeLabel'
           | 'NodeString'
@@ -97,7 +97,7 @@ type Package =
   | 'prettier-plugin-hermes-parser'
   | 'babel-plugin-syntax-hermes-parser';
 
-type ArtifactOptions = $ReadOnly<{
+type ArtifactOptions = Readonly<{
   code: string,
   flow?: FlowStyle,
   // will write to ../<package>/<file>
@@ -150,7 +150,7 @@ async function formatAndWriteArtifact({
   fs.writeFileSync(artifactPath, formattedContents);
 }
 
-export const LITERAL_TYPES: $ReadOnlySet<string> = new Set([
+export const LITERAL_TYPES: ReadonlySet<string> = new Set([
   'BigIntLiteral',
   'BooleanLiteral',
   'NullLiteral',
@@ -159,8 +159,8 @@ export const LITERAL_TYPES: $ReadOnlySet<string> = new Set([
   'StringLiteral',
 ]);
 
-export const FLIPPED_ALIAS_KEYS: $ReadOnly<{
-  [string]: $ReadOnlySet<string>,
+export const FLIPPED_ALIAS_KEYS: Readonly<{
+  [string]: ReadonlySet<string>,
 }> = (() => {
   // $FlowExpectedError[incompatible-type]
   const flippedAliasKeys: {[string]: Set<string>} = Object.create(null);
@@ -178,9 +178,9 @@ export const FLIPPED_ALIAS_KEYS: $ReadOnly<{
   return flippedAliasKeys;
 })();
 
-export const EXCLUDE_PROPERTIES_FROM_NODE: $ReadOnlyMap<
+export const EXCLUDE_PROPERTIES_FROM_NODE: ReadonlyMap<
   string,
-  $ReadOnlySet<string>,
+  ReadonlySet<string>,
 > = new Map([
   // This property is only needed for TS
   ['PropertyDefinition', new Set(['tsModifiers'])],

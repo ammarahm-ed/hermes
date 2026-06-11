@@ -29,8 +29,8 @@ const NODE_LIST = 'NodeList';
  *
  * TODO: Change babel to use the Hermes AST format so this is no longer needed.
  */
-const customASTDefs: $ReadOnly<{
-  [string]: $ReadOnly<{[string]: AstType}>,
+const customASTDefs: Readonly<{
+  [string]: Readonly<{[string]: AstType}>,
 }> = {
   File: {
     program: NODE,

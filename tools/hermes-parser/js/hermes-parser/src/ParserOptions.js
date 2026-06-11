@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  *
  * @flow strict
- * @format
+ * @noformat
  */
 
 import type {Expression} from 'hermes-estree';
@@ -29,7 +29,7 @@ export type ParserOptions = {
   },
 };
 
-export const ParserOptionsKeys: ReadonlySet<$Keys<ParserOptions>> = new Set([
+export const ParserOptionsKeys /*: ReadonlySet<keyof ParserOptions> */ = new Set([
   'allowReturnOutsideFunction',
   'babel',
   'flow',
