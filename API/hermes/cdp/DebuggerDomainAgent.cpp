@@ -533,7 +533,7 @@ void DebuggerDomainAgent::removeBreakpoint(
 
 void DebuggerDomainAgent::setBreakpointsActive(
     const m::debugger::SetBreakpointsActiveRequest &req) {
-  // DomainState modifications are commited on Transaction destruction. With
+  // DomainState modifications are committed on Transaction destruction. With
   // sendResponseToClient being called prior to scope exit, in the test
   // environment this could cause a race condition.
   {
