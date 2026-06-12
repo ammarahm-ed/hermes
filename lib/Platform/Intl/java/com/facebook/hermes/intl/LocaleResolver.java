@@ -33,7 +33,7 @@ public class LocaleResolver {
       // Note that we don't pass the list of available locale ids for best fit match ... to avoid
       // re-creation of ULocale for each of the IDs again. Instead, we directly call
       // ULocale.getAvailableLocales() at the lowest platform aware method.
-      // TODO :: Avoid fetching the available locales array in the preceeding code when best-fit
+      // TODO :: Avoid fetching the available locales array in the preceding code when best-fit
       // locale matching is desired.
       localeMatchResult =
           LocaleMatcher.bestFitMatch(requestedLocales.toArray(new String[requestedLocales.size()]));
@@ -83,25 +83,25 @@ public class LocaleResolver {
       result.put(key, value);
     }
 
-    for (String supportedExtendionKey : supportedExtensionAdditionKeys) {
+    for (String supportedExtensionKey : supportedExtensionAdditionKeys) {
       ArrayList<String> valueList = new ArrayList<>();
-      String keyValue = localeMatchResult.extensions.get(supportedExtendionKey);
+      String keyValue = localeMatchResult.extensions.get(supportedExtensionKey);
 
       keyValue =
           JSObjects.getJavaString(
               UnicodeExtensionKeys.resolveKnownAliases(
-                  supportedExtendionKey, JSObjects.newString(keyValue)));
+                  supportedExtensionKey, JSObjects.newString(keyValue)));
 
       if (JSObjects.isString(keyValue)
           && !UnicodeExtensionKeys.isValidKeyword(
-              supportedExtendionKey,
+              supportedExtensionKey,
               JSObjects.getJavaString(keyValue),
               localeMatchResult.matchedLocale)) {
         continue;
       }
 
       valueList.add(keyValue);
-      localeMatchResult.matchedLocale.setUnicodeExtensions(supportedExtendionKey, valueList);
+      localeMatchResult.matchedLocale.setUnicodeExtensions(supportedExtensionKey, valueList);
     }
 
     result.put("locale", localeMatchResult.matchedLocale);
