@@ -26,6 +26,7 @@ import {
   unexpectedTranslationError as unexpectedTranslationErrorBase,
 } from './utils/ErrorUtils';
 import {removeAtFlowFromDocblock} from './utils/DocblockUtils';
+import {extractPropertyKeyLiterals} from './utils/TSNodeUtils';
 import {EOL} from 'os';
 
 type DeclarationOrUnsupported<T> = T | TSESTree.TSTypeAliasDeclaration;
@@ -3546,15 +3547,15 @@ const getTransforms = (
         ```
         type T = { ...T1, b: string  };
         // becomes
-        type T = Omit<T1, keyof { b: string }> & { b: string };
+        type T = Omit<T1, 'b'> & { b: string };
         ```
         ```
         type T = { ...T1, ...T2, ...T3, b: string  };
         // becomes
         type T =
-          & Omit<T1, keyof T2 | keyof T3 | keyof { b: string }>
-          & Omit<T2, keyof T3 | keyof { b: string }>
-          & Omit<T3, keyof { b: string }>
+          & Omit<T1, keyof T2 | keyof T3 | 'b'>
+          & Omit<T2, keyof T3 | 'b'>
+          & Omit<T3, 'b'>
           & { b: string };
         ```
 
@@ -3616,10 +3617,33 @@ const getTransforms = (
           members: tsBody,
         };
 
+        // When the non-spread properties have statically known key
+        // names, emit them as string literal types directly instead of
+        // wrapping in `keyof`. Falls back to `keyof objectType` when
+        // any key is computed or otherwise non-extractable.
+        const objectKeyTypes: ReadonlyArray<TSESTree.TypeNode> =
+          extractPropertyKeyLiterals(tsBody) ?? [
+            {
+              type: 'TSTypeOperator',
+              loc: DUMMY_LOC,
+              operator: 'keyof',
+              typeAnnotation: objectType,
+            },
+          ];
+
         const intersectionMembers: Array<TSESTree.TypeNode> = [];
         for (let i = 0; i < typesToIntersect.length; i += 1) {
           const currentType = typesToIntersect[i];
           const remainingTypes = typesToIntersect.slice(i + 1);
+          const omitKeyTypes: Array<TSESTree.TypeNode> = [
+            ...remainingTypes.map(t => ({
+              type: 'TSTypeOperator',
+              loc: DUMMY_LOC,
+              operator: 'keyof',
+              typeAnnotation: t,
+            })),
+            ...objectKeyTypes,
+          ];
           intersectionMembers.push({
             type: 'TSTypeReference',
             loc: DUMMY_LOC,
@@ -3633,24 +3657,13 @@ const getTransforms = (
               loc: DUMMY_LOC,
               params: [
                 currentType,
-                {
-                  type: 'TSUnionType',
-                  loc: DUMMY_LOC,
-                  types: [
-                    ...remainingTypes.map(t => ({
-                      type: 'TSTypeOperator',
+                omitKeyTypes.length === 1
+                  ? omitKeyTypes[0]
+                  : {
+                      type: 'TSUnionType',
                       loc: DUMMY_LOC,
-                      operator: 'keyof',
-                      typeAnnotation: t,
-                    })),
-                    {
-                      type: 'TSTypeOperator',
-                      loc: DUMMY_LOC,
-                      operator: 'keyof',
-                      typeAnnotation: objectType,
+                      types: omitKeyTypes,
                     },
-                  ],
-                },
               ],
             },
           });
