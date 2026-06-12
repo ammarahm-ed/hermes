@@ -174,7 +174,7 @@ function main(x) {
 // CHECK-NEXT:                        TryStatement
 // CHECK-NEXT:                            BlockStatement Scope %s.6
 // CHECK-NEXT:                                ThrowStatement
-// CHECK-NEXT:                                    NumericLiteral
+// CHECK-NEXT:                                    NumericLiteral : number
 // CHECK-NEXT:                            BlockStatement Scope %s.7
 // CHECK-NEXT:                                ReturnStatement
 // CHECK-NEXT:                                    NumericLiteral : number

@@ -1527,6 +1527,10 @@ void FlowChecker::visit(ESTree::ReturnStatementNode *node) {
   node->_argument = implicitCheckedCast(node->_argument, retTypeNarrow, cf);
 }
 
+void FlowChecker::visit(ESTree::ThrowStatementNode *node) {
+  visitExpression(node->_argument, node, nullptr);
+}
+
 void FlowChecker::visit(ESTree::BlockStatementNode *node) {
   ScopeRAII scope(*this);
   if (!resolveScopeTypesAndAnnotate(node, node->getScope()))
