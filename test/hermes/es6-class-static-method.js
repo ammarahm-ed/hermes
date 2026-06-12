@@ -9,29 +9,29 @@
 // REQUIRES: es6_class
 
 class Parent {
-  static nonOverridenMethod() {
+  static nonOverriddenMethod() {
     return "From Parent";
   }
 
-  static overridenMethod() {
+  static overriddenMethod() {
     return "From Parent";
   }
 }
 
 class Child extends Parent {
-  static overridenMethod() {
+  static overriddenMethod() {
     return "From Child";
   }
 }
 
-print(Parent.nonOverridenMethod());
+print(Parent.nonOverriddenMethod());
 //CHECK: From Parent
 
-print(Parent.overridenMethod());
+print(Parent.overriddenMethod());
 //CHECK: From Parent
 
-print(Child.nonOverridenMethod());
+print(Child.nonOverriddenMethod());
 //CHECK: From Parent
 
-print(Child.overridenMethod());
+print(Child.overriddenMethod());
 //CHECK: From Child

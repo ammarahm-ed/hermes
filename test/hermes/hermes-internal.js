@@ -35,7 +35,7 @@ print(typeof HermesInternal.detachArrayBuffer);
 //CHKIMD-NEXT: undefined
 
 // Check that safe fields such as HermesInternal.concat is
-// kept around even when HermesInternal is diabled.
+// kept around even when HermesInternal is disabled.
 print(typeof HermesInternal.concat)
 //CHKHIE-NEXT: function
 //CHKHID-NEXT: function
