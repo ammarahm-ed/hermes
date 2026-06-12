@@ -129,15 +129,26 @@ void installTraceableBuiltinWrappers(jsi::Runtime &jsRuntime) {
   // access it here) and Builtins.def.
   static constexpr TraceableMathBuiltin traceableMathBuiltins[] = {
       {Predefined::acos, BuiltinMethod::Math_acos, 1, std::acos, nullptr},
+      {Predefined::acosh, BuiltinMethod::Math_acosh, 1, ::acosh, nullptr},
       {Predefined::asin, BuiltinMethod::Math_asin, 1, std::asin, nullptr},
+      {Predefined::asinh, BuiltinMethod::Math_asinh, 1, ::asinh, nullptr},
       {Predefined::atan, BuiltinMethod::Math_atan, 1, std::atan, nullptr},
+      {Predefined::atanh, BuiltinMethod::Math_atanh, 1, ::atanh, nullptr},
       {Predefined::atan2, BuiltinMethod::Math_atan2, 2, nullptr, std::atan2},
+      {Predefined::cbrt, BuiltinMethod::Math_cbrt, 1, ::cbrt, nullptr},
       {Predefined::cos, BuiltinMethod::Math_cos, 1, std::cos, nullptr},
+      {Predefined::cosh, BuiltinMethod::Math_cosh, 1, ::cosh, nullptr},
       {Predefined::exp, BuiltinMethod::Math_exp, 1, std::exp, nullptr},
+      {Predefined::expm1, BuiltinMethod::Math_expm1, 1, ::expm1, nullptr},
       {Predefined::log, BuiltinMethod::Math_log, 1, std::log, nullptr},
+      {Predefined::log10, BuiltinMethod::Math_log10, 1, std::log10, nullptr},
+      {Predefined::log1p, BuiltinMethod::Math_log1p, 1, ::log1p, nullptr},
+      {Predefined::log2, BuiltinMethod::Math_log2, 1, std::log2, nullptr},
       {Predefined::pow, BuiltinMethod::Math_pow, 2, nullptr, expOp},
       {Predefined::sin, BuiltinMethod::Math_sin, 1, std::sin, nullptr},
+      {Predefined::sinh, BuiltinMethod::Math_sinh, 1, ::sinh, nullptr},
       {Predefined::tan, BuiltinMethod::Math_tan, 1, std::tan, nullptr},
+      {Predefined::tanh, BuiltinMethod::Math_tanh, 1, ::tanh, nullptr},
   };
 
   auto *hermes = jsi::castInterface<IHermes>(&jsRuntime);

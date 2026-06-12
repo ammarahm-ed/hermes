@@ -795,23 +795,34 @@ class TypeInferenceImpl {
     switch (inst->getBuiltinIndex()) {
       case BuiltinMethod::Math_abs:
       case BuiltinMethod::Math_acos:
+      case BuiltinMethod::Math_acosh:
       case BuiltinMethod::Math_asin:
+      case BuiltinMethod::Math_asinh:
       case BuiltinMethod::Math_atan:
+      case BuiltinMethod::Math_atanh:
       case BuiltinMethod::Math_atan2:
+      case BuiltinMethod::Math_cbrt:
       case BuiltinMethod::Math_ceil:
       case BuiltinMethod::Math_cos:
+      case BuiltinMethod::Math_cosh:
       case BuiltinMethod::Math_exp:
+      case BuiltinMethod::Math_expm1:
       case BuiltinMethod::Math_floor:
       case BuiltinMethod::Math_hypot:
       case BuiltinMethod::Math_imul:
       case BuiltinMethod::Math_log:
+      case BuiltinMethod::Math_log10:
+      case BuiltinMethod::Math_log1p:
+      case BuiltinMethod::Math_log2:
       case BuiltinMethod::Math_max:
       case BuiltinMethod::Math_min:
       case BuiltinMethod::Math_pow:
       case BuiltinMethod::Math_round:
       case BuiltinMethod::Math_sin:
+      case BuiltinMethod::Math_sinh:
       case BuiltinMethod::Math_sqrt:
       case BuiltinMethod::Math_tan:
+      case BuiltinMethod::Math_tanh:
       case BuiltinMethod::Math_trunc:
         return Type::createNumber();
       default:
