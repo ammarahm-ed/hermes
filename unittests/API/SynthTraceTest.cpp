@@ -74,6 +74,30 @@ struct SynthTraceTest : public ::testing::Test {
 /// @name Synth trace tests
 /// @{
 
+TEST_F(SynthTraceTest, StabilizeMathFunctionsAcrossPlatforms) {
+  rt->replaceNondeterministicFuncs();
+  // Below code may produce different results on different platforms if run with
+  // hermes directly. Use the static builtin path here to ensure the wrapper in
+  // the builtin table is used.
+  const std::string source = R"(
+    'use static builtin';
+    (function() {
+      const frame = 3;
+      const numFrames = 24;
+      const t = frame / numFrames;
+      const bounciness = 1.4;
+      const p = bounciness * Math.PI;
+      return 1 - Math.pow(Math.cos((t * Math.PI) / 2), 3) * Math.cos(t * p);
+    })()
+  )";
+
+  const double actual = rt->global()
+                            .getPropertyAsFunction(*rt, "eval")
+                            .call(*rt, source)
+                            .getNumber();
+  EXPECT_EQ(0.19557121126841759, actual);
+}
+
 TEST_F(SynthTraceTest, CreateObject) {
   SynthTrace::ObjectID objID;
   {

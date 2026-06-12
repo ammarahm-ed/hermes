@@ -457,6 +457,17 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
       BuiltinMethod::Enum builtinIndex,
       Callable *builtin);
 
+  /// Overwrite an already registered builtin callable. This is only used by
+  /// synth tool to wrap Math builtins to provide stable results across libm
+  /// implementations.
+  /// \pre builtinIndex must have already been registered.
+  /// \pre builtinIndex < BuiltinMethod::_count.
+  /// \pre \p builtin is NativeFunction if builtinIndex <
+  /// BuiltinMethod::_firstJS.
+  inline void overwriteBuiltinUnsafe(
+      BuiltinMethod::Enum builtinIndex,
+      Callable *builtin);
+
   /// ES6-ES11 8.4.1 EnqueueJob ( queueName, job, arguments )
   /// See \c jobQueue_ for how the Jobs and Job Queues are set up in Hermes.
   inline void enqueueJob(Callable *job);
