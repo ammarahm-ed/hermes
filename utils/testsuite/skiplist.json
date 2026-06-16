@@ -501,6 +501,13 @@
       "comment": "These are rest failing tests in mjsunit that we may support soon."
     },
     {
+      "paths": [
+        "mjsunit/regress/regress-v8-8357.js",
+        "mjsunit/regress/regress-1092896.js"
+      ],
+      "comment": "Tests rely on outdated spec where String.prototype methods looked up well-known Symbol methods on non-Object arguments. The current spec only performs the lookup when the argument is an Object."
+    },
+    {
       "comment": "Promise subclassing (PromiseCapability via this) is not supported. Static methods (all, allSettled, any, race, reject, resolve) and prototype.then always use the built-in Promise constructor instead of reading 'this'. This breaks constructor dispatch, capability validation, resolve/reject element functions, iterator close on resolve throw, and same-thenable resolution ordering.",
       "paths": [
         "test262/test/built-ins/Promise/get-prototype-abrupt-executor-not-callable.js",
@@ -2374,30 +2381,7 @@
     "test262/test/language/expressions/super/prop-expr-uninitialized-this-putvalue-increment.js",
     "test262/test/language/expressions/super/prop-expr-uninitialized-this-putvalue-compound-assign.js",
     "test262/test/language/expressions/super/prop-expr-uninitialized-this-putvalue.js",
-    "test262/test/built-ins/String/prototype/split/cstm-split-on-string-primitive.js",
-    "test262/test/built-ins/String/prototype/split/cstm-split-on-boolean-primitive.js",
-    "test262/test/built-ins/String/prototype/split/cstm-split-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/split/cstm-split-on-bigint-primitive.js",
     "test262/test/built-ins/DataView/byteOffset-validated-against-initial-buffer-length.js",
-    "test262/test/built-ins/String/prototype/match/cstm-matcher-on-boolean-primitive.js",
-    "test262/test/built-ins/String/prototype/match/cstm-matcher-on-bigint-primitive.js",
-    "test262/test/built-ins/String/prototype/match/cstm-matcher-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/match/cstm-matcher-on-string-primitive.js",
-    "test262/test/built-ins/String/prototype/search/cstm-search-on-string-primitive.js",
-    "test262/test/built-ins/String/prototype/search/cstm-search-on-boolean-primitive.js",
-    "test262/test/built-ins/String/prototype/search/cstm-search-on-bigint-primitive.js",
-    "test262/test/built-ins/String/prototype/search/cstm-search-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/replace/cstm-replace-on-string-primitive.js",
-    "test262/test/built-ins/String/prototype/replace/cstm-replace-on-boolean-primitive.js",
-    "test262/test/built-ins/String/prototype/replace/cstm-replace-on-bigint-primitive.js",
-    "test262/test/built-ins/String/prototype/replace/cstm-replace-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/matchAll/cstm-matchall-on-bigint-primitive.js",
-    "test262/test/built-ins/String/prototype/matchAll/cstm-matchall-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/matchAll/cstm-matchall-on-string-primitive.js",
-    "test262/test/built-ins/String/prototype/replaceAll/cstm-replaceall-on-boolean-primitive.js",
-    "test262/test/built-ins/String/prototype/replaceAll/cstm-replaceall-on-bigint-primitive.js",
-    "test262/test/built-ins/String/prototype/replaceAll/cstm-replaceall-on-number-primitive.js",
-    "test262/test/built-ins/String/prototype/replaceAll/cstm-replaceall-on-string-primitive.js",
     "test262/test/built-ins/Date/prototype/setUTCMinutes/date-value-read-before-tonumber-when-date-is-invalid.js",
     "test262/test/built-ins/Date/prototype/setUTCSeconds/date-value-read-before-tonumber-when-date-is-invalid.js",
     "test262/test/built-ins/Date/prototype/setHours/date-value-read-before-tonumber-when-date-is-invalid.js",
