@@ -22,7 +22,7 @@ CI runs these 4 commands in sequence from this directory. Remember to run them l
 ```bash
 yarn build                  # builds all packages (required before lint)
 yarn test                   # runs all jest tests
-dotslash ./.flow.dotslash   # Flow type checking
+yarn flow                   # Flow type checking
 yarn lint                   # eslint
 ```
 
