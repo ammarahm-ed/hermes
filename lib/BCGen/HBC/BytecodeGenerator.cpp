@@ -357,20 +357,20 @@ void BytecodeModuleGenerator::addCJSModule(
   assert(
       cjsModulesStatic_.empty() &&
       "Statically resolved modules must be in cjsModulesStatic_");
-  cjsModules_.push_back({nameID, functionID});
+  cjsModules_.emplace_back(nameID, functionID);
 }
 
 void BytecodeModuleGenerator::addCJSModuleStatic(
     uint32_t moduleID,
     uint32_t functionID) {
   assert(cjsModules_.empty() && "Unresolved modules must be in cjsModules_");
-  cjsModulesStatic_.push_back({moduleID, functionID});
+  cjsModulesStatic_.emplace_back(moduleID, functionID);
 }
 
 void BytecodeModuleGenerator::addFunctionSource(
     uint32_t functionID,
     uint32_t stringID) {
-  functionSourceTable_.push_back({functionID, stringID});
+  functionSourceTable_.emplace_back(functionID, stringID);
 }
 
 std::unique_ptr<BytecodeModule> BytecodeModuleGenerator::generate() {
