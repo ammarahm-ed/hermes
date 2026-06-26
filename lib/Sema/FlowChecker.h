@@ -369,10 +369,13 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
   void visit(ESTree::ArrowFunctionExpressionNode *node);
 
   /// Run typechecking on the body of a class that we already have the type for.
+  /// \param classConsType the ClassConstructorType wrapping \p classType, used
+  ///   as the new.target type inside the constructor.
   void visitClassNode(
       ESTree::ClassLikeNode *classNode,
       ESTree::ClassBodyNode *body,
-      Type *classType);
+      Type *classType,
+      Type *classConsType);
 
   void visit(ESTree::ClassExpressionNode *node);
   void visit(ESTree::ClassDeclarationNode *node);
@@ -1106,6 +1109,9 @@ class FlowChecker::ClassContext {
  public:
   Type *const classType;
 
+  /// The type of new.target inside the class, i.e. the class constructor type.
+  Type *const newTargetType;
+
   ESTree::ClassLikeNode *const node;
 
   ClassContext(const ClassContext &) = delete;
@@ -1114,10 +1120,12 @@ class FlowChecker::ClassContext {
   ClassContext(
       FlowChecker &outer,
       Type *const classType,
+      Type *const newTargetType,
       ESTree::ClassLikeNode *node)
       : outer_(outer),
         prevContext_(outer.curClassContext_),
         classType(classType),
+        newTargetType(newTargetType),
         node(node) {
     outer.curClassContext_ = this;
   }

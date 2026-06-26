@@ -1151,11 +1151,12 @@ void FlowChecker::parseClassType(
 void FlowChecker::visitClassNode(
     ESTree::ClassLikeNode *classNode,
     ESTree::ClassBodyNode *body,
-    Type *classType) {
+    Type *classType,
+    Type *classConsType) {
   assert(
       llvh::cast<ClassType>(classType->info)->isInitialized() &&
       "trying to typecheck uninitialized class");
-  ClassContext classContext(*this, classType, classNode);
+  ClassContext classContext(*this, classType, classConsType, classNode);
   visitESTreeChildren(*this, body);
 }
 
@@ -1202,7 +1203,10 @@ void FlowChecker::visit(ESTree::ClassExpressionNode *node) {
   }
 
   visitClassNode(
-      node, llvh::cast<ESTree::ClassBodyNode>(node->_body), classType);
+      node,
+      llvh::cast<ESTree::ClassBodyNode>(node->_body),
+      classType,
+      consType);
 }
 
 void FlowChecker::visit(ESTree::ClassDeclarationNode *node) {
@@ -1215,11 +1219,15 @@ void FlowChecker::visit(ESTree::ClassDeclarationNode *node) {
     return;
   }
 
+  Type *classConsType = getDeclType(decl);
   auto *classType =
-      llvh::cast<ClassConstructorType>(getDeclType(decl)->info)->getClassType();
+      llvh::cast<ClassConstructorType>(classConsType->info)->getClassType();
 
   visitClassNode(
-      node, llvh::cast<ESTree::ClassBodyNode>(node->_body), classType);
+      node,
+      llvh::cast<ESTree::ClassBodyNode>(node->_body),
+      classType,
+      classConsType);
 }
 
 void FlowChecker::visit(ESTree::MethodDefinitionNode *node) {
@@ -1248,8 +1256,7 @@ void FlowChecker::visit(ESTree::MethodDefinitionNode *node) {
         fe,
         curClassContext_->getClassTypeInfo()->getConstructorType(),
         curClassContext_->classType,
-        /* newTargetType */
-        curClassContext_->getClassTypeInfo()->getConstructorType());
+        curClassContext_->newTargetType);
     visitFunctionLike(fe, fe->_body, fe->_params);
   } else if (node->_key) {
     Identifier name;
@@ -2439,7 +2446,8 @@ void FlowChecker::drainTypecheckQueue() {
     visitClassNode(
         deferred.specialization,
         llvh::cast<ESTree::ClassBodyNode>(specialization->_body),
-        deferred.classType);
+        deferred.classType,
+        deferred.classConsType);
   }
 
   bindingTable_.activateScope(savedScope);
@@ -4054,7 +4062,7 @@ FlowChecker::specializeGenericMethodWithParsedTypes(
     Type *classTypeForContext = classType;
     if (auto *ct = llvh::dyn_cast<ClassConstructorType>(classType->info))
       classTypeForContext = ct->getClassType();
-    ClassContext classContext(*this, classTypeForContext, nullptr);
+    ClassContext classContext(*this, classTypeForContext, classType, nullptr);
     FunctionContext functionContext(
         *this,
         specializedFE,

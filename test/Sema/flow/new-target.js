@@ -67,14 +67,14 @@ class A {
 // CHECK-NEXT:                    FunctionExpression : %function.3
 // CHECK-NEXT:                        BlockStatement
 // CHECK-NEXT:                            ExpressionStatement
-// CHECK-NEXT:                                MetaProperty : %function.3
+// CHECK-NEXT:                                MetaProperty : %class_constructor.2
 // CHECK-NEXT:                                    Id 'new'
 // CHECK-NEXT:                                    Id 'target'
 // CHECK-NEXT:                            ExpressionStatement
 // CHECK-NEXT:                                ArrowFunctionExpression : %untyped_function.1
 // CHECK-NEXT:                                    BlockStatement
 // CHECK-NEXT:                                        ReturnStatement
-// CHECK-NEXT:                                            MetaProperty : %function.3
+// CHECK-NEXT:                                            MetaProperty : %class_constructor.2
 // CHECK-NEXT:                                                Id 'new'
 // CHECK-NEXT:                                                Id 'target'
 // CHECK-NEXT:                MethodDefinition : %untyped_function.1
