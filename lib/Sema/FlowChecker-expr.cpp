@@ -1124,19 +1124,22 @@ class FlowChecker::ExprVisitor {
       }
     }
 
-    if (constraint &&
-        !llvh::isa<InferencePlaceholderArrayType>(constraint->info)) {
+    if (outer_.flowContext_.isArrayClassType(constraint)) {
       outer_.setNodeType(node, constraint);
-    } else if (elTypes.empty()) {
-      // If there's no elements in the union, then just use 'any'.
-      outer_.sm_.warning(
-          node->getSourceRange(),
-          "ft: empty array with no context, assuming 'any' array");
-      outer_.setNodeType(node, outer_.flowContext_.getAny());
     } else {
-      // Otherwise, construct a union of all the element types.
-      Type *elemUnion = outer_.flowContext_.createType(
-          outer_.flowContext_.maybeCreateUnion(elTypes.getArrayRef()));
+      // Construct the element type. If there are no elements and no context,
+      // infer an 'any' element type, producing an 'any[]' array.
+      Type *elemUnion;
+      if (elTypes.empty()) {
+        outer_.sm_.warning(
+            node->getSourceRange(),
+            "ft: empty array with no context, assuming 'any' array");
+        elemUnion = outer_.flowContext_.getAny();
+      } else {
+        // Otherwise, construct a union of all the element types.
+        elemUnion = outer_.flowContext_.createType(
+            outer_.flowContext_.maybeCreateUnion(elTypes.getArrayRef()));
+      }
       Type *arrType = outer_.getSpecializedArrayClassType(
           elemUnion, node->getSourceRange());
       if (arrType) {
