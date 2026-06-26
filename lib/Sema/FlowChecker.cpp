@@ -1708,7 +1708,7 @@ void FlowChecker::visitFunctionLike(
           continue;
 
         // Destructuring param with default value.
-        assignDestructuringParamTypes(node, assign->_left, paramType);
+        assignDestructuringParamTypes(assign->_left, paramType);
 
         // Typecheck the default value against the parameter type.
         visitExpression(assign->_right, assign, paramType);
@@ -1757,7 +1757,7 @@ void FlowChecker::visitFunctionLike(
       }
       ++i;
 
-      assignDestructuringParamTypes(node, &param, paramType);
+      assignDestructuringParamTypes(&param, paramType);
     }
   }
 
@@ -1806,14 +1806,16 @@ void FlowChecker::checkImplicitReturnType(ESTree::FunctionLikeNode *node) {
   }
 }
 
-void FlowChecker::assignDestructuringParamTypes(
-    ESTree::FunctionLikeNode *funcNode,
+template <typename RecordLeafCB>
+void FlowChecker::resolveDestructuringTypes(
     ESTree::Node *pattern,
-    Type *paramType) {
+    Type *patternType,
+    RecordLeafCB recordLeaf) {
+  // Use a worklist to avoid recursion.
   llvh::SmallVector<std::pair<ESTree::Node *, Type *>, 4> worklist{};
-  worklist.emplace_back(pattern, paramType);
+  worklist.emplace_back(pattern, patternType);
 
-  /// Lambda used for passing as a callback below.
+  /// Lambda passed as the callback to the expand* helpers below.
   auto addToWorklist = [&worklist](ESTree::Node *n, Type *ty) {
     worklist.emplace_back(n, ty);
   };
@@ -1821,6 +1823,7 @@ void FlowChecker::assignDestructuringParamTypes(
   while (!worklist.empty()) {
     auto [node, t] = worklist.pop_back_val();
     if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(node)) {
+      // A leaf binding identifier: record its type via the caller's callback.
       if (id->_typeAnnotation) {
         setNodeType(id, flowContext_.getAny());
         sm_.error(
@@ -1831,20 +1834,29 @@ void FlowChecker::assignDestructuringParamTypes(
       }
       sema::Decl *decl = getDecl(id);
       setNodeType(id, t);
-      declTypes_.try_emplace(decl, t);
+      recordLeaf(decl, t, id);
     } else if (auto *arr = llvh::dyn_cast<ESTree::ArrayPatternNode>(node)) {
       if (auto *tuple = llvh::dyn_cast<TupleType>(t->info)) {
+        // Setting the type to the tuple allows IRGen to conveniently query the
+        // kind of destructuring to run by checking the annotated type on the
+        // array pattern. It also avoids rerunning annotation in subsequent
+        // phases of AnnotateScopeDecls.
         setNodeType(arr, t);
         if (!expandTupleDestructuring(arr, tuple, addToWorklist))
           return;
       } else if (flowContext_.isArrayClassType(t)) {
+        // Array<T> destructuring: each element gets type T, and a trailing
+        // rest element gets type Array<T>. Setting the node type lets IRGen
+        // dispatch to the FastArray-specific destructuring path.
         setNodeType(arr, t);
         if (!expandArrayDestructuring(arr, t, addToWorklist))
           return;
       } else if (llvh::isa<AnyType>(t->info)) {
+        // Propagate the 'any' type to all children. The iterator protocol will
+        // be used to populate the elements during IRGen.
         setNodeType(arr, flowContext_.getAny());
-        for (ESTree::Node &el : arr->_elements)
-          worklist.emplace_back(&el, t);
+        for (ESTree::Node &element : arr->_elements)
+          worklist.emplace_back(&element, t);
       } else {
         setNodeType(arr, flowContext_.getAny());
         sm_.error(
@@ -1853,14 +1865,19 @@ void FlowChecker::assignDestructuringParamTypes(
       }
     } else if (auto *obj = llvh::dyn_cast<ESTree::ObjectPatternNode>(node)) {
       if (auto *objType = llvh::dyn_cast<ExactObjectType>(t->info)) {
+        // Setting the type allows IRGen to query the destructuring kind.
         setNodeType(obj, t);
         if (!expandObjectDestructuring(obj, objType, addToWorklist))
           return;
       } else if (llvh::isa<AnyType>(t->info)) {
+        // Propagate 'any' to all properties and the rest binding.
         setNodeType(obj, flowContext_.getAny());
         for (ESTree::Node &propNode : obj->_properties) {
           if (auto *prop = llvh::dyn_cast<ESTree::PropertyNode>(&propNode)) {
             worklist.emplace_back(prop->_value, t);
+          } else if (
+              auto *rest = llvh::dyn_cast<ESTree::RestElementNode>(&propNode)) {
+            worklist.emplace_back(rest->_argument, t);
           } else {
             sm_.error(propNode.getSourceRange(), "ft: property not supported");
           }
@@ -1874,6 +1891,17 @@ void FlowChecker::assignDestructuringParamTypes(
       }
     }
   }
+}
+
+void FlowChecker::assignDestructuringParamTypes(
+    ESTree::Node *pattern,
+    Type *paramType) {
+  resolveDestructuringTypes(
+      pattern,
+      paramType,
+      [this](sema::Decl *decl, Type *t, ESTree::IdentifierNode *) {
+        declTypes_.try_emplace(decl, t);
+      });
 }
 
 template <typename OnChildCB>
@@ -2257,95 +2285,13 @@ class FlowChecker::AnnotateScopeDecls {
       ESTree::VariableDeclaratorNode *declarator,
       ESTree::PatternNode *pattern,
       Type *patternType) {
-    // Use a worklist to avoid recursion.
-    llvh::SmallVector<std::pair<ESTree::Node *, Type *>, 4> worklist{};
-    worklist.emplace_back(pattern, patternType);
-
-    /// Lambda used for passing as a callback below.
-    auto addToWorklist = [&worklist](ESTree::Node *n, Type *ty) {
-      worklist.emplace_back(n, ty);
-    };
-
-    while (!worklist.empty()) {
-      auto [node, t] = worklist.pop_back_val();
-      if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(node)) {
-        // If this is an identifier, then we just record its type.
-        if (id->_typeAnnotation) {
-          outer.setNodeType(id, outer.flowContext_.getAny());
-          outer.sm_.error(
-              node->getSourceRange(),
-              "ft: type annotations not supported inside destructuring, "
-              "annotate the whole pattern instead");
-          continue;
-        }
-        sema::Decl *decl = outer.getDecl(id);
-        outer.setNodeType(id, t);
-        outer.recordDecl(decl, t, id, declarator);
-      } else if (auto *arr = llvh::dyn_cast<ESTree::ArrayPatternNode>(node)) {
-        // If we have an array pattern, then we need to visit each element and
-        // annotate them accordingly.
-        if (auto *tuple = llvh::dyn_cast<TupleType>(t->info)) {
-          // Setting the type to the tuple allows IRGen to conveniently
-          // query the kind of destructuring to run by checking the annotated
-          // type on the array pattern.
-          // It also allows us to avoid rerunning annotation in subsequent
-          // phases of AnnotateScopeDecls.
-          outer.setNodeType(arr, t);
-          if (!outer.expandTupleDestructuring(arr, tuple, addToWorklist))
-            return;
-        } else if (outer.flowContext_.isArrayClassType(t)) {
-          // Array<T> destructuring: each element gets type T, and a trailing
-          // rest element gets type Array<T>. Setting the node type lets IRGen
-          // dispatch to the FastArray-specific destructuring path.
-          outer.setNodeType(arr, t);
-          if (!outer.expandArrayDestructuring(arr, t, addToWorklist))
-            return;
-        } else if (llvh::isa<AnyType>(t->info)) {
-          outer.setNodeType(arr, outer.flowContext_.getAny());
-          // Propagate the 'any' type to all children.
-          // Records that we've seen the declaration for every variable
-          // declared in this pattern, so the IdentifierNode visitor knows not
-          // to emit a warning during typechecking for use before declaration.
-          // The iterator protocol will be used to populate the elements when
-          // the code is generated.
-          for (ESTree::Node &element : arr->_elements) {
-            worklist.emplace_back(&element, t);
-          }
-          continue;
-        } else {
-          outer.setNodeType(arr, outer.flowContext_.getAny());
-          outer.sm_.error(
-              arr->getSourceRange(),
-              "ft: incompatible type for array pattern, expected tuple or array");
-          continue;
-        }
-      } else if (auto *obj = llvh::dyn_cast<ESTree::ObjectPatternNode>(node)) {
-        if (auto *objType = llvh::dyn_cast<ExactObjectType>(t->info)) {
-          // Setting the type allows IRGen to query the destructuring kind.
-          outer.setNodeType(obj, t);
-          if (!outer.expandObjectDestructuring(obj, objType, addToWorklist))
-            return;
-        } else if (llvh::isa<AnyType>(t->info)) {
-          outer.setNodeType(obj, outer.flowContext_.getAny());
-          // Propagate 'any' to all properties.
-          for (ESTree::Node &propNode : obj->_properties) {
-            if (auto *prop = llvh::dyn_cast<ESTree::PropertyNode>(&propNode)) {
-              worklist.emplace_back(prop->_value, t);
-            } else if (
-                auto *rest =
-                    llvh::dyn_cast<ESTree::RestElementNode>(&propNode)) {
-              worklist.emplace_back(rest->_argument, t);
-            }
-          }
-        } else {
-          outer.sm_.error(
-              obj->getSourceRange(),
-              "ft: incompatible type for object pattern, expected object type");
-        }
-      }
-    }
-
-    return;
+    outer.resolveDestructuringTypes(
+        pattern,
+        patternType,
+        [this, declarator](
+            sema::Decl *decl, Type *t, ESTree::IdentifierNode *id) {
+          outer.recordDecl(decl, t, id, declarator);
+        });
   }
 
   void annotateFunctionDeclaration(

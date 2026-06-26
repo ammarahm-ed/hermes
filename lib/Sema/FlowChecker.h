@@ -494,12 +494,20 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
 
   /// Walk a destructuring pattern for a function parameter, assigning types
   /// to each leaf identifier and recording them in declTypes_.
-  /// \param funcNode the enclosing function (unused for now, but ensures the
-  ///     caller passes the right context).
-  void assignDestructuringParamTypes(
-      ESTree::FunctionLikeNode *funcNode,
+  void assignDestructuringParamTypes(ESTree::Node *pattern, Type *paramType);
+
+  /// Walk a destructuring \p pattern, annotating every nested pattern node and
+  /// leaf binding identifier with the type derived from \p patternType. For
+  /// each leaf binding identifier, \p recordLeaf is invoked with its decl, its
+  /// resolved type, and the identifier node, allowing the caller to record the
+  /// binding in the way appropriate to its context (function parameter, var
+  /// declaration, etc.).
+  /// May report errors.
+  template <typename RecordLeafCB>
+  void resolveDestructuringTypes(
       ESTree::Node *pattern,
-      Type *paramType);
+      Type *patternType,
+      RecordLeafCB recordLeaf);
 
   /// Expand a tuple destructuring pattern: validate element count and call
   /// \p onChild for each (element, type) pair.
