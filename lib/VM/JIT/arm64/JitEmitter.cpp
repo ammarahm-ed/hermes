@@ -2996,9 +2996,14 @@ void Emitter::newObjectWithParent(FR frRes, FR frParent) {
       xTemp2,
       slowPathLab);
 
-  // Compute what the parent should be.
+  // Compute what the parent should be into xTemp2. We must not overwrite
+  // xParent, because it may be a register that the allocator still believes
+  // holds the live frParent value.
   auto decodeObjParentLab = a.newLabel();
   auto parentDoneLab = a.newLabel();
+
+  // Use xTemp2 for parent calculations below.
+  a.mov(xTemp2, xParent);
 
   // Check if the parent is an object.
   emit_sh_ljs_is_object(a, xTemp1, xParent);
@@ -3006,23 +3011,27 @@ void Emitter::newObjectWithParent(FR frRes, FR frParent) {
 
   // Check if the parent is null.
   emit_sh_ljs_is_null(a, xTemp1, xParent);
-  // At this point, the parent is no longer useful, so we are free to overwrite
-  // it. Set it to zero so we store nullptr if the parent is JS null.
-  a.mov(xParent, 0);
+  // Set it to zero so we store nullptr if the parent is JS null.
+  a.mov(xTemp2, 0);
   a.b_eq(parentDoneLab);
 
   // The parent is not an object or null, so get Object.prototype.
-  a.ldr(xParent, a64::Mem(xRuntime, offsetof(Runtime, objectPrototype)));
+  a.ldr(xTemp2, a64::Mem(xRuntime, offsetof(Runtime, objectPrototype)));
 
-  // Extract the parent object pointer from the HermesValue in xParent.
+  // Extract the parent object pointer from the HermesValue in xTemp2.
   a.bind(decodeObjParentLab);
-  emit_sh_ljs_get_pointer(a, xParent, xParent);
-  emit_sh_cp_encode_non_null(a, xParent);
+  emit_sh_ljs_get_pointer(a, xTemp2, xTemp2);
+  emit_sh_cp_encode_non_null(a, xTemp2);
 
   a.bind(parentDoneLab);
 
   // Initialize the object.
-  emit_jsobject_init(a, xNewObjPtr, xParent, xTemp1, false);
+  emit_jsobject_init(
+      a,
+      xNewObjPtr,
+      /* xParent */ xTemp2,
+      /* xTempOrPropStorageOpt */ xTemp1,
+      false);
 
   auto hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
