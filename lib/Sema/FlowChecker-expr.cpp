@@ -1465,10 +1465,7 @@ class FlowChecker::ExprVisitor {
 
     static const BinTypes s_types[] = {
         // clang-format off
-        {BinopKind::eq, TypeKind::Boolean, llvh::None, llvh::None},
-        {BinopKind::ne, TypeKind::Boolean, llvh::None, llvh::None},
-        {BinopKind::strictEq, TypeKind::Boolean, llvh::None, llvh::None},
-        {BinopKind::strictNe, TypeKind::Boolean, llvh::None, llvh::None},
+        // eq, ne, strictEq, and strictNe are handled specially.
 
         {BinopKind::lt, TypeKind::Boolean, TypeKind::Number, TypeKind::Number},
         {BinopKind::lt, TypeKind::Boolean, TypeKind::BigInt, TypeKind::BigInt},
@@ -1594,13 +1591,64 @@ class FlowChecker::ExprVisitor {
     Type *lt = outer_.getNodeTypeOrAny(node->_left);
     Type *rt = outer_.getNodeTypeOrAny(node->_right);
 
-    Type *res;
-    if (Type *t = determineBinopType(
-            binopKind(node->_operator->str()),
-            lt->info->getKind(),
-            rt->info->getKind())) {
-      res = t;
-    } else {
+    BinopKind op = binopKind(node->_operator->str());
+
+    // `===` and `!==` are handled specially.
+    // They are only legal when one operand's type flows into the other's
+    // without a checked cast. This is a conservative check: it rejects most
+    // comparisons that are always false, but may also reject overlapping types
+    // (e.g. unions sharing an arm) whose values could still be equal at
+    // runtime. Still allows `?Foo === null`, subclass vs superclass, etc.
+    if (op == BinopKind::strictEq || op == BinopKind::strictNe) {
+      if (!outer_.canAFlowIntoB(lt->info, rt->info).canFlowWithoutCast() &&
+          !outer_.canAFlowIntoB(rt->info, lt->info).canFlowWithoutCast()) {
+        outer_.sm_.error(
+            node->getSourceRange(),
+            llvh::Twine("ft: ") + node->_operator->str() +
+                " cannot be applied to " + lt->messageString() + " and " +
+                rt->messageString());
+      }
+      outer_.setNodeType(node, outer_.flowContext_.getBoolean());
+      return;
+    }
+
+    // `==` and `!=` are handled specially and are generally disallowed.
+    // They are legal when either operand has type `any`, or when one operand
+    // has type `null` or `void` and the other operand can hold `null` or
+    // `void` without a checked cast. This permits `x == null` /
+    // `x == undefined` on any nullable type.
+    if (op == BinopKind::eq || op == BinopKind::ne) {
+      auto *li = lt->info;
+      auto *ri = rt->info;
+      auto acceptsNullOrVoid = [this](TypeInfo *t) {
+        return outer_.canAFlowIntoB(outer_.flowContext_.getNullInfo(), t)
+                   .canFlowWithoutCast() ||
+            outer_.canAFlowIntoB(outer_.flowContext_.getVoidInfo(), t)
+                .canFlowWithoutCast();
+      };
+      bool ok = false;
+      if (llvh::isa<AnyType>(li) || llvh::isa<AnyType>(ri)) {
+        ok = true;
+      } else if (llvh::isa<NullType>(li) || llvh::isa<VoidType>(li)) {
+        ok = acceptsNullOrVoid(ri);
+      } else if (llvh::isa<NullType>(ri) || llvh::isa<VoidType>(ri)) {
+        ok = acceptsNullOrVoid(li);
+      }
+      if (!ok) {
+        outer_.sm_.error(
+            node->getSourceRange(),
+            llvh::Twine("ft: ") + node->_operator->str() +
+                " cannot be applied to " + lt->messageString() + " and " +
+                rt->messageString() +
+                " (use === / !== for general comparisons)");
+      }
+      outer_.setNodeType(node, outer_.flowContext_.getBoolean());
+      return;
+    }
+
+    Type *res =
+        determineBinopType(op, lt->info->getKind(), rt->info->getKind());
+    if (!res) {
       outer_.sm_.error(
           node->getSourceRange(),
           llvh::Twine("ft: incompatible binary operation: ") +

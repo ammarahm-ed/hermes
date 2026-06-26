@@ -115,9 +115,9 @@
    * Initial value of the state
    */
   initial) {
+    M$react_invariant$default(M$react_index$INTERNAL$workInProgressFiber !== null && M$react_index$INTERNAL$workInProgressRoot !== null, 'useState() called outside of render');
     const root = M$sh_CHECKED_CAST$default(M$react_index$INTERNAL$workInProgressRoot);
     const fiber = M$sh_CHECKED_CAST$default(M$react_index$INTERNAL$workInProgressFiber);
-    M$react_invariant$default(fiber !== null && root !== null, 'useState() called outside of render');
     let state;
     const _workInProgressState = M$react_index$INTERNAL$workInProgressState;
     if (_workInProgressState === null) {

@@ -115,12 +115,12 @@ export function useState<T>(
    */
   initial: T,
 ): [T, SetState<T>] {
-  const root: Root = CHECKED_CAST<Root>(workInProgressRoot);
-  const fiber: Fiber = CHECKED_CAST<Fiber>(workInProgressFiber);
   invariant(
-    fiber !== null && root !== null,
+    workInProgressFiber !== null && workInProgressRoot !== null,
     'useState() called outside of render',
   );
+  const root: Root = CHECKED_CAST<Root>(workInProgressRoot);
+  const fiber: Fiber = CHECKED_CAST<Fiber>(workInProgressFiber);
 
   let state: State<T>;
   const _workInProgressState: State<mixed> | null = workInProgressState;
@@ -551,7 +551,7 @@ class Root {
   ): Fiber {
     if (
       prevChild !== null &&
-      CHECKED_CAST<Fiber>(prevChild).type === element.type
+      CHECKED_CAST<Fiber>(prevChild).type === (element.type: any)
     ) {
       let prevChild: Fiber = CHECKED_CAST<Fiber>(prevChild);
       // Only host and fragment nodes have to be reconciled: otherwise this is a

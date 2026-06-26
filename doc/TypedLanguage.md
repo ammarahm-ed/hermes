@@ -258,6 +258,12 @@ Restrictions:
 * No overloading constructors/accessors
 * Overloaded methods must be called (`var x = obj.overloadedMethod` is an error)
 
+### Comparisons
+
+Strict equality (`===` and `!==`) is type-checked. An expression `a === b` (or `a !== b`) is legal only when one operand's type flows into the other's without a checked cast.
+
+Loose equality (`==` and `!=`) is generally disallowed. To compare two values of the same type, use `===` / `!==`. It exists for the `x == null` / `x == undefined` idiom used to test nullability. Specifically, `a == b` is allowed only when either operand has type `any`, or one operand has type `null` or `void` and `null` or `void` flows into the other type.
+
 ### Other Features
 
 * Arrow functions (without type parameters).

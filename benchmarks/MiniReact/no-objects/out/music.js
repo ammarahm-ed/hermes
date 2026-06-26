@@ -120,9 +120,9 @@
    * Initial value of the state
    */
   initial: T): [T, M$react_index$INTERNAL$SetState<T>] {
+    M$react_invariant$default(M$react_index$INTERNAL$workInProgressFiber !== null && M$react_index$INTERNAL$workInProgressRoot !== null, 'useState() called outside of render');
     const root: M$react_index$INTERNAL$Root = M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Root>(M$react_index$INTERNAL$workInProgressRoot);
     const fiber: M$react_index$INTERNAL$Fiber = M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(M$react_index$INTERNAL$workInProgressFiber);
-    M$react_invariant$default(fiber !== null && root !== null, 'useState() called outside of render');
     let state: M$react_index$INTERNAL$State<T>;
     const _workInProgressState: M$react_index$INTERNAL$State<mixed> | null = M$react_index$INTERNAL$workInProgressState;
     if (_workInProgressState === null) {
@@ -459,7 +459,7 @@
       }
     }
     reconcileFiber(parent: M$react_index$INTERNAL$Fiber, prevChild: M$react_index$INTERNAL$Fiber | null, element: M$react_index$React$MixedElement): M$react_index$INTERNAL$Fiber {
-      if (prevChild !== null && M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(prevChild).type === element.type) {
+      if (prevChild !== null && M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(prevChild).type === (element.type: any)) {
         let prevChild: M$react_index$INTERNAL$Fiber = M$sh_CHECKED_CAST$default<M$react_index$INTERNAL$Fiber>(prevChild);
         // Only host and fragment nodes have to be reconciled: otherwise this is a
         // function component and its children will be reconciled when they are later

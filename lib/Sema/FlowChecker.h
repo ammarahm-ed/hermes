@@ -632,6 +632,11 @@ class FlowChecker : public ESTree::RecursionDepthTracker<FlowChecker> {
     /// When the type can flow, this field indicates whether a checked cast is
     /// needed.
     bool needCheckedCast = false;
+
+    /// \return true if the type can flow without requiring a checked cast.
+    bool canFlowWithoutCast() const {
+      return canFlow && !needCheckedCast;
+    }
   };
 
   /// Return true if type \p a can "flow" into type \p b.
