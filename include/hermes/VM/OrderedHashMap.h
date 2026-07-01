@@ -18,6 +18,8 @@
 namespace hermes {
 namespace vm {
 
+class Callable;
+
 struct HashSetEntry {
   static constexpr uint8_t kElementsPerEntry = 1;
 };
@@ -160,6 +162,25 @@ class OrderedHashMapBase {
   template <typename = std::enable_if<std::is_same_v<BucketType, HashSetEntry>>>
   static ExecutionStatus
   insert(Handle<Derived> self, Runtime &runtime, Handle<> key);
+
+  /// If \p key already exists, \return its current value without overwriting
+  /// it. Otherwise insert \p key -> \p value and \return \p value.
+  template <typename = std::enable_if<std::is_same_v<BucketType, HashMapEntry>>>
+  static CallResult<HermesValue> getOrInsert(
+      Handle<Derived> self,
+      Runtime &runtime,
+      Handle<> key,
+      Handle<> value);
+
+  /// If \p key already exists, \return its current value (without invoking \p
+  /// callback). Otherwise call \p callback with the key to produce the value,
+  /// then store key -> value and \return that value.
+  template <typename = std::enable_if<std::is_same_v<BucketType, HashMapEntry>>>
+  static CallResult<HermesValue> getOrInsertComputed(
+      Handle<Derived> self,
+      Runtime &runtime,
+      Handle<> key,
+      Handle<Callable> callback);
 
   /// Erase a HermesValue from the map, \return true if succeed.
   static bool erase(Handle<Derived> self, Runtime &runtime, Handle<> key);

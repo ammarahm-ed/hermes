@@ -421,6 +421,80 @@ ExecutionStatus OrderedHashMapBase<BucketType, Derived>::insert(
 
 template <typename BucketType, typename Derived>
 template <typename>
+CallResult<HermesValue> OrderedHashMapBase<BucketType, Derived>::getOrInsert(
+    Handle<Derived> self,
+    Runtime &runtime,
+    Handle<> key,
+    Handle<> value) {
+  self->assertInitialized();
+  uint32_t bucket = hashToBucket(self->capacity_, runtime, *key);
+  {
+    NoAllocScope noAlloc{runtime};
+    OptValue<uint32_t> dataTableKeyIndex;
+    std::tie(dataTableKeyIndex, bucket) =
+        self->lookupInBucket(runtime, bucket, key.getHermesValue());
+    if (dataTableKeyIndex.hasValue()) {
+      // Element for the key already exists; return its value without
+      // overwriting.
+      SmallHermesValue existing =
+          self->dataTable_.getNonNull(runtime)->at(*dataTableKeyIndex + 1);
+      return existing.unboxToHV(runtime);
+    }
+  }
+
+  // Key is absent; insert at the bucket we just resolved and return the value.
+  if (LLVM_UNLIKELY(
+          doInsert(self, runtime, bucket, key, value) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  return value.getHermesValue();
+}
+
+template <typename BucketType, typename Derived>
+template <typename>
+CallResult<HermesValue>
+OrderedHashMapBase<BucketType, Derived>::getOrInsertComputed(
+    Handle<Derived> self,
+    Runtime &runtime,
+    Handle<> key,
+    Handle<Callable> callback) {
+  self->assertInitialized();
+  uint32_t bucket = hashToBucket(self->capacity_, runtime, *key);
+  {
+    NoAllocScope noAlloc{runtime};
+    OptValue<uint32_t> dataTableKeyIndex;
+    std::tie(dataTableKeyIndex, bucket) =
+        self->lookupInBucket(runtime, bucket, key.getHermesValue());
+    if (dataTableKeyIndex.hasValue()) {
+      // Element for the key already exists; return its value without
+      // overwriting.
+      SmallHermesValue existing =
+          self->dataTable_.getNonNull(runtime)->at(*dataTableKeyIndex + 1);
+      return existing.unboxToHV(runtime);
+    }
+  }
+
+  struct : public Locals {
+    PinnedValue<> value;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  CallResult<PseudoHandle<>> callRes = Callable::executeCall1(
+      callback, runtime, Runtime::getUndefinedValue(), key.getHermesValue());
+  if (LLVM_UNLIKELY(callRes == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  lv.value = std::move(*callRes);
+  // The callback may have modified the map, so do an insert from scratch.
+  if (LLVM_UNLIKELY(
+          insert(self, runtime, key, lv.value) == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  return lv.value.getHermesValue();
+}
+
+template <typename BucketType, typename Derived>
+template <typename>
 ExecutionStatus OrderedHashMapBase<BucketType, Derived>::insert(
     Handle<Derived> self,
     Runtime &runtime,
@@ -624,6 +698,19 @@ OrderedHashMapBase<HashMapEntry, JSMapImpl<CellKind::JSMapKind>>::insert(
     Runtime &runtime,
     Handle<> key,
     Handle<> value);
+template CallResult<HermesValue>
+OrderedHashMapBase<HashMapEntry, JSMapImpl<CellKind::JSMapKind>>::getOrInsert(
+    Handle<JSMapImpl<CellKind::JSMapKind>> self,
+    Runtime &runtime,
+    Handle<> key,
+    Handle<> value);
+template CallResult<HermesValue>
+OrderedHashMapBase<HashMapEntry, JSMapImpl<CellKind::JSMapKind>>::
+    getOrInsertComputed(
+        Handle<JSMapImpl<CellKind::JSMapKind>> self,
+        Runtime &runtime,
+        Handle<> key,
+        Handle<Callable> callback);
 template ExecutionStatus
 OrderedHashMapBase<HashSetEntry, JSMapImpl<CellKind::JSSetKind>>::insert(
     Handle<JSMapImpl<CellKind::JSSetKind>> self,
