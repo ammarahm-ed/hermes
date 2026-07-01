@@ -114,6 +114,12 @@
     },
     {
       "paths": [
+        "test262/test/built-ins/RegExp/escape/cross-realm.js"
+      ],
+      "comment": "fails on $262.createRealm()"
+    },
+    {
+      "paths": [
         "test262/test/language/expressions/class/elements/async-gen-private-method/yield-promise-reject-next-yield-star-sync-iterator.js",
         "test262/test/language/expressions/class/elements/async-gen-private-method/yield-star-async-return.js",
         "test262/test/language/expressions/class/elements/async-gen-private-method/yield-star-async-throw.js",
@@ -4498,7 +4504,6 @@
     "Array.fromAsync",
     "json-parse-with-source",
     "explicit-resource-management",
-    "RegExp.escape",
     "immutable-arraybuffer",
     "joint-iteration"
   ],

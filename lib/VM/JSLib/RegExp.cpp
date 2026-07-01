@@ -19,6 +19,8 @@
 #include "hermes/VM/StringPrimitive.h"
 #include "hermes/VM/StringView.h"
 
+#include "llvh/ADT/StringExtras.h"
+
 namespace hermes {
 namespace vm {
 
@@ -67,6 +69,15 @@ HermesValue createRegExpConstructor(Runtime &runtime) {
       proto,
       2,
       lv.cons);
+
+  // ES2025 22.2.5.2.1 RegExp.escape ( S )
+  defineMethod(
+      runtime,
+      lv.cons,
+      Predefined::getSymbolID(Predefined::escape),
+      nullptr,
+      regExpEscape,
+      1);
 
   defineMethod(
       runtime,
@@ -190,6 +201,206 @@ HermesValue createRegExpConstructor(Runtime &runtime) {
   defineGetter(proto, Predefined::flags, regExpFlagsGetter);
 
   return lv.cons.getHermesValue();
+}
+
+/// \return true if \p cp is a RegExp SyntaxCharacter:
+/// one of ^ $ \ . * + ? ( ) [ ] { } |.
+static bool isRegExpSyntaxChar(uint32_t cp) {
+  switch (cp) {
+    case u'^':
+    case u'$':
+    case u'\\':
+    case u'.':
+    case u'*':
+    case u'+':
+    case u'?':
+    case u'(':
+    case u')':
+    case u'[':
+    case u']':
+    case u'{':
+    case u'}':
+    case u'|':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// \return true if \p cp is one of the "other punctuators" that
+/// EncodeForRegExpEscape escapes.
+static bool isOtherPunctuator(uint32_t cp) {
+  switch (cp) {
+    case u',':
+    case u'-':
+    case u'=':
+    case u'<':
+    case u'>':
+    case u'#':
+    case u'&':
+    case u'!':
+    case u'%':
+    case u':':
+    case u';':
+    case u'@':
+    case u'~':
+    case u'\'':
+    case u'`':
+    case u'"':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Append "\xNN" (lowercase hex) to \p R for \p c, which must be <= 0xFF.
+static void appendHexEscape(llvh::SmallVectorImpl<char16_t> &R, uint32_t c) {
+  assert(c <= 0xFF && "appendHexEscape argument out of bounds");
+  R.append(
+      {u'\\',
+       u'x',
+       static_cast<char16_t>(
+           llvh::hexdigit((c >> 4) & 0xf, /* LowerCase */ true)),
+       static_cast<char16_t>(llvh::hexdigit(c & 0xf, /* LowerCase */ true))});
+}
+
+/// Append "\uNNNN" (lowercase hex) to \p R for code unit \p cu.
+static void appendUnicodeEscape(
+    llvh::SmallVectorImpl<char16_t> &R,
+    char16_t cu) {
+  R.append(
+      {u'\\',
+       u'u',
+       static_cast<char16_t>(
+           llvh::hexdigit((cu >> 12) & 0xf, /* LowerCase */ true)),
+       static_cast<char16_t>(
+           llvh::hexdigit((cu >> 8) & 0xf, /* LowerCase */ true)),
+       static_cast<char16_t>(
+           llvh::hexdigit((cu >> 4) & 0xf, /* LowerCase */ true)),
+       static_cast<char16_t>(llvh::hexdigit(cu & 0xf, /* LowerCase */ true))});
+}
+
+/// ES2026 22.2.5.1.1 EncodeForRegExpEscape ( c )
+/// Append the encoding of code point \p cp to \p R.
+static void encodeForRegExpEscape(
+    llvh::SmallVectorImpl<char16_t> &R,
+    uint32_t cp) {
+  // 1. If cp is matched by SyntaxCharacter or cp is U+002F (SOLIDUS), then
+  if (cp == u'/' || isRegExpSyntaxChar(cp)) {
+    // a. Return the string-concatenation of 0x005C (REVERSE SOLIDUS) and
+    // UTF16EncodeCodePoint(cp)
+    R.push_back(u'\\');
+    R.push_back(static_cast<char16_t>(cp));
+    return;
+  }
+  // 2. If cp is a code point listed in the “Code Point” column of Table 62,
+  // then
+  switch (cp) {
+    // a. Return the string-concatenation of 0x005C (REVERSE SOLIDUS) and the
+    // string in the “ControlEscape” column of the row whose “Code Point” column
+    // contains cp.
+    case 0x09:
+      R.push_back(u'\\');
+      R.push_back(u't');
+      return;
+    case 0x0A:
+      R.push_back(u'\\');
+      R.push_back(u'n');
+      return;
+    case 0x0B:
+      R.push_back(u'\\');
+      R.push_back(u'v');
+      return;
+    case 0x0C:
+      R.push_back(u'\\');
+      R.push_back(u'f');
+      return;
+    case 0x0D:
+      R.push_back(u'\\');
+      R.push_back(u'r');
+      return;
+    default:
+      break;
+  }
+  // 3. Let otherPunctuators be the string-concatenation of ",-=<>#&!%:;@~'`"
+  // and the code unit 0x0022 (QUOTATION MARK).
+  // 4. Let toEscape be StringToCodePoints(otherPunctuators).
+  bool needsEscape = isOtherPunctuator(cp);
+  if (!needsEscape && cp <= 0xFFFF) {
+    char16_t c16 = static_cast<char16_t>(cp);
+    needsEscape = isWhiteSpaceChar(c16) || isLineTerminatorChar(c16) ||
+        isHighSurrogate(cp) || isLowSurrogate(cp);
+  }
+  // 5. If toEscape contains cp, cp is matched by either WhiteSpace or
+  // LineTerminator, or cp has the same numeric value as a leading surrogate or
+  // trailing surrogate, then
+  if (needsEscape) {
+    // a. Let cpNum be the numeric value of cp.
+    // b. If cpNum ≤ 0xFF, then
+    if (cp <= 0xFF) {
+      // i. Let hex be Number::toString((cpNum), 16).
+      // ii. Return the string-concatenation of the code unit 0x005C (REVERSE
+      // SOLIDUS), "x", and StringPad(hex, 2, "0", start).
+      appendHexEscape(R, cp);
+      return;
+    }
+    // c. Let escaped be the empty String.
+    // d. Let codeUnits be UTF16EncodeCodePoint(cp).
+    // e. For each code unit cu of codeUnits, do
+    // i. Set escaped to the string-concatenation of escaped and
+    // UnicodeEscape(cu).
+    // f. Return escaped.
+    appendUnicodeEscape(R, static_cast<char16_t>(cp));
+    return;
+  }
+  // 6. Return UTF16EncodeCodePoint(cp).
+  utf16Encoding(cp, R);
+}
+
+/// ES2026 22.2.5.1 RegExp.escape ( S )
+CallResult<HermesValue> regExpEscape(void *, Runtime &runtime) {
+  NativeArgs args = runtime.getCurrentFrame().getNativeArgs();
+  // 1. If S is not a String, throw a TypeError exception.
+  if (LLVM_UNLIKELY(!args.getArg(0).isString())) {
+    return runtime.raiseTypeError("RegExp.escape() argument must be a string");
+  }
+
+  struct : public Locals {
+    PinnedValue<StringPrimitive> string;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.string.castAndSetHermesValue<StringPrimitive>(args.getArg(0));
+
+  // 2. Let escaped be the empty String.
+  uint32_t len = lv.string->getStringLength();
+  SmallU16String<16> escaped{};
+  escaped.reserve(len);
+
+  auto view = StringPrimitive::createStringView(runtime, lv.string);
+  // 3. Let cpList be StringToCodePoints(S).
+  // 4. For each code point c of cpList, do
+  for (uint32_t i = 0; i < len;) {
+    char16_t first = view[i];
+    uint32_t cp = first;
+    if (isHighSurrogate(first) && i + 1 < len && isLowSurrogate(view[i + 1])) {
+      cp = utf16SurrogatePairToCodePoint(first, view[i + 1]);
+      i += 2;
+    } else {
+      ++i;
+    }
+    // 4a. If escaped is the empty String and c is matched by DecimalDigit or
+    // AsciiLetter, escape the leading character as "\xNN". The hex of an ASCII
+    // digit or letter is always exactly 2 digits.
+    if (escaped.empty() && cp < 128 && llvh::isAlnum(static_cast<char>(cp))) {
+      appendHexEscape(escaped, cp);
+    } else {
+      // 4b. Else, append EncodeForRegExpEscape(c).
+      encodeForRegExpEscape(escaped, cp);
+    }
+  }
+
+  // 5. Return escaped.
+  return StringPrimitive::create(runtime, escaped);
 }
 
 /// ES2022 22.2.5.2.4 GetStringIndex ( S, e )
